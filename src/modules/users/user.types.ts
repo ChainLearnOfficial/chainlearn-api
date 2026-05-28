@@ -1,0 +1,35 @@
+import { z } from "zod";
+
+// ─── Request Schemas ────────────────────────────────────────────────────────
+
+export const updateProfileSchema = z.object({
+  displayName: z.string().min(1).max(100).optional(),
+  background: z.string().max(1000).optional(),
+  learningGoal: z.string().max(500).optional(),
+  pace: z.enum(["slow", "medium", "fast"]).optional(),
+  language: z.string().max(10).optional(),
+});
+
+// ─── Types ──────────────────────────────────────────────────────────────────
+
+export type UpdateProfileBody = z.infer<typeof updateProfileSchema>;
+
+export interface UserProfile {
+  id: string;
+  stellarAddress: string;
+  displayName: string | null;
+  background: string | null;
+  learningGoal: string | null;
+  pace: string;
+  language: string;
+  credits: number;
+  createdAt: Date;
+}
+
+export interface UserProgress {
+  enrolledCourses: number;
+  completedCourses: number;
+  totalQuizScore: number;
+  credentialsEarned: number;
+  rewardsClaimed: number;
+}

@@ -77,10 +77,11 @@ export class AuthService {
     signedChallenge: string
   ): Promise<AuthResponse> {
     // Retrieve stored challenge from Redis
-    const storedRaw = await redis.get(
+    // Check that a challenge exists (single-use, must not be consumed yet)
+    const challengeExists = await redis.exists(
       `${CHALLENGE_PREFIX}${stellarAddress}`
     );
-    if (!storedRaw) {
+    if (!challengeExists) {
       throw new UnauthorizedError("Challenge expired or not found");
     }
 

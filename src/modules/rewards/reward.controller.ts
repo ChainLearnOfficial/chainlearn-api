@@ -13,8 +13,12 @@ export class RewardController {
     reply: FastifyReply
   ): Promise<void> {
     const { authUser } = request as AuthenticatedRequest;
-    const { submissionId } = (request as any).validatedBody;
-    const result = await rewardService.claimReward(authUser.id, submissionId);
+    const { submissionId, idempotencyKey } = (request as any).validatedBody;
+    const result = await rewardService.claimReward(
+      authUser.id,
+      submissionId,
+      idempotencyKey
+    );
 
     reply.send({ success: true, data: result });
   }

@@ -13,11 +13,12 @@ export class CredentialController {
     reply: FastifyReply
   ): Promise<void> {
     const { authUser } = request as AuthenticatedRequest;
-    const { courseId, submissionId } = (request as any).validatedBody;
+    const { courseId, submissionId, idempotencyKey } = (request as any).validatedBody;
     const result = await credentialService.mint(
       authUser.id,
       courseId,
-      submissionId
+      submissionId,
+      idempotencyKey
     );
 
     reply.status(201).send({ success: true, data: result });

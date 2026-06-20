@@ -131,3 +131,28 @@ export const credentials = pgTable("credentials", {
     .notNull()
     .defaultNow(),
 });
+
+// ─── Idempotency Keys ──────────────────────────────────────────────────────
+
+export const idempotencyKeys = pgTable(
+  "idempotency_keys",
+  {
+    key: varchar("key", { length: 64 }).primaryKey(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    endpoint: varchar("endpoint", { length: 255 }).notNull(),
+    requestHash: varchar("request_hash", { length: 64 }).notNull(),
+    responseStatus: integer("response_status"),
+    responseBody: jsonb("response_body"),
+    txHash: varchar("tx_hash", { length: 64 }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    index("idx_idempotency_expires").on(table.expiresAt),
+    index("idx_idempotency_user_endpoint").on(table.userId, table.endpoint),
+  ]
+);

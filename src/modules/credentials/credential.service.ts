@@ -15,6 +15,12 @@ import { logger } from "../../utils/logger.js";
 import crypto from "node:crypto";
 import StellarSdk from "@stellar/stellar-sdk";
 import type { MintResult, CredentialListItem } from "./credential.types.js";
+import {
+  deleteIdempotencyKey,
+  reserveIdempotencyKey,
+  storeIdempotentResponse,
+  storeIdempotencyTxHash,
+} from "../../middleware/idempotency.js";
 
 export class CredentialService {
   /**
@@ -24,7 +30,8 @@ export class CredentialService {
   async mint(
     userId: string,
     courseId: string,
-    submissionId: string
+    submissionId: string,
+    idempotencyKey?: string
   ): Promise<MintResult> {
     // Verify the submission exists and belongs to the user
     const submission = await db.query.quizSubmissions.findFirst({
@@ -54,8 +61,22 @@ export class CredentialService {
       throw new ConflictError("Credential already minted for this course");
     }
 
+    const idempotency = idempotencyKey
+      ? await reserveIdempotencyKey({
+          key: idempotencyKey,
+          userId,
+          endpoint: "/api/credentials/mint",
+          requestBody: { courseId, submissionId, idempotencyKey },
+        })
+      : null;
+
+    if (idempotency?.state === "cached") {
+      return idempotency.record.responseBody as MintResult;
+    }
+
+    const nftAssetCode = deriveNftAssetCode(idempotencyKey ?? `${userId}:${courseId}:${submissionId}`);
+
     // Generate NFT identifiers
-    const nftAssetCode = `CL${crypto.randomBytes(4).toString("hex").toUpperCase()}`;
     const user = await db.query.users.findFirst({
       where: eq(users.id, userId),
     });
@@ -69,47 +90,78 @@ export class CredentialService {
 
     // Call the on-chain credential contract
     let txHash: string;
+    let onChainSucceeded = false;
     try {
-      txHash = await invokeContract(
-        config.STELLAR_CREDENTIAL_CONTRACT_ID,
-        "mint_credential",
-        [
-          StellarSdk.Address.fromString(user.stellarAddress).toScVal(),
-          StellarSdk.nativeToScVal(nftAssetCode),
-          StellarSdk.nativeToScVal(submission.score, { type: "u32" }),
-          StellarSdk.nativeToScVal(Buffer.from(auth.signature, "base64")),
-        ]
-      );
-    } catch (err) {
-      logger.error({ err, userId, courseId }, "On-chain credential mint failed");
-      throw new Error("Failed to mint credential on-chain");
-    }
+      if (idempotency?.state === "resume" && idempotency.record.txHash) {
+        txHash = idempotency.record.txHash;
+      } else {
+        txHash = await invokeContract(
+          config.STELLAR_CREDENTIAL_CONTRACT_ID,
+          "mint_credential",
+          [
+            StellarSdk.Address.fromString(user.stellarAddress).toScVal(),
+            StellarSdk.nativeToScVal(nftAssetCode),
+            StellarSdk.nativeToScVal(submission.score, { type: "u32" }),
+            StellarSdk.nativeToScVal(Buffer.from(auth.signature, "base64")),
+          ]
+        );
+        onChainSucceeded = true;
+      }
 
-    // Store credential in database
-    const [credential] = await db
-      .insert(credentials)
-      .values({
-        userId,
-        courseId,
-        score: submission.score,
+      if (idempotencyKey) {
+        await storeIdempotencyTxHash(idempotencyKey, txHash);
+      }
+
+      const existingCredential = await db.query.credentials.findFirst({
+        where: and(
+          eq(credentials.userId, userId),
+          eq(credentials.courseId, courseId)
+        ),
+      });
+
+      let credentialId = existingCredential?.id;
+      if (!existingCredential) {
+        const [credential] = await db
+          .insert(credentials)
+          .values({
+            userId,
+            courseId,
+            score: submission.score,
+            nftAssetCode,
+            nftIssuer: user.stellarAddress,
+            mintTxHash: txHash,
+          })
+          .returning();
+
+        credentialId = credential.id;
+      }
+
+      const result: MintResult = {
+        credentialId: credentialId!,
         nftAssetCode,
         nftIssuer: user.stellarAddress,
         mintTxHash: txHash,
-      })
-      .returning();
+        message: "Course completion credential minted successfully",
+      };
 
-    logger.info(
-      { credentialId: credential.id, userId, courseId, txHash },
-      "Credential minted"
-    );
+      if (idempotencyKey) {
+        await storeIdempotentResponse(idempotencyKey, 201, result);
+      }
 
-    return {
-      credentialId: credential.id,
-      nftAssetCode,
-      nftIssuer: user.stellarAddress,
-      mintTxHash: txHash,
-      message: "Course completion credential minted successfully",
-    };
+      logger.info(
+        { credentialId: credentialId!, userId, courseId, txHash },
+        "Credential minted"
+      );
+
+      return result;
+    } catch (err) {
+      if (!onChainSucceeded && idempotencyKey) {
+        await deleteIdempotencyKey(idempotencyKey);
+      }
+
+      logger.error({ err, userId, courseId }, "On-chain credential mint failed");
+      throw new Error("Failed to mint credential on-chain");
+    }
   }
 
   /**
@@ -134,6 +186,17 @@ export class CredentialService {
 
     return rows;
   }
+}
+
+function deriveNftAssetCode(seed: string): string {
+  const suffix = crypto
+    .createHash("sha256")
+    .update(seed)
+    .digest("hex")
+    .slice(0, 8)
+    .toUpperCase();
+
+  return `CL${suffix}`;
 }
 
 export const credentialService = new CredentialService();

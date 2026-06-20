@@ -2,19 +2,24 @@ import { retry, handleType, ExponentialBackoff } from "cockatiel";
 import { logger } from "../utils/logger.js";
 
 function isTransientError(err: Error): boolean {
+  const name = err.name ?? "";
   const msg = err.message ?? "";
-  return (
+
+  if (name === "FetchError" || name === "HttpError") return true;
+  if (
     msg.includes("ECONNREFUSED") ||
     msg.includes("ETIMEDOUT") ||
     msg.includes("ECONNRESET") ||
     msg.includes("ENOTFOUND") ||
-    msg.includes("502") ||
-    msg.includes("503") ||
-    msg.includes("504") ||
-    msg.includes("network") ||
-    msg.includes("timeout") ||
-    msg.includes("Connection errored")
-  );
+    msg.includes("socket hang up")
+  ) {
+    return true;
+  }
+
+  const statusMatch = msg.match(/\b(502|503|504)\b/);
+  if (statusMatch) return true;
+
+  return false;
 }
 
 export const stellarRetry = retry(
@@ -28,7 +33,7 @@ export const stellarRetry = retry(
   { backoff: new ExponentialBackoff() }
 );
 
-// Manual circuit breaker implementation
+// Circuit breaker implementation
 export enum CircuitState {
   Closed = "Closed",
   Open = "Open",
@@ -66,6 +71,12 @@ export function getCircuitState(): CircuitState {
     }
   }
   return circuitState;
+}
+
+export function resetCircuitBreaker(): void {
+  circuitState = CircuitState.Closed;
+  failureCount = 0;
+  lastFailureTime = 0;
 }
 
 export async function circuitBreakerExecute<T>(fn: () => Promise<T>): Promise<T> {

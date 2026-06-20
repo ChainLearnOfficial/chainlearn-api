@@ -2,6 +2,7 @@ import { eq, and } from "drizzle-orm";
 import { db } from "../../config/database.js";
 import { quizzes, quizSubmissions, enrollments } from "../../database/schema.js";
 import { NotFoundError, ForbiddenError, ConflictError } from "../../utils/errors.js";
+import { withLock } from "../../utils/lock.js";
 import { createQuizProof } from "../../stellar/signatures.js";
 import { logger } from "../../utils/logger.js";
 import type {
@@ -95,96 +96,106 @@ export class QuizService {
 
   /**
    * Submit answers for a quiz and calculate the score.
+   * Uses distributed locking + database transaction with row-level lock
+   * to prevent duplicate submissions from concurrent requests.
    */
   async submitQuiz(
     userId: string,
     quizId: string,
     data: SubmitQuizBody
   ): Promise<QuizSubmissionResult> {
-    const quiz = await db.query.quizzes.findFirst({
-      where: eq(quizzes.id, quizId),
-    });
+    return withLock(`quiz:${quizId}:${userId}`, async () => {
+      return db.transaction(async (tx) => {
+        const [quiz] = await tx
+          .select()
+          .from(quizzes)
+          .where(eq(quizzes.id, quizId));
 
-    if (!quiz) {
-      throw new NotFoundError("Quiz");
-    }
+        if (!quiz) {
+          throw new NotFoundError("Quiz");
+        }
 
-    // Check if user already submitted this quiz
-    const existingSubmission = await db.query.quizSubmissions.findFirst({
-      where: and(
-        eq(quizSubmissions.quizId, quizId),
-        eq(quizSubmissions.userId, userId)
-      ),
-    });
+        const [existingSubmission] = await tx
+          .select()
+          .from(quizSubmissions)
+          .where(
+            and(
+              eq(quizSubmissions.quizId, quizId),
+              eq(quizSubmissions.userId, userId)
+            )
+          )
+          .for("update");
 
-    if (existingSubmission) {
-      throw new ConflictError("Quiz already submitted");
-    }
+        if (existingSubmission) {
+          throw new ConflictError("Quiz already submitted");
+        }
 
-    // Grade the quiz
-    const questions = quiz.questions as Array<{
-      id: string;
-      text: string;
-      options: string[];
-      correctIndex: number;
-    }>;
+        // Grade the quiz
+        const questions = quiz.questions as Array<{
+          id: string;
+          text: string;
+          options: string[];
+          correctIndex: number;
+        }>;
 
-    let correctCount = 0;
-    const feedbackParts: string[] = [];
+        let correctCount = 0;
+        const feedbackParts: string[] = [];
 
-    for (const answer of data.answers) {
-      const question = questions.find((q) => q.id === answer.questionId);
-      if (!question) continue;
+        for (const answer of data.answers) {
+          const question = questions.find((q) => q.id === answer.questionId);
+          if (!question) continue;
 
-      if (answer.selectedIndex === question.correctIndex) {
-        correctCount++;
-        feedbackParts.push(`Q: "${question.text}" - Correct!`);
-      } else {
-        feedbackParts.push(
-          `Q: "${question.text}" - Incorrect. The correct answer was: "${question.options[question.correctIndex]}"`
+          if (answer.selectedIndex === question.correctIndex) {
+            correctCount++;
+            feedbackParts.push(`Q: "${question.text}" - Correct!`);
+          } else {
+            feedbackParts.push(
+              `Q: "${question.text}" - Incorrect. The correct answer was: "${question.options[question.correctIndex]}"`
+            );
+          }
+        }
+
+        const totalQuestions = questions.length;
+        const percentage = Math.round((correctCount / totalQuestions) * 100);
+        const passed = percentage >= PASSING_PERCENTAGE;
+
+        // Generate proof signature for reward claiming
+        const proof = passed
+          ? createQuizProof(userId, quizId, correctCount)
+          : null;
+
+        const [submission] = await tx
+          .insert(quizSubmissions)
+          .values({
+            quizId,
+            userId,
+            answers: data.answers,
+            score: correctCount,
+            feedback: feedbackParts.join("\n"),
+          })
+          .returning();
+
+        logger.info(
+          {
+            submissionId: submission.id,
+            score: correctCount,
+            total: totalQuestions,
+            passed,
+          },
+          "Quiz submitted"
         );
-      }
-    }
 
-    const totalQuestions = questions.length;
-    const percentage = Math.round((correctCount / totalQuestions) * 100);
-    const passed = percentage >= PASSING_PERCENTAGE;
-
-    // Generate proof signature for reward claiming
-    const proof = passed
-      ? createQuizProof(userId, quizId, correctCount)
-      : null;
-
-    const [submission] = await db
-      .insert(quizSubmissions)
-      .values({
-        quizId,
-        userId,
-        answers: data.answers,
-        score: correctCount,
-        feedback: feedbackParts.join("\n"),
-      })
-      .returning();
-
-    logger.info(
-      {
-        submissionId: submission.id,
-        score: correctCount,
-        total: totalQuestions,
-        passed,
-      },
-      "Quiz submitted"
-    );
-
-    return {
-      id: submission.id,
-      score: correctCount,
-      totalQuestions,
-      percentage,
-      passed,
-      feedback: submission.feedback ?? "",
-      rewardAvailable: passed,
-    };
+        return {
+          id: submission.id,
+          score: correctCount,
+          totalQuestions,
+          percentage,
+          passed,
+          feedback: submission.feedback ?? "",
+          rewardAvailable: passed,
+        };
+      });
+    });
   }
 
   private createPlaceholderQuestions(

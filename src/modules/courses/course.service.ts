@@ -2,6 +2,7 @@ import { eq, and, count, desc } from "drizzle-orm";
 import { db } from "../../config/database.js";
 import { courses, enrollments } from "../../database/schema.js";
 import { NotFoundError, ConflictError } from "../../utils/errors.js";
+import { withLock } from "../../utils/lock.js";
 import type {
   ListCoursesQuery,
   CourseSummary,
@@ -46,7 +47,6 @@ export class CourseService {
         })
         .from(enrollments)
         .where(
-          // Using inArray would be cleaner, but we'll keep it simple
           eq(enrollments.courseId, courseIds[0])
         )
         .groupBy(enrollments.courseId);
@@ -120,26 +120,35 @@ export class CourseService {
   }
 
   async enroll(userId: string, courseId: string): Promise<void> {
-    const course = await db.query.courses.findFirst({
-      where: eq(courses.id, courseId),
+    return withLock(`enroll:${userId}:${courseId}`, async () => {
+      return db.transaction(async (tx) => {
+        const [course] = await tx
+          .select()
+          .from(courses)
+          .where(eq(courses.id, courseId));
+
+        if (!course || !course.isActive) {
+          throw new NotFoundError("Course");
+        }
+
+        const [existing] = await tx
+          .select()
+          .from(enrollments)
+          .where(
+            and(
+              eq(enrollments.userId, userId),
+              eq(enrollments.courseId, courseId)
+            )
+          )
+          .for("update");
+
+        if (existing) {
+          throw new ConflictError("Already enrolled in this course");
+        }
+
+        await tx.insert(enrollments).values({ userId, courseId });
+      });
     });
-
-    if (!course || !course.isActive) {
-      throw new NotFoundError("Course");
-    }
-
-    const existing = await db.query.enrollments.findFirst({
-      where: and(
-        eq(enrollments.userId, userId),
-        eq(enrollments.courseId, courseId)
-      ),
-    });
-
-    if (existing) {
-      throw new ConflictError("Already enrolled in this course");
-    }
-
-    await db.insert(enrollments).values({ userId, courseId });
   }
 }
 

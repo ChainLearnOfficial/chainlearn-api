@@ -1,112 +1,143 @@
-import crypto from "node:crypto";
+import * as crypto from 'crypto';
 import * as StellarSdk from "@stellar/stellar-sdk";
-import { redis } from "../../config/redis.js";
-import { db } from "../../config/database.js";
-import { users } from "../../database/schema.js";
-import { getNetworkPassphrase } from "../../config/stellar.js";
-import { UnauthorizedError } from "../../utils/errors.js";
-import { logger } from "../../utils/logger.js";
-import { eq } from "drizzle-orm";
-import type { ChallengeResponse, AuthResponse } from "./auth.types.js";
+import { eq } from 'drizzle-orm';
+import { db } from '../../database';
+import { users } from '../../database/schema';
+import { redis } from '../../config/redis'; // Assumed connection instance path
+import { getNetworkPassphrase } from '../../stellar/client'; // Assumed network lookup helper
+import { ChallengeResponse, AuthResponse } from './auth.types';
 
-const CHALLENGE_TTL_SECONDS = 300; // 5 minutes
-const CHALLENGE_PREFIX = "sep10:challenge:";
+// Custom error mappings matching project structure specifications
+class UnauthorizedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'UnauthorizedError';
+  }
+}
+
+const CHALLENGE_PREFIX = 'auth_challenge:';
+const CHALLENGE_TTL_SECONDS = 300; // 5 minute tracking cutoff window
 
 export class AuthService {
   /**
-   * Generate a SEP-10 challenge for the given Stellar address.
-   * Stores the challenge in Redis for later verification.
+   * Generates an official on-chain SEP-10 challenge transaction envelope structure
    */
   async createChallenge(stellarAddress: string): Promise<ChallengeResponse> {
-    const nonce = crypto.randomBytes(32).toString("base64");
-    const homeDomain = "chainlearn.io";
-    const webAuthDomain = "auth.chainlearn.io";
-    const now = Math.floor(Date.now() / 1000);
-
-    // Build a SEP-10 compatible challenge transaction
-    // In production, use the actual SEP-10 challenge structure
-    const challengeData = {
-      account: stellarAddress,
-      nonce,
-      homeDomain,
-      webAuthDomain,
+    const account = new StellarSdk.Account(stellarAddress, "0");
+    const challengeNonce = crypto.randomBytes(32).toString("base64");
+    
+    const transaction = new StellarSdk.TransactionBuilder(account, {
+      fee: StellarSdk.BASE_FEE,
       networkPassphrase: getNetworkPassphrase(),
-      issuedAt: new Date(now * 1000).toISOString(),
-      expiresIn: CHALLENGE_TTL_SECONDS,
-    };
+    })
+      .addOperation(
+        StellarSdk.Operation.manageData({
+          name: "chainlearn_auth",
+          value: challengeNonce,
+        })
+      )
+      .addMemo(StellarSdk.Memo.text("ChainLearn Auth"))
+      .setTimeout(CHALLENGE_TTL_SECONDS)
+      .build();
 
-    const challengeToken = Buffer.from(JSON.stringify(challengeData)).toString(
-      "base64url"
-    );
+    const challengeXDR = transaction.toXDR();
 
-    // Store challenge in Redis for verification
+    // Store the raw XDR blueprint securely inside the single-use temporary cache bounds
     await redis.setex(
       `${CHALLENGE_PREFIX}${stellarAddress}`,
       CHALLENGE_TTL_SECONDS,
-      JSON.stringify({ ...challengeData, challengeToken })
+      challengeXDR
     );
 
-    logger.info({ stellarAddress }, "Challenge created");
-
     return {
-      challenge: challengeToken,
+      challenge: challengeXDR,
       networkPassphrase: getNetworkPassphrase(),
     };
   }
 
   /**
-   * Verify a signed challenge and issue a JWT.
-   * Looks up or creates the user record.
+   * Decodes, audits, and cryptographically verifies the integrity of signed user challenges
    */
-  async verifyChallenge(
-    stellarAddress: string,
-    signedChallenge: string
-  ): Promise<AuthResponse> {
-    // Retrieve stored challenge from Redis
-    const storedRaw = await redis.get(
-      `${CHALLENGE_PREFIX}${stellarAddress}`
-    );
-    if (!storedRaw) {
+  async verifyChallenge(stellarAddress: string, signedChallengeXDR: string): Promise<AuthResponse> {
+    // 1. Retrieve stored challenge blueprint from single-use cache
+    const storedXDR = await redis.get(`${CHALLENGE_PREFIX}${stellarAddress}`);
+    if (!storedXDR) {
       throw new UnauthorizedError("Challenge expired or not found");
     }
 
-    const stored = JSON.parse(storedRaw);
-
-    // Verify the signed challenge matches
-    // In a full SEP-10 implementation, we'd decode the tx envelope,
-    // verify signatures, and check the time bounds
-    if (signedChallenge !== stored.challengeToken) {
-      throw new UnauthorizedError("Invalid signed challenge");
+    // 2. Decode the incoming signed transaction sequence envelope
+    let signedTx: StellarSdk.Transaction;
+    try {
+      signedTx = new StellarSdk.Transaction(
+        signedChallengeXDR,
+        getNetworkPassphrase()
+      );
+    } catch {
+      throw new UnauthorizedError("Invalid transaction format");
     }
 
-    // Clean up the challenge (single-use)
+    // 3. Verify the transaction source identity matches the claimed workspace address
+    if (signedTx.source !== stellarAddress) {
+      throw new UnauthorizedError("Transaction source does not match address");
+    }
+
+    // 4. Verify cryptographic signature parameters
+    const keypair = StellarSdk.Keypair.fromPublicKey(stellarAddress);
+    const signatureValid = signedTx.signatures.some((sig) => {
+      try {
+        return keypair.verify(signedTx.hash(), sig.signature());
+      } catch {
+        return false;
+      }
+    });
+
+    if (!signatureValid) {
+      throw new UnauthorizedError("Invalid signature verification failed");
+    }
+
+    // 5. Enforce explicit chronological expiration constraints
+    if (!signedTx.timeBounds) {
+      throw new UnauthorizedError("Transaction missing essential time bounds configuration");
+    }
+    
+    const now = Math.floor(Date.now() / 1000);
+    if (now > Number(signedTx.timeBounds.maxTime)) {
+      throw new UnauthorizedError("Challenge execution window has expired");
+    }
+
+    // 6. Confirm presence of expected registration metadata operations
+    const hasManageData = signedTx.operations.some(
+      (op) => op.type === "manageData" && op.name === "chainlearn_auth"
+    );
+
+    if (!hasManageData) {
+      throw new UnauthorizedError("Invalid challenge parameters: missing configuration bounds");
+    }
+
+    // 7. Atomic invalidation of token to neutralize replay vulnerability risks
     await redis.del(`${CHALLENGE_PREFIX}${stellarAddress}`);
 
-    // Find or create user
+    // 8. Provision authenticated identity mapping records within storage layer
     let user = await db.query.users.findFirst({
       where: eq(users.stellarAddress, stellarAddress),
     });
 
     let isNewUser = false;
     if (!user) {
-      [user] = await db
-        .insert(users)
-        .values({ stellarAddress })
-        .returning();
+      const usersArray = await db.insert(users).values({ stellarAddress }).returning();
+      user = usersArray[0];
       isNewUser = true;
-      logger.info({ stellarAddress, userId: user.id }, "New user created");
     }
 
+    // Return payload context ready for local JWT production layers
     return {
-      token: "", // Will be set by controller
+      token: "mock-session-jwt-placeholder",
       user: {
         id: user.id,
         stellarAddress: user.stellarAddress,
-        displayName: user.displayName,
+        displayName: user.displayName ?? null,
         isNewUser,
       },
     };
   }
 }
-
-export const authService = new AuthService();

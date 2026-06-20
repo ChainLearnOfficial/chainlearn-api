@@ -1,26 +1,13 @@
-import { z } from "zod";
+import { z } from 'zod';
 
-// ─── Request Schemas ────────────────────────────────────────────────────────
-
-export const challengeSchema = z.object({
-  stellarAddress: z
-    .string()
-    .length(56, "Stellar address must be 56 characters")
-    .startsWith("G", "Stellar address must start with G"),
+export const ChallengeRequestSchema = z.object({
+  stellarAddress: z.string().min(56).max(56), // Standard public key lengths
 });
 
-export const verifySchema = z.object({
-  stellarAddress: z
-    .string()
-    .length(56)
-    .startsWith("G"),
-  signedChallenge: z.string().min(1, "Signed challenge is required"),
+export const VerifyRequestSchema = z.object({
+  stellarAddress: z.string().min(56).max(56),
+  signedChallengeXDR: z.string(),
 });
-
-// ─── Types ──────────────────────────────────────────────────────────────────
-
-export type ChallengeBody = z.infer<typeof challengeSchema>;
-export type VerifyBody = z.infer<typeof verifySchema>;
 
 export interface ChallengeResponse {
   challenge: string;

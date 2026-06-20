@@ -14,6 +14,7 @@ pool.on("error", (err) => {
   console.error("Unexpected PG pool error:", err);
 });
 
+export { pool };
 export const db = drizzle(pool, { schema });
 
 export async function closeDatabase(): Promise<void> {

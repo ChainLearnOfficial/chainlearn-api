@@ -16,6 +16,8 @@ import { logger } from "../../utils/logger.js";
 import { enqueueReward } from "../../services/retry-queue.js";
 import StellarSdk from "@stellar/stellar-sdk";
 import type { RewardClaimResult, RewardHistoryItem } from "./reward.types.js";
+import { auditLog } from "../../audit/index.js";
+import { stellarTxDurationSeconds, rewardClaimsTotal } from "../../metrics/index.js";
 
 const REWARD_AMOUNT = 10; // credits per passed quiz
 
@@ -54,15 +56,29 @@ export async function processRewardClaim(
 
   if (!user) return true;
 
-  const txHash = await invokeContract(
-    config.STELLAR_REWARD_CONTRACT_ID,
-    "claim_reward",
-    [
-      StellarSdk.Address.fromString(user.stellarAddress).toScVal(),
-      StellarSdk.nativeToScVal(score, { type: "u32" }),
-      StellarSdk.nativeToScVal(Buffer.from(proof.signature, "base64")),
-    ]
-  );
+  const txStart = process.hrtime.bigint();
+  let txHash: string;
+  try {
+    txHash = await invokeContract(
+      config.STELLAR_REWARD_CONTRACT_ID,
+      "claim_reward",
+      [
+        StellarSdk.Address.fromString(user.stellarAddress).toScVal(),
+        StellarSdk.nativeToScVal(score, { type: "u32" }),
+        StellarSdk.nativeToScVal(Buffer.from(proof.signature, "base64")),
+      ]
+    );
+    stellarTxDurationSeconds.observe(
+      { method: "claim_reward", status: "success" },
+      Number(process.hrtime.bigint() - txStart) / 1e9
+    );
+  } catch (err) {
+    stellarTxDurationSeconds.observe(
+      { method: "claim_reward", status: "error" },
+      Number(process.hrtime.bigint() - txStart) / 1e9
+    );
+    throw err;
+  }
 
   await db
     .update(quizSubmissions)
@@ -155,6 +171,8 @@ export class RewardService {
               "Stellar circuit breaker open — queuing reward for later"
             );
             await enqueueReward({ submissionId, userId, score: submission.score });
+            rewardClaimsTotal.inc({ status: "queued" });
+            auditLog("reward.queued", { userId, submissionId, amount: REWARD_AMOUNT, queued: true });
             return {
               submissionId,
               amount: REWARD_AMOUNT,
@@ -180,6 +198,8 @@ export class RewardService {
           })
           .where(eq(users.id, userId));
 
+        rewardClaimsTotal.inc({ status: "success" });
+        auditLog("reward.claimed", { userId, submissionId, txHash, amount: REWARD_AMOUNT });
         logger.info(
           { userId, submissionId, txHash, amount: REWARD_AMOUNT },
           "Reward claimed"

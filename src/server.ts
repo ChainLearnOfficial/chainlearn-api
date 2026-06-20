@@ -1,3 +1,6 @@
+import { initTracing, shutdownTracing } from "./tracing.js";
+initTracing();
+
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import jwt from "@fastify/jwt";
@@ -5,6 +8,8 @@ import rateLimit from "@fastify/rate-limit";
 import { sql } from "drizzle-orm";
 import { config } from "./config/index.js";
 import { logger } from "./utils/logger.js";
+import { registry, setupInfraMetrics } from "./metrics/index.js";
+import { registerMetricsHook } from "./metrics/fastify-hook.js";
 import { registerErrorHandler } from "./middleware/error-handler.js";
 import { rateLimitOptions } from "./middleware/rate-limit.js";
 import { db } from "./config/database.js";
@@ -26,7 +31,7 @@ import { rewardRoutes } from "./modules/rewards/reward.routes.js";
 import { credentialRoutes } from "./modules/credentials/credential.routes.js";
 
 // Shutdown helpers
-import { closeDatabase } from "./config/database.js";
+import { pool, closeDatabase } from "./config/database.js";
 import { closeRedis } from "./config/redis.js";
 
 async function processRetryJob(job: RetryJob): Promise<boolean> {
@@ -75,6 +80,10 @@ async function buildApp() {
 
   await app.register(rateLimit, rateLimitOptions());
 
+  // ─── Observability ──────────────────────────────────────────────────────
+  setupInfraMetrics(pool, redis);
+  registerMetricsHook(app);
+
   // ─── Error Handler ──────────────────────────────────────────────────────
   registerErrorHandler(app);
 
@@ -102,6 +111,11 @@ async function buildApp() {
         stellar: stellarCheck.status === "fulfilled" ? "ok" : "error",
       },
     });
+  });
+
+  app.get("/metrics", async (_request, reply) => {
+    reply.header("Content-Type", registry.contentType);
+    return reply.send(await registry.metrics());
   });
 
   app.get("/health/live", async () => ({ status: "ok" }));
@@ -149,6 +163,7 @@ async function start() {
     await app.close();
     await closeDatabase();
     await closeRedis();
+    await shutdownTracing();
     logger.info("Server shut down cleanly");
     process.exit(0);
   };

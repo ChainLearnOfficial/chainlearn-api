@@ -6,6 +6,7 @@ import { config } from "./config/index.js";
 import { logger } from "./utils/logger.js";
 import { registerErrorHandler } from "./middleware/error-handler.js";
 import { rateLimitOptions } from "./middleware/rate-limit.js";
+import { startIdempotencyCleanupJob } from "./jobs/cleanup-idempotency.js";
 
 // Route modules
 import { authRoutes } from "./modules/auth/auth.routes.js";
@@ -68,10 +69,12 @@ async function buildApp() {
 
 async function start() {
   const app = await buildApp();
+  const stopIdempotencyCleanup = startIdempotencyCleanupJob();
 
   // Graceful shutdown
   const shutdown = async (signal: string) => {
     logger.info({ signal }, "Received shutdown signal");
+    stopIdempotencyCleanup();
     await app.close();
     await closeDatabase();
     await closeRedis();

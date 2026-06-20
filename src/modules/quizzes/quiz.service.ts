@@ -4,6 +4,11 @@ import { quizzes, quizSubmissions, enrollments } from "../../database/schema.js"
 import { NotFoundError, ForbiddenError, ConflictError } from "../../utils/errors.js";
 import { createQuizProof } from "../../stellar/signatures.js";
 import { logger } from "../../utils/logger.js";
+import {
+  generateQuizFromAI,
+  normalizeAiQuizQuestions,
+  type QuizQuestionForStorage,
+} from "./ai-client.js";
 import type {
   GenerateQuizBody,
   SubmitQuizBody,
@@ -63,11 +68,8 @@ export class QuizService {
       };
     }
 
-    // Generate new quiz (placeholder — would call AI service)
-    const generatedQuestions = this.createPlaceholderQuestions(
-      data.courseId,
-      data.moduleId
-    );
+    // Generate new quiz (placeholder - would call AI service)
+    const generatedQuestions = await this.generateQuestions(userId, data);
 
     const [quiz] = await db
       .insert(quizzes)
@@ -187,11 +189,33 @@ export class QuizService {
     };
   }
 
+  private async generateQuestions(
+    userId: string,
+    data: GenerateQuizBody
+  ): Promise<QuizQuestionForStorage[]> {
+    try {
+      const aiQuestions = await generateQuizFromAI({
+        userId,
+        courseId: data.courseId,
+        moduleId: data.moduleId,
+        difficulty: data.difficulty ?? "beginner",
+        numQuestions: data.numQuestions ?? 5,
+      });
+      return normalizeAiQuizQuestions(aiQuestions);
+    } catch (err) {
+      logger.warn(
+        { err, courseId: data.courseId, moduleId: data.moduleId },
+        "AI service unavailable, using placeholder questions"
+      );
+      return this.createPlaceholderQuestions(data.courseId, data.moduleId);
+    }
+  }
+
   private createPlaceholderQuestions(
     courseId: string,
     moduleId: string
-  ) {
-    // Placeholder quiz generation — in production, call an LLM or content service
+  ): QuizQuestionForStorage[] {
+    // Placeholder quiz generation - in production, call an LLM or content service
     return [
       {
         id: "q1",

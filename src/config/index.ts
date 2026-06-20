@@ -14,6 +14,9 @@ const envSchema = z.object({
   // Redis
   REDIS_URL: z.string().default("redis://localhost:6379"),
 
+  // AI service
+  AI_SERVICE_URL: z.string().url().default("http://localhost:8000"),
+
   // JWT
   JWT_SECRET: z.string().min(32),
 

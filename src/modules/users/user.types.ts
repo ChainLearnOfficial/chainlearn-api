@@ -1,11 +1,28 @@
 import { z } from "zod";
+import { sanitizeText } from "../../utils/sanitize.js";
 
 // ─── Request Schemas ────────────────────────────────────────────────────────
 
+// Sanitize free-text fields after length validation so stored content can
+// never contain HTML/script payloads. Length is checked first (on raw input),
+// then HTML is stripped.
 export const updateProfileSchema = z.object({
-  displayName: z.string().min(1).max(100).optional(),
-  background: z.string().max(1000).optional(),
-  learningGoal: z.string().max(500).optional(),
+  displayName: z
+    .string()
+    .min(1)
+    .max(100)
+    .optional()
+    .transform((v) => (v ? sanitizeText(v) : v)),
+  background: z
+    .string()
+    .max(1000)
+    .optional()
+    .transform((v) => (v ? sanitizeText(v) : v)),
+  learningGoal: z
+    .string()
+    .max(500)
+    .optional()
+    .transform((v) => (v ? sanitizeText(v) : v)),
   pace: z.enum(["slow", "medium", "fast"]).optional(),
   language: z.string().max(10).optional(),
 });

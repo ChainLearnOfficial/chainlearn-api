@@ -64,6 +64,10 @@ async function buildApp() {
   });
 
   // ─── Plugins ────────────────────────────────────────────────────────────
+  // CSRF note: auth is via the `Authorization: Bearer` header, which is
+  // CSRF-safe (cross-site requests can't set custom headers). `credentials:
+  // true` only matters if auth ever moves to cookies — if it does, add a CSRF
+  // token (e.g. @fastify/csrf-protection) and restrict the origin list.
   await app.register(cors, {
     origin: config.NODE_ENV === "production" ? ["https://chainlearn.io"] : true,
     credentials: true,

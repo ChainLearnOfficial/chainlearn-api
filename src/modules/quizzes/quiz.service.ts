@@ -6,6 +6,7 @@ import { withLock } from "../../utils/lock.js";
 import { createQuizProof } from "../../stellar/signatures.js";
 import { logger } from "../../utils/logger.js";
 import { generateQuizFromAI } from "./ai-client.js";
+import { sanitizeQuizFeedback } from "../../utils/sanitize.js";
 import { auditLog } from "../../audit/index.js";
 import { quizSubmissionsTotal } from "../../metrics/index.js";
 import type {
@@ -174,10 +175,14 @@ export class QuizService {
 
           if (answer.selectedIndex === question.correctIndex) {
             correctCount++;
-            feedbackParts.push(`Q: "${question.text}" - Correct!`);
+            feedbackParts.push(
+              sanitizeQuizFeedback(`Q: "${question.text}" - Correct!`)
+            );
           } else {
             feedbackParts.push(
-              `Q: "${question.text}" - Incorrect. The correct answer was: "${question.options[question.correctIndex]}"`
+              sanitizeQuizFeedback(
+                `Q: "${question.text}" - Incorrect. The correct answer was: "${question.options[question.correctIndex]}"`
+              )
             );
           }
         }

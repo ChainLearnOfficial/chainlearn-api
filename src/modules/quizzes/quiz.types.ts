@@ -13,11 +13,13 @@ export const submitQuizSchema = z.object({
   answers: z
     .array(
       z.object({
-        questionId: z.string().min(1),
-        selectedIndex: z.number().int().min(0),
+        questionId: z.string().min(1).max(100),
+        // Bound the index so out-of-range values can't be submitted.
+        selectedIndex: z.number().int().min(0).max(20),
       })
     )
-    .min(1, "At least one answer is required"),
+    .min(1, "At least one answer is required")
+    .max(50, "Too many answers"),
 });
 
 export const quizIdParamsSchema = z.object({

@@ -14,8 +14,15 @@ const envSchema = z.object({
   // Redis
   REDIS_URL: z.string().default("redis://localhost:6379"),
 
-  // JWT
-  JWT_SECRET: z.string().min(32),
+  // JWT — OWASP recommends 256 bits (>= 64 chars) and a non-placeholder value.
+  JWT_SECRET: z
+    .string()
+    .min(64, "JWT_SECRET must be at least 64 characters (256 bits)")
+    .refine(
+      (val) =>
+        val !== "your-secret-key" && !val.includes("change-in-production"),
+      "JWT_SECRET must be a real secret, not a placeholder"
+    ),
 
   // Stellar
   STELLAR_NETWORK: z.enum(["testnet", "mainnet"]).default("testnet"),
@@ -49,7 +56,8 @@ function loadConfig(): Env {
       );
       return envSchema.parse({
         DATABASE_URL: "postgresql://localhost:5432/test",
-        JWT_SECRET: "test-secret-key-that-is-at-least-64-characters-long",
+        JWT_SECRET:
+          "test-secret-key-that-is-at-least-sixty-four-characters-long-for-tests",
         STELLAR_HORIZON_URL: "https://horizon-testnet.stellar.org",
         STELLAR_SOROBAN_RPC_URL: "https://soroban-testnet.stellar.org",
         STELLAR_PLATFORM_SECRET: "test",

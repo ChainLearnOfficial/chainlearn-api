@@ -6,6 +6,7 @@ import type {
 } from "fastify";
 import { AppError, ValidationError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
+import { config } from "../config/index.js";
 import { ZodError } from "zod";
 
 export function registerErrorHandler(app: FastifyInstance): void {
@@ -55,8 +56,11 @@ export function registerErrorHandler(app: FastifyInstance): void {
       return reply.status(500).send({
         statusCode: 500,
         error: "INTERNAL_ERROR",
+        // Use the validated config, not raw process.env. Only surface the
+        // real message outside production — these are non-operational errors
+        // (AppError is handled above), so production never leaks internals.
         message:
-          process.env.NODE_ENV === "production"
+          config.NODE_ENV === "production"
             ? "Internal server error"
             : error.message,
       });

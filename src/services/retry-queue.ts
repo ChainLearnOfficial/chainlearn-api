@@ -1,4 +1,7 @@
 import { redis } from "../config/redis.js";
+import { db } from "../config/database.js";
+import { quizSubmissions } from "../database/schema.js";
+import { eq } from "drizzle-orm";
 import { logger } from "../utils/logger.js";
 
 const QUEUE_KEY = "chainlearn:retry:rewards";
@@ -35,6 +38,10 @@ export async function requeueReward(job: RetryJob): Promise<void> {
       { submissionId: job.submissionId, retryCount: job.retryCount },
       "Reward retry limit exceeded — marking as failed"
     );
+    await db
+      .update(quizSubmissions)
+      .set({ rewardFailed: true })
+      .where(eq(quizSubmissions.id, job.submissionId));
     return;
   }
   const updated: RetryJob = { ...job, retryCount: job.retryCount + 1 };

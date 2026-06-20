@@ -1,4 +1,4 @@
-import { eq, and, count, desc } from "drizzle-orm";
+import { eq, and, count, desc, inArray } from "drizzle-orm";
 import { db } from "../../config/database.js";
 import { courses, enrollments } from "../../database/schema.js";
 import { NotFoundError, ConflictError } from "../../utils/errors.js";
@@ -45,10 +45,7 @@ export class CourseService {
           value: count(),
         })
         .from(enrollments)
-        .where(
-          // Using inArray would be cleaner, but we'll keep it simple
-          eq(enrollments.courseId, courseIds[0])
-        )
+        .where(inArray(enrollments.courseId, courseIds))
         .groupBy(enrollments.courseId);
 
       for (const c of counts) {

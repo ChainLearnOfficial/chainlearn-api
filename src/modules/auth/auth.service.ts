@@ -11,51 +11,65 @@ import type { ChallengeResponse, AuthResponse } from "./auth.types.js";
 
 const CHALLENGE_TTL_SECONDS = 300; // 5 minutes
 const CHALLENGE_PREFIX = "sep10:challenge:";
+const HOME_DOMAIN = "chainlearn.io";
 
 export class AuthService {
   /**
-   * Generate a SEP-10 challenge for the given Stellar address.
-   * Stores the challenge in Redis for later verification.
+   * Generate a SEP-10 challenge transaction for the given Stellar address.
+   * Stores the challenge transaction in Redis for later verification.
    */
   async createChallenge(stellarAddress: string): Promise<ChallengeResponse> {
-    const nonce = crypto.randomBytes(32).toString("base64");
-    const homeDomain = "chainlearn.io";
-    const webAuthDomain = "auth.chainlearn.io";
     const now = Math.floor(Date.now() / 1000);
+    const minTime = now;
+    const maxTime = now + CHALLENGE_TTL_SECONDS;
 
-    // Build a SEP-10 compatible challenge transaction
-    // In production, use the actual SEP-10 challenge structure
-    const challengeData = {
-      account: stellarAddress,
-      nonce,
-      homeDomain,
-      webAuthDomain,
+    // Build a SEP-10 challenge transaction
+    const account = new StellarSdk.Account(stellarAddress, "0");
+    const challengeNonce = crypto.randomBytes(32).toString("base64");
+
+    const transaction = new StellarSdk.TransactionBuilder(account, {
+      fee: StellarSdk.BASE_FEE,
       networkPassphrase: getNetworkPassphrase(),
-      issuedAt: new Date(now * 1000).toISOString(),
-      expiresIn: CHALLENGE_TTL_SECONDS,
-    };
+    })
+      .addOperation(
+        StellarSdk.Operation.manageData({
+          name: HOME_DOMAIN,
+          value: challengeNonce,
+        })
+      )
+      .addOperation(
+        StellarSdk.Operation.manageData({
+          name: "auth_home_domain",
+          value: HOME_DOMAIN,
+        })
+      )
+      .setTimeout(maxTime - minTime)
+      .build();
 
-    const challengeToken = Buffer.from(JSON.stringify(challengeData)).toString(
-      "base64url"
-    );
+    const challengeEnvelope = transaction.toEnvelope().toXDR("base64");
 
     // Store challenge in Redis for verification
     await redis.setex(
       `${CHALLENGE_PREFIX}${stellarAddress}`,
       CHALLENGE_TTL_SECONDS,
-      JSON.stringify({ ...challengeData, challengeToken })
+      JSON.stringify({
+        challengeEnvelope,
+        stellarAddress,
+        issuedAt: now,
+        expiresAt: maxTime,
+      })
     );
 
     logger.info({ stellarAddress }, "Challenge created");
 
     return {
-      challenge: challengeToken,
+      challenge: challengeEnvelope,
       networkPassphrase: getNetworkPassphrase(),
     };
   }
 
   /**
-   * Verify a signed challenge and issue a JWT.
+   * Verify a signed SEP-10 challenge transaction and issue a JWT.
    * Looks up or creates the user record.
    */
   async verifyChallenge(
@@ -63,20 +77,61 @@ export class AuthService {
     signedChallenge: string
   ): Promise<AuthResponse> {
     // Retrieve stored challenge from Redis
-    const storedRaw = await redis.get(
+    // Check that a challenge exists (single-use, must not be consumed yet)
+    const challengeExists = await redis.exists(
       `${CHALLENGE_PREFIX}${stellarAddress}`
     );
-    if (!storedRaw) {
+    if (!challengeExists) {
       throw new UnauthorizedError("Challenge expired or not found");
     }
 
-    const stored = JSON.parse(storedRaw);
+    // Decode the signed transaction envelope
+    let transaction: StellarSdk.Transaction;
+    try {
+      transaction = StellarSdk.TransactionBuilder.fromXDR(
+        signedChallenge,
+        getNetworkPassphrase()
+      ) as StellarSdk.Transaction;
+    } catch {
+      throw new UnauthorizedError("Invalid transaction envelope");
+    }
 
-    // Verify the signed challenge matches
-    // In a full SEP-10 implementation, we'd decode the tx envelope,
-    // verify signatures, and check the time bounds
-    if (signedChallenge !== stored.challengeToken) {
-      throw new UnauthorizedError("Invalid signed challenge");
+    // Verify the source account matches the claimed stellar address
+    if (transaction.source !== stellarAddress) {
+      throw new UnauthorizedError("Transaction source does not match claimed address");
+    }
+
+    // Check time bounds to prevent stale/replay attacks
+    const now = Math.floor(Date.now() / 1000);
+    if (transaction.timeBounds) {
+      const minTime = parseInt(transaction.timeBounds.minTime, 10);
+      const maxTime = parseInt(transaction.timeBounds.maxTime, 10);
+      if (now < minTime || now > maxTime) {
+        throw new UnauthorizedError("Challenge has expired");
+      }
+    }
+
+    // Verify the signature against the claimed public key
+    const publicKeyKeypair = StellarSdk.Keypair.fromPublicKey(stellarAddress);
+    const signature = transaction.signatures[0];
+    if (!signature) {
+      throw new UnauthorizedError("No signature found in transaction");
+    }
+
+    try {
+      const txHash = transaction.hash();
+      const sigDecoded = signature.signature();
+      const key = publicKeyKeypair.rawPublicKey();
+
+      const verified = StellarSdk.verify(txHash, sigDecoded, key);
+      if (!verified) {
+        throw new UnauthorizedError("Invalid signature");
+      }
+    } catch (error) {
+      if (error instanceof UnauthorizedError) {
+        throw error;
+      }
+      throw new UnauthorizedError("Signature verification failed");
     }
 
     // Clean up the challenge (single-use)

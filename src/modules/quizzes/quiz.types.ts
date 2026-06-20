@@ -5,6 +5,8 @@ import { z } from "zod";
 export const generateQuizSchema = z.object({
   courseId: z.string().uuid("Invalid course ID"),
   moduleId: z.string().min(1, "Module ID is required"),
+  difficulty: z.enum(["beginner", "intermediate", "advanced"]).optional(),
+  numQuestions: z.coerce.number().int().min(1).max(20).optional(),
 });
 
 export const submitQuizSchema = z.object({

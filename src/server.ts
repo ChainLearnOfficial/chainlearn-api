@@ -15,8 +15,7 @@ import {
   stopRetryProcessor,
   type RetryJob,
 } from "./services/retry-queue.js";
-import { invokeContract } from "./stellar/transactions.js";
-import { createQuizProof } from "./stellar/signatures.js";
+import { processRewardClaim } from "./modules/rewards/reward.service.js";
 
 // Route modules
 import { authRoutes } from "./modules/auth/auth.routes.js";
@@ -30,68 +29,16 @@ import { credentialRoutes } from "./modules/credentials/credential.routes.js";
 import { closeDatabase } from "./config/database.js";
 import { closeRedis } from "./config/redis.js";
 
-import {
-  quizSubmissions,
-  quizzes,
-  users,
-} from "./database/schema.js";
-import { eq } from "drizzle-orm";
-import StellarSdk from "@stellar/stellar-sdk";
-
 async function processRetryJob(job: RetryJob): Promise<boolean> {
   try {
-    const [submission] = await db
-      .select()
-      .from(quizSubmissions)
-      .where(eq(quizSubmissions.id, job.submissionId));
-
-    if (!submission || submission.rewardClaimed) {
-      return true;
+    const success = await processRewardClaim(job.submissionId, job.userId, job.score);
+    if (success) {
+      logger.info(
+        { submissionId: job.submissionId },
+        "Queued reward processed successfully"
+      );
     }
-
-    const [quiz] = await db
-      .select()
-      .from(quizzes)
-      .where(eq(quizzes.id, submission.quizId));
-
-    if (!quiz) return true;
-
-    const proof = createQuizProof(job.userId, submission.quizId, job.score);
-
-    const [user] = await db
-      .select()
-      .from(users)
-      .where(eq(users.id, job.userId));
-
-    if (!user) return true;
-
-    const txHash = await invokeContract(
-      config.STELLAR_REWARD_CONTRACT_ID,
-      "claim_reward",
-      [
-        StellarSdk.Address.fromString(user.stellarAddress).toScVal(),
-        StellarSdk.nativeToScVal(job.score, { type: "u32" }),
-        StellarSdk.nativeToScVal(Buffer.from(proof.signature, "base64")),
-      ]
-    );
-
-    await db
-      .update(quizSubmissions)
-      .set({ rewardClaimed: true, txHash })
-      .where(eq(quizSubmissions.id, job.submissionId));
-
-    await db
-      .update(users)
-      .set({
-        credits: sql`${users.credits} + 10`,
-      })
-      .where(eq(users.id, job.userId));
-
-    logger.info(
-      { submissionId: job.submissionId, txHash },
-      "Queued reward processed successfully"
-    );
-    return true;
+    return success;
   } catch (err) {
     logger.error({ err, submissionId: job.submissionId }, "Retry job failed");
     return false;

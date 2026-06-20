@@ -19,6 +19,66 @@ import type { RewardClaimResult, RewardHistoryItem } from "./reward.types.js";
 
 const REWARD_AMOUNT = 10; // credits per passed quiz
 
+/**
+ * Shared reward claim execution logic.
+ * Used by both the direct claim path and the background retry processor.
+ * Returns true if the claim succeeded, false if it should be retried.
+ */
+export async function processRewardClaim(
+  submissionId: string,
+  userId: string,
+  score: number
+): Promise<boolean> {
+  const [submission] = await db
+    .select()
+    .from(quizSubmissions)
+    .where(eq(quizSubmissions.id, submissionId));
+
+  if (!submission || submission.rewardClaimed) {
+    return true;
+  }
+
+  const [quiz] = await db
+    .select()
+    .from(quizzes)
+    .where(eq(quizzes.id, submission.quizId));
+
+  if (!quiz) return true;
+
+  const proof = createQuizProof(userId, submission.quizId, score);
+
+  const [user] = await db
+    .select()
+    .from(users)
+    .where(eq(users.id, userId));
+
+  if (!user) return true;
+
+  const txHash = await invokeContract(
+    config.STELLAR_REWARD_CONTRACT_ID,
+    "claim_reward",
+    [
+      StellarSdk.Address.fromString(user.stellarAddress).toScVal(),
+      StellarSdk.nativeToScVal(score, { type: "u32" }),
+      StellarSdk.nativeToScVal(Buffer.from(proof.signature, "base64")),
+    ]
+  );
+
+  await db
+    .update(quizSubmissions)
+    .set({ rewardClaimed: true, txHash })
+    .where(eq(quizSubmissions.id, submissionId));
+
+  await db
+    .update(users)
+    .set({
+      credits: sql`${users.credits} + ${REWARD_AMOUNT}`,
+    })
+    .where(eq(users.id, userId));
+
+  return true;
+}
+
 export class RewardService {
   /**
    * Claim a reward for a passed quiz submission.

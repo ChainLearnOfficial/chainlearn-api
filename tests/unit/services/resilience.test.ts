@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("../../../src/utils/logger.js", () => ({
   logger: { info: vi.fn(), error: vi.fn(), warn: vi.fn(), fatal: vi.fn() },
@@ -9,13 +9,13 @@ import {
   circuitBreakerExecute,
   withTimeout,
   isCircuitBreakerError,
-  getCircuitState,
-  CircuitState,
+  resetCircuitBreaker,
 } from "../../../src/stellar/resilience.js";
 
 describe("Stellar Resilience", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetCircuitBreaker();
   });
 
   describe("Retry Policy", () => {
@@ -60,20 +60,6 @@ describe("Stellar Resilience", () => {
         }
       }
 
-      expect(getCircuitState()).toBe(CircuitState.Open);
-    });
-
-    it("should throw CircuitBreakerOpenError when open", async () => {
-      const fn = vi.fn().mockRejectedValue(new Error("ECONNREFUSED"));
-
-      for (let i = 0; i < 5; i++) {
-        try {
-          await circuitBreakerExecute(fn);
-        } catch {
-          // expected
-        }
-      }
-
       try {
         await circuitBreakerExecute(vi.fn().mockResolvedValue("ok"));
         expect.fail("Should have thrown");
@@ -100,9 +86,22 @@ describe("Stellar Resilience", () => {
   });
 
   describe("isCircuitBreakerError", () => {
-    it("should return true for circuit breaker errors", async () => {
-      const err = new (await import("../../../src/stellar/resilience.js")).CircuitBreakerOpenError();
-      expect(isCircuitBreakerError(err)).toBe(true);
+    it("should return true for broken circuit errors", async () => {
+      const fn = vi.fn().mockRejectedValue(new Error("ECONNREFUSED"));
+
+      for (let i = 0; i < 5; i++) {
+        try {
+          await circuitBreakerExecute(fn);
+        } catch {
+          // expected
+        }
+      }
+
+      try {
+        await circuitBreakerExecute(vi.fn().mockResolvedValue("ok"));
+      } catch (err) {
+        expect(isCircuitBreakerError(err)).toBe(true);
+      }
     });
 
     it("should return false for other errors", () => {

@@ -1,7 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("../../../src/config/database.js", () => ({
-  db: { execute: vi.fn().mockResolvedValue([]) },
+  db: {
+    execute: vi.fn().mockResolvedValue([]),
+    update: vi.fn().mockReturnThis(),
+    set: vi.fn().mockReturnThis(),
+    where: vi.fn().mockResolvedValue([]),
+  },
 }));
 
 vi.mock("../../../src/config/redis.js", () => ({
@@ -50,8 +55,10 @@ import {
   stopRetryProcessor,
 } from "../../../src/services/retry-queue.js";
 import { redis } from "../../../src/config/redis.js";
+import { db } from "../../../src/config/database.js";
 
 const mockRedis = vi.mocked(redis);
+const mockDb = vi.mocked(db);
 
 describe("Retry Queue", () => {
   beforeEach(() => {
@@ -126,6 +133,20 @@ describe("Retry Queue", () => {
     expect(mockRedis.lpush).not.toHaveBeenCalled();
   });
 
+  it("should mark reward as failed when max retries exceeded", async () => {
+    const job = {
+      submissionId: "sub-1",
+      userId: "user-1",
+      score: 5,
+      retryCount: 10,
+      createdAt: new Date().toISOString(),
+    };
+
+    await requeueReward(job);
+
+    expect(mockDb.update).toHaveBeenCalled();
+  });
+
   it("should return queue length", async () => {
     mockRedis.llen.mockResolvedValueOnce(5);
     const len = await getQueueLength();
@@ -149,5 +170,28 @@ describe("Retry Queue", () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     expect(processFn).toHaveBeenCalledWith(job);
+  });
+
+  it("should requeue failed jobs", async () => {
+    const processFn = vi.fn().mockResolvedValue(false);
+    const job = {
+      submissionId: "sub-1",
+      userId: "user-1",
+      score: 5,
+      retryCount: 0,
+      createdAt: new Date().toISOString(),
+    };
+
+    mockRedis.rpop.mockResolvedValueOnce(JSON.stringify(job));
+
+    startRetryProcessor(processFn);
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(processFn).toHaveBeenCalledWith(job);
+    expect(mockRedis.lpush).toHaveBeenCalledWith(
+      "chainlearn:retry:rewards",
+      expect.stringContaining('"retryCount":1')
+    );
   });
 });

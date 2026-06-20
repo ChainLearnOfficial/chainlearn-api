@@ -10,8 +10,10 @@ import { NotFoundError, ForbiddenError, ConflictError } from "../../utils/errors
 import { withLock } from "../../utils/lock.js";
 import { invokeContract } from "../../stellar/transactions.js";
 import { createQuizProof } from "../../stellar/signatures.js";
+import { isCircuitBreakerError } from "../../stellar/resilience.js";
 import { config } from "../../config/index.js";
 import { logger } from "../../utils/logger.js";
+import { enqueueReward } from "../../services/retry-queue.js";
 import StellarSdk from "@stellar/stellar-sdk";
 import type { RewardClaimResult, RewardHistoryItem } from "./reward.types.js";
 
@@ -22,6 +24,7 @@ export class RewardService {
    * Claim a reward for a passed quiz submission.
    * Uses distributed locking + database transaction with row-level lock
    * to prevent double-spend from concurrent requests.
+   * Gracefully degrades when Stellar is unavailable by queuing the claim.
    */
   async claimReward(
     userId: string,
@@ -63,7 +66,7 @@ export class RewardService {
 
         const proof = createQuizProof(userId, submission.quizId, submission.score);
 
-        let txHash: string;
+        let txHash: string | null = null;
         try {
           const [user] = await tx
             .select()
@@ -85,6 +88,22 @@ export class RewardService {
           );
         } catch (err) {
           if (err instanceof NotFoundError) throw err;
+
+          if (isCircuitBreakerError(err)) {
+            logger.warn(
+              { submissionId },
+              "Stellar circuit breaker open — queuing reward for later"
+            );
+            await enqueueReward({ submissionId, userId, score: submission.score });
+            return {
+              submissionId,
+              amount: REWARD_AMOUNT,
+              txHash: null,
+              queued: true,
+              message: "Reward claim queued — Stellar is temporarily unavailable",
+            };
+          }
+
           logger.error({ err, submissionId }, "On-chain reward claim failed");
           throw new Error("Failed to process on-chain reward");
         }
@@ -110,6 +129,7 @@ export class RewardService {
           submissionId,
           amount: REWARD_AMOUNT,
           txHash,
+          queued: false,
           message: `Successfully claimed ${REWARD_AMOUNT} credits`,
         };
       });

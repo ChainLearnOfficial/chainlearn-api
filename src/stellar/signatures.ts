@@ -1,7 +1,10 @@
-import * as StellarSdk from "@stellar/stellar-sdk";
 import crypto from "node:crypto";
 import { getPlatformKeypair } from "../config/stellar.js";
 import { logger } from "../utils/logger.js";
+
+function hashPayload(payload: Record<string, unknown>): Buffer {
+  return crypto.createHash("sha256").update(JSON.stringify(payload)).digest();
+}
 
 /**
  * Generate a signed proof that a user passed a quiz.
@@ -13,11 +16,7 @@ export function createQuizProof(
   quizId: string,
   score: number
 ): { hash: string; signature: string } {
-  const payload = Buffer.from(
-    JSON.stringify({ userAddress, quizId, score, timestamp: Date.now() })
-  );
-
-  const hash = crypto.createHash("sha256").update(payload).digest();
+  const hash = hashPayload({ userAddress, quizId, score });
   const keypair = getPlatformKeypair();
   const signature = keypair.sign(hash);
 
@@ -42,6 +41,12 @@ export function verifyQuizProof(
   try {
     const keypair = getPlatformKeypair();
     const hashBuffer = Buffer.from(hash, "hex");
+    const expectedHash = hashPayload({ userAddress, quizId, score });
+
+    if (!crypto.timingSafeEqual(hashBuffer, expectedHash)) {
+      return false;
+    }
+
     return keypair.verify(hashBuffer, Buffer.from(signature, "base64"));
   } catch (err) {
     logger.warn({ err, quizId }, "Quiz proof verification failed");
@@ -57,17 +62,12 @@ export function createMintAuthorization(
   courseId: string,
   score: number
 ): { hash: string; signature: string } {
-  const payload = Buffer.from(
-    JSON.stringify({
-      action: "mint_credential",
-      userAddress,
-      courseId,
-      score,
-      timestamp: Date.now(),
-    })
-  );
-
-  const hash = crypto.createHash("sha256").update(payload).digest();
+  const hash = hashPayload({
+    action: "mint_credential",
+    userAddress,
+    courseId,
+    score,
+  });
   const keypair = getPlatformKeypair();
   const signature = keypair.sign(hash);
 

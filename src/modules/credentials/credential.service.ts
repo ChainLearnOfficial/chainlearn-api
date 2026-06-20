@@ -15,6 +15,8 @@ import { logger } from "../../utils/logger.js";
 import crypto from "node:crypto";
 import StellarSdk from "@stellar/stellar-sdk";
 import type { MintResult, CredentialListItem } from "./credential.types.js";
+import { auditLog } from "../../audit/index.js";
+import { stellarTxDurationSeconds, credentialsMintedTotal } from "../../metrics/index.js";
 
 export class CredentialService {
   /**
@@ -76,6 +78,7 @@ export class CredentialService {
         const auth = createMintAuthorization(userId, courseId, submission.score);
 
         let txHash: string;
+        const txStart = process.hrtime.bigint();
         try {
           txHash = await invokeContract(
             config.STELLAR_CREDENTIAL_CONTRACT_ID,
@@ -87,7 +90,15 @@ export class CredentialService {
               StellarSdk.nativeToScVal(Buffer.from(auth.signature, "base64")),
             ]
           );
+          stellarTxDurationSeconds.observe(
+            { method: "mint_credential", status: "success" },
+            Number(process.hrtime.bigint() - txStart) / 1e9
+          );
         } catch (err) {
+          stellarTxDurationSeconds.observe(
+            { method: "mint_credential", status: "error" },
+            Number(process.hrtime.bigint() - txStart) / 1e9
+          );
           logger.error({ err, userId, courseId }, "On-chain credential mint failed");
           throw new Error("Failed to mint credential on-chain");
         }
@@ -104,6 +115,8 @@ export class CredentialService {
           })
           .returning();
 
+        credentialsMintedTotal.inc();
+        auditLog("credential.minted", { credentialId: credential.id, userId, courseId, txHash });
         logger.info(
           { credentialId: credential.id, userId, courseId, txHash },
           "Credential minted"

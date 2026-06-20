@@ -5,6 +5,10 @@ import { NotFoundError, ForbiddenError, ConflictError } from "../../utils/errors
 import { withLock } from "../../utils/lock.js";
 import { createQuizProof } from "../../stellar/signatures.js";
 import { logger } from "../../utils/logger.js";
+import { generateQuizFromAI } from "./ai-client.js";
+import { sanitizeQuizFeedback } from "../../utils/sanitize.js";
+import { auditLog } from "../../audit/index.js";
+import { quizSubmissionsTotal } from "../../metrics/index.js";
 import type {
   GenerateQuizBody,
   SubmitQuizBody,
@@ -17,9 +21,10 @@ const PASSING_PERCENTAGE = 70;
 
 export class QuizService {
   /**
-   * Generate a quiz for a given course/module.
-   * In a real system this would call an AI service; here we return
-   * a pre-generated quiz or fetch from the database.
+   * Generate a quiz for a given course/module. Calls the chainlearn-ai
+   * service for fresh questions and falls back to a fixed placeholder set
+   * if the service is unreachable. Existing quizzes for the same user +
+   * module are returned as-is so a refresh doesn't regenerate.
    */
   async generateQuiz(
     userId: string,
@@ -64,11 +69,34 @@ export class QuizService {
       };
     }
 
-    // Generate new quiz (placeholder — would call AI service)
-    const generatedQuestions = this.createPlaceholderQuestions(
-      data.courseId,
-      data.moduleId
-    );
+    // Generate new quiz via the chainlearn-ai service. Fall back to the
+    // hardcoded placeholder set if the AI service is unreachable so the
+    // dashboard never breaks on a transient outage.
+    let generatedQuestions;
+    try {
+      const aiQuestions = await generateQuizFromAI({
+        userId,
+        courseId: data.courseId,
+        moduleId: data.moduleId,
+        difficulty: data.difficulty ?? "beginner",
+        numQuestions: data.numQuestions ?? 5,
+      });
+      generatedQuestions = aiQuestions.map((q, i) => ({
+        id: `q${i + 1}`,
+        text: q.prompt,
+        options: q.options,
+        correctIndex: q.correct_index,
+      }));
+    } catch (err) {
+      logger.warn(
+        { err },
+        "AI service unavailable, falling back to placeholder questions"
+      );
+      generatedQuestions = this.createPlaceholderQuestions(
+        data.courseId,
+        data.moduleId
+      );
+    }
 
     const [quiz] = await db
       .insert(quizzes)
@@ -147,10 +175,14 @@ export class QuizService {
 
           if (answer.selectedIndex === question.correctIndex) {
             correctCount++;
-            feedbackParts.push(`Q: "${question.text}" - Correct!`);
+            feedbackParts.push(
+              sanitizeQuizFeedback(`Q: "${question.text}" - Correct!`)
+            );
           } else {
             feedbackParts.push(
-              `Q: "${question.text}" - Incorrect. The correct answer was: "${question.options[question.correctIndex]}"`
+              sanitizeQuizFeedback(
+                `Q: "${question.text}" - Incorrect. The correct answer was: "${question.options[question.correctIndex]}"`
+              )
             );
           }
         }
@@ -175,6 +207,14 @@ export class QuizService {
           })
           .returning();
 
+        quizSubmissionsTotal.inc({ result: passed ? "passed" : "failed" });
+        auditLog("quiz.submitted", {
+          userId,
+          submissionId: submission.id,
+          score: correctCount,
+          total: totalQuestions,
+          passed,
+        });
         logger.info(
           {
             submissionId: submission.id,

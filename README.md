@@ -68,7 +68,7 @@ The API will be available at `http://localhost:3000`.
 | `HOST` | Bind address | `0.0.0.0` |
 | `DATABASE_URL` | PostgreSQL connection string | *required* |
 | `REDIS_URL` | Redis connection string | `redis://localhost:6379` |
-| `JWT_SECRET` | JWT signing secret (32+ chars) | *required* |
+| `JWT_SECRET` | JWT signing secret (64+ chars / 256-bit, non-placeholder) | *required* |
 | `STELLAR_NETWORK` | `testnet` or `mainnet` | `testnet` |
 | `STELLAR_HORIZON_URL` | Horizon server URL | *required* |
 | `STELLAR_SOROBAN_RPC_URL` | Soroban RPC URL | *required* |

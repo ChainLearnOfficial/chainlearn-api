@@ -5,17 +5,21 @@ import { z } from "zod";
 export const generateQuizSchema = z.object({
   courseId: z.string().uuid("Invalid course ID"),
   moduleId: z.string().min(1, "Module ID is required"),
+  difficulty: z.enum(["beginner", "intermediate", "advanced"]).optional(),
+  numQuestions: z.coerce.number().int().min(1).max(20).optional(),
 });
 
 export const submitQuizSchema = z.object({
   answers: z
     .array(
       z.object({
-        questionId: z.string().min(1),
-        selectedIndex: z.number().int().min(0),
+        questionId: z.string().min(1).max(100),
+        // Bound the index so out-of-range values can't be submitted.
+        selectedIndex: z.number().int().min(0).max(20),
       })
     )
-    .min(1, "At least one answer is required"),
+    .min(1, "At least one answer is required")
+    .max(50, "Too many answers"),
 });
 
 export const quizIdParamsSchema = z.object({

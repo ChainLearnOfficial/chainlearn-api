@@ -20,6 +20,15 @@ import { auditLog } from "../../audit/index.js";
 import { stellarTxDurationSeconds, rewardClaimsTotal } from "../../metrics/index.js";
 
 const REWARD_AMOUNT = 10; // credits per passed quiz
+const PASSING_PERCENTAGE = 70;
+
+function hasPassingScore(score: number | null, questions: unknown): score is number {
+  if (typeof score !== "number") return false;
+  if (!Array.isArray(questions) || questions.length === 0) return false;
+
+  const percentage = Math.round((score / questions.length) * 100);
+  return percentage >= PASSING_PERCENTAGE;
+}
 
 /**
  * Shared reward claim execution logic.
@@ -29,7 +38,7 @@ const REWARD_AMOUNT = 10; // credits per passed quiz
 export async function processRewardClaim(
   submissionId: string,
   userId: string,
-  score: number
+  _score: number
 ): Promise<boolean> {
   const [submission] = await db
     .select()
@@ -45,9 +54,11 @@ export async function processRewardClaim(
     .from(quizzes)
     .where(eq(quizzes.id, submission.quizId));
 
-  if (!quiz) return true;
+  if (!quiz || !hasPassingScore(submission.score, quiz.questions)) {
+    return true;
+  }
 
-  const proof = createQuizProof(userId, submission.quizId, score);
+  const proof = createQuizProof(userId, submission.quizId, submission.score);
 
   const [user] = await db
     .select()
@@ -64,7 +75,7 @@ export async function processRewardClaim(
       "claim_reward",
       [
         StellarSdk.Address.fromString(user.stellarAddress).toScVal(),
-        StellarSdk.nativeToScVal(score, { type: "u32" }),
+        StellarSdk.nativeToScVal(submission.score, { type: "u32" }),
         StellarSdk.nativeToScVal(Buffer.from(proof.signature, "base64")),
       ]
     );

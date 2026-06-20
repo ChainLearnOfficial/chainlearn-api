@@ -33,9 +33,28 @@ const envSchema = z.object({
 
 export type Env = z.infer<typeof envSchema>;
 
+let _config: Env | null = null;
+
 function loadConfig(): Env {
   const result = envSchema.safeParse(process.env);
   if (!result.success) {
+    if (process.env.NODE_ENV === "test") {
+      // In test mode, warn but don't exit — tests mock what they need
+      console.warn(
+        "Missing env vars in test mode (expected if mocking config):",
+        result.error.flatten().fieldErrors
+      );
+      return envSchema.parse({
+        DATABASE_URL: "postgresql://localhost:5432/test",
+        JWT_SECRET: "test-secret-key-that-is-at-least-64-characters-long",
+        STELLAR_HORIZON_URL: "https://horizon-testnet.stellar.org",
+        STELLAR_SOROBAN_RPC_URL: "https://soroban-testnet.stellar.org",
+        STELLAR_PLATFORM_SECRET: "test",
+        STELLAR_QUIZ_CONTRACT_ID: "test",
+        STELLAR_REWARD_CONTRACT_ID: "test",
+        STELLAR_CREDENTIAL_CONTRACT_ID: "test",
+      });
+    }
     console.error(
       "Invalid environment variables:",
       result.error.flatten().fieldErrors
@@ -45,4 +64,16 @@ function loadConfig(): Env {
   return result.data;
 }
 
-export const config = loadConfig();
+function ensureConfig(): Env {
+  if (!_config) {
+    _config = loadConfig();
+  }
+  return _config;
+}
+
+// Lazy config — loadConfig() only runs on first property access, not at import time
+export const config: Env = new Proxy({} as Env, {
+  get(_, prop) {
+    return (ensureConfig() as any)[prop];
+  },
+});

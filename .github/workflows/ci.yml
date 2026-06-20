@@ -45,7 +45,12 @@ jobs:
       REDIS_URL: redis://localhost:6379
       JWT_SECRET: test-secret-key-that-is-at-least-64-characters-long-for-testing-purposes-only
       STELLAR_NETWORK: testnet
-      SOROBAN_RPC_URL: https://soroban-testnet.stellar.org
+      STELLAR_HORIZON_URL: https://horizon-testnet.stellar.org
+      STELLAR_SOROBAN_RPC_URL: https://soroban-testnet.stellar.org
+      STELLAR_PLATFORM_SECRET: SCZANGBA5YHTNYVVVXKJQQXRG5UJUG7D3DV6VVON3JXKXJ3FPHN3A5J3
+      STELLAR_QUIZ_CONTRACT_ID: CB6Q2YKQQHH7GV7CU5RZDYM5S5OE2GABYLG5IY6YO5XLBAALBQKXYB53
+      STELLAR_REWARD_CONTRACT_ID: CBAKHFY4SIBRIVYH2Y2QDUIUZPGYGS4B26YBHC6RLV5QZ7OHH5FOF55T
+      STELLAR_CREDENTIAL_CONTRACT_ID: CD4ZJWLPGYLCYR7G5DZQ4EJWVMMF5VXU5Z2ECRSKGWV6GBV5S3F52K7
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

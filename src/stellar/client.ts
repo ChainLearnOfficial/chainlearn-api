@@ -3,13 +3,21 @@ import {
   getHorizonServer,
   getSorobanServer,
   getNetworkPassphrase,
-  getPlatformKeypair,
 } from "../config/stellar.js";
 import { logger } from "../utils/logger.js";
 import { StellarError } from "../utils/errors.js";
+import {
+  stellarRetry,
+  circuitBreakerExecute,
+  withTimeout,
+} from "./resilience.js";
+
+const READ_TIMEOUT_MS = 10_000;
+const WRITE_TIMEOUT_MS = 30_000;
 
 /**
  * Core Stellar client wrapping Horizon + Soroban RPC interactions.
+ * All external calls are protected by circuit breaker, retry, and timeout.
  */
 export class StellarClient {
   private horizon: StellarSdk.Horizon.Server;
@@ -25,7 +33,11 @@ export class StellarClient {
   /** Load account record from Horizon. */
   async getAccount(publicKey: string): Promise<StellarSdk.Horizon.AccountResponse> {
     try {
-      return await this.horizon.loadAccount(publicKey);
+      return await circuitBreakerExecute(() =>
+        stellarRetry.execute(() =>
+          withTimeout(this.horizon.loadAccount(publicKey), READ_TIMEOUT_MS)
+        )
+      );
     } catch (err) {
       logger.error({ err, publicKey }, "Failed to load Stellar account");
       throw new StellarError(`Account ${publicKey} not found or unreachable`);
@@ -35,7 +47,7 @@ export class StellarClient {
   /** Check if an account exists on the network. */
   async accountExists(publicKey: string): Promise<boolean> {
     try {
-      await this.horizon.loadAccount(publicKey);
+      await this.getAccount(publicKey);
       return true;
     } catch {
       return false;
@@ -47,7 +59,11 @@ export class StellarClient {
     txEnvelope: StellarSdk.Transaction | StellarSdk.FeeBumpTransaction
   ): Promise<StellarSdk.Horizon.HorizonApi.SubmitTransactionResponse> {
     try {
-      const result = await this.horizon.submitTransaction(txEnvelope);
+      const result = await circuitBreakerExecute(() =>
+        stellarRetry.execute(() =>
+          withTimeout(this.horizon.submitTransaction(txEnvelope), WRITE_TIMEOUT_MS)
+        )
+      );
       logger.info({ hash: result.hash }, "Transaction submitted successfully");
       return result;
     } catch (err: any) {
@@ -73,11 +89,17 @@ export class StellarClient {
     ...args: StellarSdk.xdr.ScVal[]
   ): Promise<StellarSdk.rpc.Api.LedgerEntryResult> {
     try {
-      const result = await this.soroban.getContractData(
-        contractId,
-        StellarSdk.xdr.ScVal.scvSymbol(method)
+      return await circuitBreakerExecute(() =>
+        stellarRetry.execute(() =>
+          withTimeout(
+            this.soroban.getContractData(
+              contractId,
+              StellarSdk.xdr.ScVal.scvSymbol(method)
+            ),
+            WRITE_TIMEOUT_MS
+          )
+        )
       );
-      return result;
     } catch (err) {
       logger.error({ err, contractId, method }, "Contract call failed");
       throw new StellarError(`Contract call ${method} failed`);
@@ -92,6 +114,11 @@ export class StellarClient {
   /** Get the Soroban RPC server for advanced usage. */
   getSorobanRpc(): StellarSdk.rpc.Server {
     return this.soroban;
+  }
+
+  /** Expose Horizon server for health checks. */
+  getHorizonServer(): StellarSdk.Horizon.Server {
+    return this.horizon;
   }
 }
 

@@ -13,7 +13,8 @@ export type ClaimRewardBody = z.infer<typeof claimRewardSchema>;
 export interface RewardClaimResult {
   submissionId: string;
   amount: number;
-  txHash: string;
+  txHash: string | null;
+  queued: boolean;
   message: string;
 }
 

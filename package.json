@@ -21,6 +21,7 @@
     "@fastify/jwt": "^9.0.2",
     "@fastify/rate-limit": "^10.2.0",
     "@stellar/stellar-sdk": "^13.3.0",
+    "cockatiel": "^4.0.0",
     "dotenv": "^16.4.7",
     "drizzle-orm": "^0.38.3",
     "fastify": "^5.2.1",

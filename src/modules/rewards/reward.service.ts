@@ -80,17 +80,19 @@ export async function processRewardClaim(
     throw err;
   }
 
-  await db
-    .update(quizSubmissions)
-    .set({ rewardClaimed: true, txHash })
-    .where(eq(quizSubmissions.id, submissionId));
+  await db.transaction(async (tx) => {
+    await tx
+      .update(quizSubmissions)
+      .set({ rewardClaimed: true, txHash })
+      .where(eq(quizSubmissions.id, submissionId));
 
-  await db
-    .update(users)
-    .set({
-      credits: sql`${users.credits} + ${REWARD_AMOUNT}`,
-    })
-    .where(eq(users.id, userId));
+    await tx
+      .update(users)
+      .set({
+        credits: sql`${users.credits} + ${REWARD_AMOUNT}`,
+      })
+      .where(eq(users.id, userId));
+  });
 
   return true;
 }

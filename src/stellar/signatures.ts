@@ -14,7 +14,7 @@ export function createQuizProof(
   score: number
 ): { hash: string; signature: string } {
   const payload = Buffer.from(
-    JSON.stringify({ userAddress, quizId, score, timestamp: Date.now() })
+    JSON.stringify({ userAddress, quizId, score })
   );
 
   const hash = crypto.createHash("sha256").update(payload).digest();

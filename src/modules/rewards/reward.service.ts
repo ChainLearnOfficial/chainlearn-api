@@ -47,6 +47,19 @@ export async function processRewardClaim(
 
   if (!quiz) return true;
 
+  // Enforce 70% passing threshold — score alone is not enough
+  const questions = quiz.questions as Array<{ id: string }>;
+  const totalQuestions = questions.length;
+  const percentage = Math.round((score / totalQuestions) * 100);
+  const PASSING_PERCENTAGE = 70;
+  if (percentage < PASSING_PERCENTAGE) {
+    logger.warn(
+      { submissionId, score, totalQuestions, percentage },
+      "Reward claim blocked — quiz score below passing threshold"
+    );
+    return true; // Don't retry — this is a permanent rejection
+  }
+
   const proof = createQuizProof(userId, submission.quizId, score);
 
   const [user] = await db
@@ -140,6 +153,17 @@ export class RewardService {
 
         if (!quiz) {
           throw new NotFoundError("Quiz");
+        }
+
+        // Enforce 70% passing threshold — score alone is not enough
+        const questions = quiz.questions as Array<{ id: string }>;
+        const totalQuestions = questions.length;
+        const percentage = Math.round((submission.score / totalQuestions) * 100);
+        const PASSING_PERCENTAGE = 70;
+        if (percentage < PASSING_PERCENTAGE) {
+          throw new ForbiddenError(
+            `Quiz not passed — score ${submission.score}/${totalQuestions} (${percentage}%) is below the ${PASSING_PERCENTAGE}% passing threshold`
+          );
         }
 
         const proof = createQuizProof(userId, submission.quizId, submission.score);

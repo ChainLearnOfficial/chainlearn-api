@@ -132,12 +132,23 @@ describe("processRewardClaim", () => {
       {
         id: "sub-1",
         userId: "user-1",
-        score: 5,
+        score: 8,
         rewardClaimed: false,
         quizId: "quiz-1",
       },
     ]);
-    const quizChain = makeThenable([{ id: "quiz-1", courseId: "course-1" }]);
+    const quizChain = makeThenable([
+      {
+        id: "quiz-1",
+        courseId: "course-1",
+        questions: Array.from({ length: 10 }, (_, i) => ({
+          id: `q${i}`,
+          text: `Question ${i}`,
+          options: ["a", "b", "c", "d"],
+          correctIndex: 0,
+        })),
+      },
+    ]);
     const userChain = makeThenable([]);
 
     mockDb.select
@@ -145,7 +156,7 @@ describe("processRewardClaim", () => {
       .mockReturnValueOnce(quizChain)
       .mockReturnValueOnce(userChain);
 
-    const result = await processRewardClaim("sub-1", "user-1", 5);
+    const result = await processRewardClaim("sub-1", "user-1", 8);
     expect(result).toBe(true);
   });
 
@@ -154,12 +165,23 @@ describe("processRewardClaim", () => {
       {
         id: "sub-1",
         userId: "user-1",
-        score: 5,
+        score: 8,
         rewardClaimed: false,
         quizId: "quiz-1",
       },
     ]);
-    const quizChain = makeThenable([{ id: "quiz-1", courseId: "course-1" }]);
+    const quizChain = makeThenable([
+      {
+        id: "quiz-1",
+        courseId: "course-1",
+        questions: Array.from({ length: 10 }, (_, i) => ({
+          id: `q${i}`,
+          text: `Question ${i}`,
+          options: ["a", "b", "c", "d"],
+          correctIndex: 0,
+        })),
+      },
+    ]);
     const userChain = makeThenable([
       {
         id: "user-1",
@@ -183,7 +205,7 @@ describe("processRewardClaim", () => {
       return fn(tx);
     });
 
-    const result = await processRewardClaim("sub-1", "user-1", 5);
+    const result = await processRewardClaim("sub-1", "user-1", 8);
 
     expect(result).toBe(true);
     expect(mockDb.transaction).toHaveBeenCalledTimes(1);
@@ -199,12 +221,23 @@ describe("processRewardClaim", () => {
       {
         id: "sub-1",
         userId: "user-1",
-        score: 5,
+        score: 9,
         rewardClaimed: false,
         quizId: "quiz-1",
       },
     ]);
-    const quizChain = makeThenable([{ id: "quiz-1", courseId: "course-1" }]);
+    const quizChain = makeThenable([
+      {
+        id: "quiz-1",
+        courseId: "course-1",
+        questions: Array.from({ length: 10 }, (_, i) => ({
+          id: `q${i}`,
+          text: `Question ${i}`,
+          options: ["a", "b", "c", "d"],
+          correctIndex: 0,
+        })),
+      },
+    ]);
     const userChain = makeThenable([
       {
         id: "user-1",
@@ -221,7 +254,93 @@ describe("processRewardClaim", () => {
     vi.mocked(invokeContract).mockRejectedValue(new Error("Stellar error"));
 
     await expect(
-      processRewardClaim("sub-1", "user-1", 5)
+      processRewardClaim("sub-1", "user-1", 9)
     ).rejects.toThrow("Stellar error");
+  });
+
+  it("should block claim when score is below 70% passing threshold", async () => {
+    const submissionChain = makeThenable([
+      {
+        id: "sub-1",
+        userId: "user-1",
+        score: 1,
+        rewardClaimed: false,
+        quizId: "quiz-1",
+      },
+    ]);
+    // 10-question quiz, score=1 = 10% < 70%
+    const quizChain = makeThenable([
+      {
+        id: "quiz-1",
+        courseId: "course-1",
+        questions: Array.from({ length: 10 }, (_, i) => ({
+          id: `q${i}`,
+          text: `Question ${i}`,
+          options: ["a", "b", "c", "d"],
+          correctIndex: 0,
+        })),
+      },
+    ]);
+
+    mockDb.select
+      .mockReturnValueOnce(submissionChain)
+      .mockReturnValueOnce(quizChain);
+
+    const result = await processRewardClaim("sub-1", "user-1", 1);
+    expect(result).toBe(true);
+    expect(invokeContract).not.toHaveBeenCalled();
+  });
+
+  it("should allow claim when score meets 70% passing threshold", async () => {
+    const submissionChain = makeThenable([
+      {
+        id: "sub-1",
+        userId: "user-1",
+        score: 7,
+        rewardClaimed: false,
+        quizId: "quiz-1",
+      },
+    ]);
+    // 10-question quiz, score=7 = 70% = passing
+    const quizChain = makeThenable([
+      {
+        id: "quiz-1",
+        courseId: "course-1",
+        questions: Array.from({ length: 10 }, (_, i) => ({
+          id: `q${i}`,
+          text: `Question ${i}`,
+          options: ["a", "b", "c", "d"],
+          correctIndex: 0,
+        })),
+      },
+    ]);
+    const userChain = makeThenable([
+      {
+        id: "user-1",
+        stellarAddress:
+          "GALICE0000000000000000000000000000000000000000000000000000000",
+      },
+    ]);
+
+    mockDb.select
+      .mockReturnValueOnce(submissionChain)
+      .mockReturnValueOnce(quizChain)
+      .mockReturnValueOnce(userChain);
+
+    vi.mocked(invokeContract).mockResolvedValue("tx-hash-123");
+
+    mockDb.transaction.mockImplementation(async (fn: Function) => {
+      const tx: any = {};
+      tx.update = vi.fn().mockReturnValue({
+        set: vi.fn().mockReturnValue({
+          where: vi.fn().mockResolvedValue(undefined),
+        }),
+      });
+      return fn(tx);
+    });
+
+    const result = await processRewardClaim("sub-1", "user-1", 7);
+    expect(result).toBe(true);
+    expect(invokeContract).toHaveBeenCalled();
   });
 });

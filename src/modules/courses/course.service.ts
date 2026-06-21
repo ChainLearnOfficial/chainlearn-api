@@ -105,13 +105,19 @@ export class CourseService {
       isEnrolled = !!enr;
     }
 
+    // Compute enrolled count
+    const [enrolledCountResult] = await db
+      .select({ value: count() })
+      .from(enrollments)
+      .where(eq(enrollments.courseId, courseId));
+
     return {
       id: course.id,
       title: course.title,
       description: course.description,
       difficulty: course.difficulty,
       isActive: course.isActive,
-      enrolledCount: 0, // TODO: aggregate
+      enrolledCount: enrolledCountResult.value,
       isEnrolled,
       contentHash: course.contentHash,
       modules: [], // TODO: fetch from IPFS/content store

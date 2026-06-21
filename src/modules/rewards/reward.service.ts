@@ -20,6 +20,28 @@ import { auditLog } from "../../audit/index.js";
 import { stellarTxDurationSeconds, rewardClaimsTotal } from "../../metrics/index.js";
 
 const REWARD_AMOUNT = 10; // credits per passed quiz
+const PASSING_PERCENTAGE = 70;
+
+type RewardQuizQuestion = {
+  id: string;
+  text: string;
+  options: string[];
+  correctIndex: number;
+};
+
+function getQuestionCount(quiz: typeof quizzes.$inferSelect): number {
+  return Array.isArray(quiz.questions)
+    ? (quiz.questions as RewardQuizQuestion[]).length
+    : 0;
+}
+
+export function isPassingRewardScore(score: number | null, questionCount: number): boolean {
+  if (!score || questionCount <= 0) {
+    return false;
+  }
+
+  return Math.round((score / questionCount) * 100) >= PASSING_PERCENTAGE;
+}
 
 /**
  * Shared reward claim execution logic.
@@ -46,6 +68,14 @@ export async function processRewardClaim(
     .where(eq(quizzes.id, submission.quizId));
 
   if (!quiz) return true;
+
+  if (!isPassingRewardScore(score, getQuestionCount(quiz))) {
+    logger.warn(
+      { submissionId, userId, score, quizId: submission.quizId },
+      "Skipping reward claim for non-passing quiz score"
+    );
+    return true;
+  }
 
   const proof = createQuizProof(userId, submission.quizId, score);
 
@@ -127,10 +157,6 @@ export class RewardService {
           throw new ConflictError("Reward already claimed for this submission");
         }
 
-        if (!submission.score || submission.score < 1) {
-          throw new ForbiddenError("Quiz not passed — no reward available");
-        }
-
         const [quiz] = await tx
           .select()
           .from(quizzes)
@@ -140,7 +166,12 @@ export class RewardService {
           throw new NotFoundError("Quiz");
         }
 
-        const proof = createQuizProof(userId, submission.quizId, submission.score);
+        if (!isPassingRewardScore(submission.score, getQuestionCount(quiz))) {
+          throw new ForbiddenError("Quiz not passed — no reward available");
+        }
+
+        const passingScore = submission.score as number;
+        const proof = createQuizProof(userId, submission.quizId, passingScore);
 
         let txHash: string | null = null;
         try {
@@ -158,7 +189,7 @@ export class RewardService {
             "claim_reward",
             [
               StellarSdk.Address.fromString(user.stellarAddress).toScVal(),
-              StellarSdk.nativeToScVal(submission.score, { type: "u32" }),
+              StellarSdk.nativeToScVal(passingScore, { type: "u32" }),
               StellarSdk.nativeToScVal(Buffer.from(proof.signature, "base64")),
             ]
           );
@@ -170,7 +201,7 @@ export class RewardService {
               { submissionId },
               "Stellar circuit breaker open — queuing reward for later"
             );
-            await enqueueReward({ submissionId, userId, score: submission.score });
+            await enqueueReward({ submissionId, userId, score: passingScore });
             rewardClaimsTotal.inc({ status: "queued" });
             auditLog("reward.queued", { userId, submissionId, amount: REWARD_AMOUNT, queued: true });
             return {

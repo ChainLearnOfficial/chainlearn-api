@@ -87,7 +87,18 @@ describe("Concurrent Request Safety", () => {
           quizId: "quiz-1",
         },
       ];
-      const quizData = [{ id: "quiz-1", courseId: "course-1" }];
+      const quizData = [
+        {
+          id: "quiz-1",
+          courseId: "course-1",
+          questions: Array.from({ length: 5 }, (_, index) => ({
+            id: `q${index + 1}`,
+            text: `Question ${index + 1}`,
+            options: ["A", "B"],
+            correctIndex: 0,
+          })),
+        },
+      ];
       const userData = [
         {
           id: "user-1",

@@ -99,11 +99,19 @@ export async function circuitBreakerExecute<T>(fn: () => Promise<T>): Promise<T>
 }
 
 export function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
   return Promise.race([
-    promise,
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new TimeoutError(`Operation timed out after ${ms}ms`)), ms)
-    ),
+    promise.finally(() => {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    }),
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new TimeoutError(`Operation timed out after ${ms}ms`));
+      }, ms);
+    }),
   ]);
 }
 

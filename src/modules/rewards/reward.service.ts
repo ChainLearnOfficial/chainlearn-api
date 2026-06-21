@@ -6,9 +6,10 @@ import {
   courses,
   users,
 } from "../../database/schema.js";
-import { NotFoundError, ForbiddenError, ConflictError } from "../../utils/errors.js";
+import { NotFoundError, ForbiddenError, ConflictError, StellarError } from "../../utils/errors.js";
 import { withLock } from "../../utils/lock.js";
 import { invokeContract } from "../../stellar/transactions.js";
+import { stellarClient } from "../../stellar/client.js";
 import { createQuizProof } from "../../stellar/signatures.js";
 import { isCircuitBreakerError } from "../../stellar/resilience.js";
 import { config } from "../../config/index.js";
@@ -77,7 +78,21 @@ export async function processRewardClaim(
       { method: "claim_reward", status: "error" },
       Number(process.hrtime.bigint() - txStart) / 1e9
     );
-    throw err;
+    if (err instanceof StellarError && (err.message.includes("bad_seq") || err.message.includes("tx_bad_seq"))) {
+      let accountSeq = "unknown";
+      try {
+        const account = await stellarClient.getAccount(user.stellarAddress);
+        accountSeq = account.sequence;
+      } catch (e) {}
+      
+      logger.warn(
+        { submissionId, accountSeq },
+        "bad_seq after invoke — the tx might actually succeed on-chain"
+      );
+      txHash = "pending_indexer_confirmation";
+    } else {
+      throw err;
+    }
   }
 
   await db.transaction(async (tx) => {
@@ -144,16 +159,17 @@ export class RewardService {
 
         const proof = createQuizProof(userId, submission.quizId, submission.score);
 
+        const [user] = await tx
+          .select()
+          .from(users)
+          .where(eq(users.id, userId));
+
+        if (!user) {
+          throw new NotFoundError("User");
+        }
+
         let txHash: string | null = null;
         try {
-          const [user] = await tx
-            .select()
-            .from(users)
-            .where(eq(users.id, userId));
-
-          if (!user) {
-            throw new NotFoundError("User");
-          }
 
           txHash = await invokeContract(
             config.STELLAR_REWARD_CONTRACT_ID,
@@ -184,8 +200,22 @@ export class RewardService {
             };
           }
 
-          logger.error({ err, submissionId }, "On-chain reward claim failed");
-          throw new Error("Failed to process on-chain reward");
+          if (err instanceof StellarError && (err.message.includes("bad_seq") || err.message.includes("tx_bad_seq"))) {
+            let accountSeq = "unknown";
+            try {
+              const account = await stellarClient.getAccount(user.stellarAddress);
+              accountSeq = account.sequence;
+            } catch (e) {}
+
+            logger.warn(
+              { submissionId, accountSeq },
+              "bad_seq after invoke — the tx might actually succeed on-chain"
+            );
+            txHash = "pending_indexer_confirmation";
+          } else {
+            logger.error({ err, submissionId }, "On-chain reward claim failed");
+            throw new Error("Failed to process on-chain reward");
+          }
         }
 
         await tx

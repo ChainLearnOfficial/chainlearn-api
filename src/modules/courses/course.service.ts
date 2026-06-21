@@ -1,6 +1,6 @@
 import { eq, and, count, desc } from "drizzle-orm";
 import { db } from "../../config/database.js";
-import { courses, enrollments } from "../../database/schema.js";
+import { courses, enrollments, quizzes } from "../../database/schema.js";
 import { NotFoundError, ConflictError } from "../../utils/errors.js";
 import { withLock } from "../../utils/lock.js";
 import type {
@@ -105,6 +105,19 @@ export class CourseService {
       isEnrolled = !!enr;
     }
 
+    // Fetch modules from quizzes table
+    const quizModules = await db
+      .select({ moduleId: quizzes.moduleId })
+      .from(quizzes)
+      .where(eq(quizzes.courseId, courseId))
+      .groupBy(quizzes.moduleId);
+
+    const modules: CourseModule[] = quizModules.map((m, index) => ({
+      id: m.moduleId,
+      title: m.moduleId,
+      order: index + 1,
+    }));
+
     return {
       id: course.id,
       title: course.title,
@@ -114,7 +127,7 @@ export class CourseService {
       enrolledCount: 0, // TODO: aggregate
       isEnrolled,
       contentHash: course.contentHash,
-      modules: [], // TODO: fetch from IPFS/content store
+      modules,
       createdAt: course.createdAt,
     };
   }

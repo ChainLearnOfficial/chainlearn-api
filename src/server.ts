@@ -21,6 +21,7 @@ import {
   type RetryJob,
 } from "./services/retry-queue.js";
 import { processRewardClaim } from "./modules/rewards/reward.service.js";
+import { warmCourseCache } from "./cache/warmer.js";
 
 // Route modules
 import { authRoutes } from "./modules/auth/auth.routes.js";
@@ -36,11 +37,15 @@ import { closeRedis } from "./config/redis.js";
 
 async function processRetryJob(job: RetryJob): Promise<boolean> {
   try {
-    const success = await processRewardClaim(job.submissionId, job.userId, job.score);
+    const success = await processRewardClaim(
+      job.submissionId,
+      job.userId,
+      job.score,
+    );
     if (success) {
       logger.info(
         { submissionId: job.submissionId },
-        "Queued reward processed successfully"
+        "Queued reward processed successfully",
       );
     }
     return success;
@@ -96,7 +101,7 @@ async function buildApp() {
     ]);
 
     const allHealthy = [dbCheck, redisCheck, stellarCheck].every(
-      (c) => c.status === "fulfilled"
+      (c) => c.status === "fulfilled",
     );
 
     const status = allHealthy ? "healthy" : "degraded";
@@ -128,7 +133,7 @@ async function buildApp() {
     ]);
 
     const allHealthy = [dbCheck, redisCheck, stellarCheck].every(
-      (c) => c.status === "fulfilled"
+      (c) => c.status === "fulfilled",
     );
 
     return reply.status(allHealthy ? 200 : 503).send({
@@ -157,6 +162,18 @@ async function start() {
 
   startRetryProcessor(processRetryJob);
 
+  try {
+    await warmCourseCache();
+    setInterval(
+      async () => {
+        await warmCourseCache();
+      },
+      5 * 60 * 1000,
+    );
+  } catch (error) {
+    logger.error({ error }, "Cache warmer initialization failed");
+  }
+
   const shutdown = async (signal: string) => {
     logger.info({ signal }, "Received shutdown signal");
     stopRetryProcessor();
@@ -175,7 +192,7 @@ async function start() {
     await app.listen({ port: config.PORT, host: config.HOST });
     logger.info(
       { port: config.PORT, env: config.NODE_ENV },
-      "ChainLearn API server started"
+      "ChainLearn API server started",
     );
   } catch (err) {
     logger.fatal(err, "Failed to start server");

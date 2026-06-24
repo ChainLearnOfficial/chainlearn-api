@@ -21,6 +21,20 @@ services:
     volumes:
       - redisdata:/data
 
+  app-test:
+    build:
+      context: .
+      target: deps
+    volumes:
+      - .:/app
+      - /app/node_modules
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+      - redis
+    command: sh -c "npx drizzle-kit push && npx vitest run src/test/cache.test.ts"
+
 volumes:
   pgdata:
   redisdata:

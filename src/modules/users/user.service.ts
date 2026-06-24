@@ -7,10 +7,24 @@ import {
   credentials,
 } from "../../database/schema.js";
 import { NotFoundError } from "../../utils/errors.js";
-import type { UpdateProfileBody, UserProfile, UserProgress } from "./user.types.js";
+import { cacheGet, cacheSet, cacheDel, cacheKey } from "../../cache/index.js";
+import type {
+  UpdateProfileBody,
+  UserProfile,
+  UserProgress,
+} from "./user.types.js";
 
 export class UserService {
   async getProfile(userId: string): Promise<UserProfile> {
+    const namespace = "user";
+    const cacheKeyString = cacheKey(namespace, "profile", userId);
+
+    const cachedProfile = await cacheGet<UserProfile>(
+      namespace,
+      cacheKeyString,
+    );
+    if (cachedProfile) return cachedProfile;
+
     const user = await db.query.users.findFirst({
       where: eq(users.id, userId),
     });
@@ -19,7 +33,7 @@ export class UserService {
       throw new NotFoundError("User");
     }
 
-    return {
+    const profile: UserProfile = {
       id: user.id,
       stellarAddress: user.stellarAddress,
       displayName: user.displayName,
@@ -30,11 +44,15 @@ export class UserService {
       credits: user.credits,
       createdAt: user.createdAt,
     };
+
+    await cacheSet(cacheKeyString, profile, 300);
+
+    return profile;
   }
 
   async updateProfile(
     userId: string,
-    data: UpdateProfileBody
+    data: UpdateProfileBody,
   ): Promise<UserProfile> {
     const [updated] = await db
       .update(users)
@@ -46,7 +64,7 @@ export class UserService {
       throw new NotFoundError("User");
     }
 
-    return {
+    const profile: UserProfile = {
       id: updated.id,
       stellarAddress: updated.stellarAddress,
       displayName: updated.displayName,
@@ -57,9 +75,22 @@ export class UserService {
       credits: updated.credits,
       createdAt: updated.createdAt,
     };
+
+    await cacheDel(cacheKey("user", "profile", userId));
+
+    return profile;
   }
 
   async getProgress(userId: string): Promise<UserProgress> {
+    const namespace = "user";
+    const cacheKeyString = cacheKey(namespace, "progress", userId);
+
+    const cachedProgress = await cacheGet<UserProgress>(
+      namespace,
+      cacheKeyString,
+    );
+    if (cachedProgress) return cachedProgress;
+
     const user = await db.query.users.findFirst({
       where: eq(users.id, userId),
     });
@@ -77,7 +108,7 @@ export class UserService {
       .select({ value: count() })
       .from(enrollments)
       .where(
-        sql`${enrollments.userId} = ${userId} AND ${enrollments.completedAt} IS NOT NULL`
+        sql`${enrollments.userId} = ${userId} AND ${enrollments.completedAt} IS NOT NULL`,
       );
 
     const [quizScoreResult] = await db
@@ -96,16 +127,20 @@ export class UserService {
       .select({ value: count() })
       .from(quizSubmissions)
       .where(
-        sql`${quizSubmissions.userId} = ${userId} AND ${quizSubmissions.rewardClaimed} = true`
+        sql`${quizSubmissions.userId} = ${userId} AND ${quizSubmissions.rewardClaimed} = true`,
       );
 
-    return {
+    const progress: UserProgress = {
       enrolledCourses: enrolledResult.value,
       completedCourses: completedResult.value,
       totalQuizScore: Number(quizScoreResult.total),
       credentialsEarned: credResult.value,
       rewardsClaimed: rewardsResult.value,
     };
+
+    await cacheSet(cacheKeyString, progress, 10);
+
+    return progress;
   }
 }
 

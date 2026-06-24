@@ -6,7 +6,11 @@ import {
   courses,
   users,
 } from "../../database/schema.js";
-import { NotFoundError, ForbiddenError, ConflictError } from "../../utils/errors.js";
+import {
+  NotFoundError,
+  ForbiddenError,
+  ConflictError,
+} from "../../utils/errors.js";
 import { withLock } from "../../utils/lock.js";
 import { invokeContract } from "../../stellar/transactions.js";
 import { createMintAuthorization } from "../../stellar/signatures.js";
@@ -16,7 +20,11 @@ import crypto from "node:crypto";
 import StellarSdk from "@stellar/stellar-sdk";
 import type { MintResult, CredentialListItem } from "./credential.types.js";
 import { auditLog } from "../../audit/index.js";
-import { stellarTxDurationSeconds, credentialsMintedTotal } from "../../metrics/index.js";
+import {
+  stellarTxDurationSeconds,
+  credentialsMintedTotal,
+} from "../../metrics/index.js";
+import { cacheGet, cacheSet, cacheDel, cacheKey } from "../../cache/index.js";
 
 export class CredentialService {
   /**
@@ -27,7 +35,7 @@ export class CredentialService {
   async mint(
     userId: string,
     courseId: string,
-    submissionId: string
+    submissionId: string,
   ): Promise<MintResult> {
     return withLock(`credential:${userId}:${courseId}`, async () => {
       return db.transaction(async (tx) => {
@@ -37,8 +45,8 @@ export class CredentialService {
           .where(
             and(
               eq(quizSubmissions.id, submissionId),
-              eq(quizSubmissions.userId, userId)
-            )
+              eq(quizSubmissions.userId, userId),
+            ),
           )
           .for("update");
 
@@ -56,8 +64,8 @@ export class CredentialService {
           .where(
             and(
               eq(credentials.userId, userId),
-              eq(credentials.courseId, courseId)
-            )
+              eq(credentials.courseId, courseId),
+            ),
           )
           .for("update");
 
@@ -75,7 +83,11 @@ export class CredentialService {
           throw new NotFoundError("User");
         }
 
-        const auth = createMintAuthorization(userId, courseId, submission.score);
+        const auth = createMintAuthorization(
+          userId,
+          courseId,
+          submission.score,
+        );
 
         let txHash: string;
         const txStart = process.hrtime.bigint();
@@ -88,18 +100,21 @@ export class CredentialService {
               StellarSdk.nativeToScVal(nftAssetCode),
               StellarSdk.nativeToScVal(submission.score, { type: "u32" }),
               StellarSdk.nativeToScVal(Buffer.from(auth.signature, "base64")),
-            ]
+            ],
           );
           stellarTxDurationSeconds.observe(
             { method: "mint_credential", status: "success" },
-            Number(process.hrtime.bigint() - txStart) / 1e9
+            Number(process.hrtime.bigint() - txStart) / 1e9,
           );
         } catch (err) {
           stellarTxDurationSeconds.observe(
             { method: "mint_credential", status: "error" },
-            Number(process.hrtime.bigint() - txStart) / 1e9
+            Number(process.hrtime.bigint() - txStart) / 1e9,
           );
-          logger.error({ err, userId, courseId }, "On-chain credential mint failed");
+          logger.error(
+            { err, userId, courseId },
+            "On-chain credential mint failed",
+          );
           throw new Error("Failed to mint credential on-chain");
         }
 
@@ -116,11 +131,19 @@ export class CredentialService {
           .returning();
 
         credentialsMintedTotal.inc();
-        auditLog("credential.minted", { credentialId: credential.id, userId, courseId, txHash });
+        auditLog("credential.minted", {
+          credentialId: credential.id,
+          userId,
+          courseId,
+          txHash,
+        });
         logger.info(
           { credentialId: credential.id, userId, courseId, txHash },
-          "Credential minted"
+          "Credential minted",
         );
+
+        await cacheDel(cacheKey("user", "progress", userId));
+        await cacheDel(cacheKey("credentials", "list", userId));
 
         return {
           credentialId: credential.id,
@@ -137,6 +160,15 @@ export class CredentialService {
    * List credentials for a user.
    */
   async list(userId: string): Promise<CredentialListItem[]> {
+    const namespace = "credentials";
+    const cacheKeyString = cacheKey(namespace, "list", userId);
+
+    const cached = await cacheGet<CredentialListItem[]>(
+      namespace,
+      cacheKeyString,
+    );
+    if (cached) return cached;
+
     const rows = await db
       .select({
         id: credentials.id,
@@ -152,6 +184,8 @@ export class CredentialService {
       .innerJoin(courses, eq(credentials.courseId, courses.id))
       .where(eq(credentials.userId, userId))
       .orderBy(desc(credentials.mintedAt));
+
+    await cacheSet(cacheKeyString, rows, 60);
 
     return rows;
   }

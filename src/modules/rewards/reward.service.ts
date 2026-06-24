@@ -6,7 +6,11 @@ import {
   courses,
   users,
 } from "../../database/schema.js";
-import { NotFoundError, ForbiddenError, ConflictError, StellarError } from "../../utils/errors.js";
+import {
+  NotFoundError,
+  ForbiddenError,
+  ConflictError,
+} from "../../utils/errors.js";
 import { withLock } from "../../utils/lock.js";
 import { invokeContract } from "../../stellar/transactions.js";
 import { stellarClient } from "../../stellar/client.js";
@@ -18,7 +22,11 @@ import { enqueueReward } from "../../services/retry-queue.js";
 import StellarSdk from "@stellar/stellar-sdk";
 import type { RewardClaimResult, RewardHistoryItem } from "./reward.types.js";
 import { auditLog } from "../../audit/index.js";
-import { stellarTxDurationSeconds, rewardClaimsTotal } from "../../metrics/index.js";
+import {
+  stellarTxDurationSeconds,
+  rewardClaimsTotal,
+} from "../../metrics/index.js";
+import { cacheGet, cacheSet, cacheDel, cacheKey } from "../../cache/index.js";
 
 const REWARD_AMOUNT = 10; // credits per passed quiz
 
@@ -30,7 +38,7 @@ const REWARD_AMOUNT = 10; // credits per passed quiz
 export async function processRewardClaim(
   submissionId: string,
   userId: string,
-  score: number
+  score: number,
 ): Promise<boolean> {
   const [submission] = await db
     .select()
@@ -50,10 +58,7 @@ export async function processRewardClaim(
 
   const proof = createQuizProof(userId, submission.quizId, score);
 
-  const [user] = await db
-    .select()
-    .from(users)
-    .where(eq(users.id, userId));
+  const [user] = await db.select().from(users).where(eq(users.id, userId));
 
   if (!user) return true;
 
@@ -67,16 +72,16 @@ export async function processRewardClaim(
         StellarSdk.Address.fromString(user.stellarAddress).toScVal(),
         StellarSdk.nativeToScVal(score, { type: "u32" }),
         StellarSdk.nativeToScVal(Buffer.from(proof.signature, "base64")),
-      ]
+      ],
     );
     stellarTxDurationSeconds.observe(
       { method: "claim_reward", status: "success" },
-      Number(process.hrtime.bigint() - txStart) / 1e9
+      Number(process.hrtime.bigint() - txStart) / 1e9,
     );
   } catch (err) {
     stellarTxDurationSeconds.observe(
       { method: "claim_reward", status: "error" },
-      Number(process.hrtime.bigint() - txStart) / 1e9
+      Number(process.hrtime.bigint() - txStart) / 1e9,
     );
     if (err instanceof StellarError && (err.message.includes("bad_seq") || err.message.includes("tx_bad_seq"))) {
       let accountSeq = "unknown";
@@ -109,6 +114,10 @@ export async function processRewardClaim(
       .where(eq(users.id, userId));
   });
 
+  await cacheDel(cacheKey("user", "progress", userId));
+  await cacheDel(cacheKey("user", "profile", userId));
+  await cacheDel(cacheKey("rewards", "history", userId));
+
   return true;
 }
 
@@ -121,7 +130,7 @@ export class RewardService {
    */
   async claimReward(
     userId: string,
-    submissionId: string
+    submissionId: string,
   ): Promise<RewardClaimResult> {
     return withLock(`reward:${submissionId}`, async () => {
       return db.transaction(async (tx) => {
@@ -131,8 +140,8 @@ export class RewardService {
           .where(
             and(
               eq(quizSubmissions.id, submissionId),
-              eq(quizSubmissions.userId, userId)
-            )
+              eq(quizSubmissions.userId, userId),
+            ),
           )
           .for("update");
 
@@ -157,7 +166,11 @@ export class RewardService {
           throw new NotFoundError("Quiz");
         }
 
-        const proof = createQuizProof(userId, submission.quizId, submission.score);
+        const proof = createQuizProof(
+          userId,
+          submission.quizId,
+          submission.score,
+        );
 
         const [user] = await tx
           .select()
@@ -178,7 +191,7 @@ export class RewardService {
               StellarSdk.Address.fromString(user.stellarAddress).toScVal(),
               StellarSdk.nativeToScVal(submission.score, { type: "u32" }),
               StellarSdk.nativeToScVal(Buffer.from(proof.signature, "base64")),
-            ]
+            ],
           );
         } catch (err) {
           if (err instanceof NotFoundError) throw err;
@@ -186,17 +199,27 @@ export class RewardService {
           if (isCircuitBreakerError(err)) {
             logger.warn(
               { submissionId },
-              "Stellar circuit breaker open — queuing reward for later"
+              "Stellar circuit breaker open — queuing reward for later",
             );
-            await enqueueReward({ submissionId, userId, score: submission.score });
+            await enqueueReward({
+              submissionId,
+              userId,
+              score: submission.score,
+            });
             rewardClaimsTotal.inc({ status: "queued" });
-            auditLog("reward.queued", { userId, submissionId, amount: REWARD_AMOUNT, queued: true });
+            auditLog("reward.queued", {
+              userId,
+              submissionId,
+              amount: REWARD_AMOUNT,
+              queued: true,
+            });
             return {
               submissionId,
               amount: REWARD_AMOUNT,
               txHash: null,
               queued: true,
-              message: "Reward claim queued — Stellar is temporarily unavailable",
+              message:
+                "Reward claim queued — Stellar is temporarily unavailable",
             };
           }
 
@@ -231,11 +254,20 @@ export class RewardService {
           .where(eq(users.id, userId));
 
         rewardClaimsTotal.inc({ status: "success" });
-        auditLog("reward.claimed", { userId, submissionId, txHash, amount: REWARD_AMOUNT });
+        auditLog("reward.claimed", {
+          userId,
+          submissionId,
+          txHash,
+          amount: REWARD_AMOUNT,
+        });
         logger.info(
           { userId, submissionId, txHash, amount: REWARD_AMOUNT },
-          "Reward claimed"
+          "Reward claimed",
         );
+
+        await cacheDel(cacheKey("user", "progress", userId));
+        await cacheDel(cacheKey("user", "profile", userId));
+        await cacheDel(cacheKey("rewards", "history", userId));
 
         return {
           submissionId,
@@ -252,6 +284,15 @@ export class RewardService {
    * Get reward history for a user.
    */
   async getHistory(userId: string): Promise<RewardHistoryItem[]> {
+    const namespace = "rewards";
+    const cacheKeyString = cacheKey(namespace, "history", userId);
+
+    const cached = await cacheGet<RewardHistoryItem[]>(
+      namespace,
+      cacheKeyString,
+    );
+    if (cached) return cached;
+
     const rows = await db
       .select({
         id: quizSubmissions.id,
@@ -266,12 +307,12 @@ export class RewardService {
       .where(
         and(
           eq(quizSubmissions.userId, userId),
-          eq(quizSubmissions.rewardClaimed, true)
-        )
+          eq(quizSubmissions.rewardClaimed, true),
+        ),
       )
       .orderBy(desc(quizSubmissions.submittedAt));
 
-    return rows.map((row) => ({
+    const history = rows.map((row) => ({
       id: row.id,
       courseTitle: row.courseTitle,
       score: row.score ?? 0,
@@ -279,6 +320,10 @@ export class RewardService {
       txHash: row.txHash,
       claimedAt: row.submittedAt,
     }));
+
+    await cacheSet(cacheKeyString, history, 30);
+
+    return history;
   }
 }
 

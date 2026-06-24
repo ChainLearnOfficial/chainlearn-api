@@ -10,6 +10,7 @@ import {
   NotFoundError,
   ForbiddenError,
   ConflictError,
+  StellarError,
 } from "../../utils/errors.js";
 import { withLock } from "../../utils/lock.js";
 import { invokeContract } from "../../stellar/transactions.js";
@@ -101,12 +102,14 @@ export async function processRewardClaim(
       { method: "claim_reward", status: "success" },
       Number(process.hrtime.bigint() - txStart) / 1e9,
     );
-  } catch (err) {
+  } catch (err: unknown) {
     stellarTxDurationSeconds.observe(
       { method: "claim_reward", status: "error" },
       Number(process.hrtime.bigint() - txStart) / 1e9,
     );
-    if (err instanceof StellarError && (err.message.includes("bad_seq") || err.message.includes("tx_bad_seq"))) {
+    if (err instanceof StellarError && err.message.includes("bad_seq")) {
+      txHash = await handleBadSeqError(submissionId, user.stellarAddress);
+    } else if (err instanceof StellarError && err.message.includes("tx_bad_seq")) {
       txHash = await handleBadSeqError(submissionId, user.stellarAddress);
     } else {
       throw err;
@@ -206,7 +209,7 @@ export class RewardService {
               StellarSdk.nativeToScVal(Buffer.from(proof.signature, "base64")),
             ],
           );
-        } catch (err) {
+        } catch (err: unknown) {
           if (err instanceof NotFoundError) throw err;
 
           if (isCircuitBreakerError(err)) {
@@ -236,7 +239,9 @@ export class RewardService {
             };
           }
 
-          if (err instanceof StellarError && (err.message.includes("bad_seq") || err.message.includes("tx_bad_seq"))) {
+          if (err instanceof StellarError && err.message.includes("bad_seq")) {
+            txHash = await handleBadSeqError(submissionId, user.stellarAddress);
+          } else if (err instanceof StellarError && err.message.includes("tx_bad_seq")) {
             txHash = await handleBadSeqError(submissionId, user.stellarAddress);
           } else {
             logger.error({ err, submissionId }, "On-chain reward claim failed");

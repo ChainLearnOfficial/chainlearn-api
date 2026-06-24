@@ -15,8 +15,10 @@ export class SequenceCache {
     // 2. Load from Horizon
     const account = await stellarClient.getAccount(accountId);
     const seq = BigInt(account.sequence);
-    this.localSeq.set(accountId, seq);
-    return seq.toString();
+    const next = seq + 1n;
+    this.localSeq.set(accountId, next);
+    // Return next sequence number (seq + 1) on first call for consistency
+    return next.toString();
   }
 
   invalidate(accountId: string): void {

@@ -24,10 +24,10 @@ describe("Stellar Sequence Number Management", () => {
     vi.mocked(stellarClient.getAccount).mockResolvedValueOnce({ sequence: "41" } as any);
 
     const seq1 = await sequenceCache.getNextSequence(accountId);
-    expect(seq1).toBe("41");
+    expect(seq1).toBe("42"); // First call returns seq + 1 (41 + 1 = 42)
 
     const seq2 = await sequenceCache.getNextSequence(accountId);
-    expect(seq2).toBe("42"); // 41 + 1
+    expect(seq2).toBe("43"); // Second call returns 42 + 1 = 43
 
     expect(stellarClient.getAccount).toHaveBeenCalledTimes(1);
   });
@@ -62,9 +62,8 @@ describe("Stellar Sequence Number Management", () => {
     // Verify all 10 succeeded
     expect(sequences.length).toBe(10);
 
-    // Verify sequences are monotonic (100, 101, ..., 109)
+    // Verify sequences are monotonic (101, 102, ..., 110)
     expect(sequences).toEqual([
-      "100",
       "101",
       "102",
       "103",
@@ -74,6 +73,7 @@ describe("Stellar Sequence Number Management", () => {
       "107",
       "108",
       "109",
+      "110",
     ]);
 
     // Verify account lock serialization: max concurrent should be exactly 1
@@ -117,9 +117,9 @@ describe("Stellar Sequence Number Management", () => {
 
     const finalSeq = await simulateTxSubmit();
     
-    // First attempt got 100, failed with bad_seq, cache invalidated.
-    // Second attempt hit Horizon, got 105, returned 105.
-    expect(finalSeq).toBe("105");
+    // First attempt got 101 (100 + 1), failed with bad_seq, cache invalidated.
+    // Second attempt hit Horizon, got 105, returned 106 (105 + 1).
+    expect(finalSeq).toBe("106");
     expect(stellarClient.getAccount).toHaveBeenCalledTimes(2);
   });
 });

@@ -31,6 +31,29 @@ import { cacheGet, cacheSet, cacheDel, cacheKey } from "../../cache/index.js";
 const REWARD_AMOUNT = 10; // credits per passed quiz
 
 /**
+ * Helper function to handle bad_seq errors from Stellar transactions.
+ * When a bad_seq error occurs, it attempts to fetch the current account sequence
+ * for debugging purposes. The transaction may still succeed on-chain despite the error.
+ * @returns txHash set to "pending_indexer_confirmation" to indicate uncertain state
+ */
+async function handleBadSeqError(submissionId: string, stellarAddress: string): Promise<string> {
+  let accountSeq = "unknown";
+  try {
+    const account = await stellarClient.getAccount(stellarAddress);
+    accountSeq = account.sequence;
+  } catch {
+    // Intentionally swallow error: sequence fetch is for debugging only
+    // If Horizon is unavailable, we still want to mark the transaction as pending
+  }
+  
+  logger.warn(
+    { submissionId, accountSeq },
+    "bad_seq after invoke — the tx might actually succeed on-chain"
+  );
+  return "pending_indexer_confirmation";
+}
+
+/**
  * Shared reward claim execution logic.
  * Used by both the direct claim path and the background retry processor.
  * Returns true if the claim succeeded, false if it should be retried.
@@ -84,17 +107,7 @@ export async function processRewardClaim(
       Number(process.hrtime.bigint() - txStart) / 1e9,
     );
     if (err instanceof StellarError && (err.message.includes("bad_seq") || err.message.includes("tx_bad_seq"))) {
-      let accountSeq = "unknown";
-      try {
-        const account = await stellarClient.getAccount(user.stellarAddress);
-        accountSeq = account.sequence;
-      } catch (e) {}
-      
-      logger.warn(
-        { submissionId, accountSeq },
-        "bad_seq after invoke — the tx might actually succeed on-chain"
-      );
-      txHash = "pending_indexer_confirmation";
+      txHash = await handleBadSeqError(submissionId, user.stellarAddress);
     } else {
       throw err;
     }
@@ -224,17 +237,7 @@ export class RewardService {
           }
 
           if (err instanceof StellarError && (err.message.includes("bad_seq") || err.message.includes("tx_bad_seq"))) {
-            let accountSeq = "unknown";
-            try {
-              const account = await stellarClient.getAccount(user.stellarAddress);
-              accountSeq = account.sequence;
-            } catch (e) {}
-
-            logger.warn(
-              { submissionId, accountSeq },
-              "bad_seq after invoke — the tx might actually succeed on-chain"
-            );
-            txHash = "pending_indexer_confirmation";
+            txHash = await handleBadSeqError(submissionId, user.stellarAddress);
           } else {
             logger.error({ err, submissionId }, "On-chain reward claim failed");
             throw new Error("Failed to process on-chain reward");

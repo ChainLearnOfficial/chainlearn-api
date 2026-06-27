@@ -70,6 +70,10 @@ describe("Stellar Resilience", () => {
   });
 
   describe("Timeout", () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
     it("should resolve within timeout", async () => {
       const fn = vi.fn().mockResolvedValue("fast");
       const result = await withTimeout(fn(), 5000);
@@ -82,6 +86,35 @@ describe("Stellar Resilience", () => {
       );
 
       await expect(withTimeout(fn(), 100)).rejects.toThrow("timed out");
+    });
+
+    it("should clear the pending timeout when the wrapped promise resolves first", async () => {
+      vi.useFakeTimers();
+
+      await expect(withTimeout(Promise.resolve("fast"), 5000)).resolves.toBe("fast");
+
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("should clear the pending timeout when the wrapped promise rejects first", async () => {
+      vi.useFakeTimers();
+
+      await expect(withTimeout(Promise.reject(new Error("boom")), 5000)).rejects.toThrow("boom");
+
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("should clear the timeout after the timeout branch fires", async () => {
+      vi.useFakeTimers();
+
+      const result = withTimeout(new Promise(() => {}), 1000);
+      const assertion = expect(result).rejects.toThrow("timed out");
+      expect(vi.getTimerCount()).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(1000);
+
+      await assertion;
+      expect(vi.getTimerCount()).toBe(0);
     });
   });
 

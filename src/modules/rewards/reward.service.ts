@@ -10,9 +10,11 @@ import {
   NotFoundError,
   ForbiddenError,
   ConflictError,
+  StellarError,
 } from "../../utils/errors.js";
 import { withLock } from "../../utils/lock.js";
 import { invokeContract } from "../../stellar/transactions.js";
+import { stellarClient } from "../../stellar/client.js";
 import { createQuizProof } from "../../stellar/signatures.js";
 import { isCircuitBreakerError } from "../../stellar/resilience.js";
 import { config } from "../../config/index.js";
@@ -28,6 +30,29 @@ import {
 import { cacheGet, cacheSet, cacheDel, cacheKey } from "../../cache/index.js";
 
 const REWARD_AMOUNT = 10; // credits per passed quiz
+
+/**
+ * Helper function to handle bad_seq errors from Stellar transactions.
+ * When a bad_seq error occurs, it attempts to fetch the current account sequence
+ * for debugging purposes. The transaction may still succeed on-chain despite the error.
+ * @returns txHash set to "pending_indexer_confirmation" to indicate uncertain state
+ */
+async function handleBadSeqError(submissionId: string, stellarAddress: string): Promise<string> {
+  let accountSeq = "unknown";
+  try {
+    const account = await stellarClient.getAccount(stellarAddress);
+    accountSeq = account.sequence;
+  } catch {
+    // Intentionally swallow error: sequence fetch is for debugging only
+    // If Horizon is unavailable, we still want to mark the transaction as pending
+  }
+  
+  logger.warn(
+    { submissionId, accountSeq },
+    "bad_seq after invoke — the tx might actually succeed on-chain"
+  );
+  return "pending_indexer_confirmation";
+}
 
 /**
  * Shared reward claim execution logic.
@@ -77,12 +102,18 @@ export async function processRewardClaim(
       { method: "claim_reward", status: "success" },
       Number(process.hrtime.bigint() - txStart) / 1e9,
     );
-  } catch (err) {
+  } catch (err: unknown) {
     stellarTxDurationSeconds.observe(
       { method: "claim_reward", status: "error" },
       Number(process.hrtime.bigint() - txStart) / 1e9,
     );
-    throw err;
+    if (err instanceof StellarError && err.message.includes("bad_seq")) {
+      txHash = await handleBadSeqError(submissionId, user.stellarAddress);
+    } else if (err instanceof StellarError && err.message.includes("tx_bad_seq")) {
+      txHash = await handleBadSeqError(submissionId, user.stellarAddress);
+    } else {
+      throw err;
+    }
   }
 
   await db.transaction(async (tx) => {
@@ -157,16 +188,17 @@ export class RewardService {
           submission.score,
         );
 
+        const [user] = await tx
+          .select()
+          .from(users)
+          .where(eq(users.id, userId));
+
+        if (!user) {
+          throw new NotFoundError("User");
+        }
+
         let txHash: string | null = null;
         try {
-          const [user] = await tx
-            .select()
-            .from(users)
-            .where(eq(users.id, userId));
-
-          if (!user) {
-            throw new NotFoundError("User");
-          }
 
           txHash = await invokeContract(
             config.STELLAR_REWARD_CONTRACT_ID,
@@ -177,7 +209,7 @@ export class RewardService {
               StellarSdk.nativeToScVal(Buffer.from(proof.signature, "base64")),
             ],
           );
-        } catch (err) {
+        } catch (err: unknown) {
           if (err instanceof NotFoundError) throw err;
 
           if (isCircuitBreakerError(err)) {
@@ -207,8 +239,14 @@ export class RewardService {
             };
           }
 
-          logger.error({ err, submissionId }, "On-chain reward claim failed");
-          throw new Error("Failed to process on-chain reward");
+          if (err instanceof StellarError && err.message.includes("bad_seq")) {
+            txHash = await handleBadSeqError(submissionId, user.stellarAddress);
+          } else if (err instanceof StellarError && err.message.includes("tx_bad_seq")) {
+            txHash = await handleBadSeqError(submissionId, user.stellarAddress);
+          } else {
+            logger.error({ err, submissionId }, "On-chain reward claim failed");
+            throw new Error("Failed to process on-chain reward");
+          }
         }
 
         await tx

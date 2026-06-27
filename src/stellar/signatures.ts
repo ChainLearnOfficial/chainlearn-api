@@ -3,6 +3,33 @@ import crypto from "node:crypto";
 import { getPlatformKeypair } from "../config/stellar.js";
 import { logger } from "../utils/logger.js";
 
+function createQuizProofPayload(
+  userAddress: string,
+  quizId: string,
+  score: number
+): Buffer {
+  return Buffer.from(JSON.stringify({ userAddress, quizId, score }));
+}
+
+function createMintAuthorizationPayload(
+  userAddress: string,
+  courseId: string,
+  score: number
+): Buffer {
+  return Buffer.from(
+    JSON.stringify({
+      action: "mint_credential",
+      userAddress,
+      courseId,
+      score,
+    })
+  );
+}
+
+function hashPayload(payload: Buffer): Buffer {
+  return crypto.createHash("sha256").update(payload).digest();
+}
+
 /**
  * Generate a signed proof that a user passed a quiz.
  * The platform signs (userAddress + quizId + score) so the on-chain
@@ -13,11 +40,7 @@ export function createQuizProof(
   quizId: string,
   score: number
 ): { hash: string; signature: string } {
-  const payload = Buffer.from(
-    JSON.stringify({ userAddress, quizId, score, timestamp: Date.now() })
-  );
-
-  const hash = crypto.createHash("sha256").update(payload).digest();
+  const hash = hashPayload(createQuizProofPayload(userAddress, quizId, score));
   const keypair = getPlatformKeypair();
   const signature = keypair.sign(hash);
 
@@ -42,6 +65,17 @@ export function verifyQuizProof(
   try {
     const keypair = getPlatformKeypair();
     const hashBuffer = Buffer.from(hash, "hex");
+    const expectedHash = hashPayload(
+      createQuizProofPayload(userAddress, quizId, score)
+    );
+
+    if (
+      hashBuffer.length !== expectedHash.length ||
+      !crypto.timingSafeEqual(hashBuffer, expectedHash)
+    ) {
+      return false;
+    }
+
     return keypair.verify(hashBuffer, Buffer.from(signature, "base64"));
   } catch (err) {
     logger.warn({ err, quizId }, "Quiz proof verification failed");
@@ -57,17 +91,9 @@ export function createMintAuthorization(
   courseId: string,
   score: number
 ): { hash: string; signature: string } {
-  const payload = Buffer.from(
-    JSON.stringify({
-      action: "mint_credential",
-      userAddress,
-      courseId,
-      score,
-      timestamp: Date.now(),
-    })
+  const hash = hashPayload(
+    createMintAuthorizationPayload(userAddress, courseId, score)
   );
-
-  const hash = crypto.createHash("sha256").update(payload).digest();
   const keypair = getPlatformKeypair();
   const signature = keypair.sign(hash);
 

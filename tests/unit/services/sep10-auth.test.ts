@@ -177,7 +177,7 @@ describe("AuthService - SEP-10 Verification", () => {
 
       await expect(
         authService.verifyChallenge(stellarAddress, signedXdr)
-      ).rejects.toThrow("Signature verification failed");
+      ).rejects.toThrow("Invalid signature");
     });
 
     it("should accept valid signed challenge and create new user", async () => {

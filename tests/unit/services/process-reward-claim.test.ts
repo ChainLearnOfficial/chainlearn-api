@@ -1,15 +1,20 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-vi.mock("@stellar/stellar-sdk", () => ({
-  default: {
-    Address: {
-      fromString: vi.fn().mockReturnValue({
-        toScVal: vi.fn().mockReturnValue("mock-sc-val"),
-      }),
+vi.mock("@stellar/stellar-sdk", async () => {
+  const actual = await vi.importActual<typeof import("@stellar/stellar-sdk")>("@stellar/stellar-sdk");
+  return {
+    ...actual,
+    default: {
+      ...actual.default,
+      Address: {
+        fromString: vi.fn().mockReturnValue({
+          toScVal: vi.fn().mockReturnValue("mock-sc-val"),
+        }),
+      },
+      nativeToScVal: vi.fn().mockReturnValue("mock-native-val"),
     },
-    nativeToScVal: vi.fn().mockReturnValue("mock-native-val"),
-  },
-}));
+  };
+});
 
 vi.mock("../../../src/config/database.js", () => {
   const mockDb = {
@@ -38,6 +43,8 @@ vi.mock("../../../src/stellar/resilience.js", () => ({
 vi.mock("../../../src/config/index.js", () => ({
   config: {
     STELLAR_REWARD_CONTRACT_ID: "test-reward-contract",
+    STELLAR_HORIZON_URL: "https://horizon-testnet.stellar.org",
+    STELLAR_SOROBAN_RPC_URL: "https://soroban-testnet.stellar.org",
   },
 }));
 

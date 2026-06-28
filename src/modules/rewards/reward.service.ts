@@ -64,6 +64,10 @@ export async function processRewardClaim(
   userId: string,
   score: number,
 ): Promise<boolean> {
+  if (score < 70) {
+    return true;
+  }
+
   const [submission] = await db
     .select()
     .from(quizSubmissions)

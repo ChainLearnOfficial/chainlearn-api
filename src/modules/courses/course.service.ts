@@ -1,6 +1,6 @@
 import { eq, and, count, desc, inArray } from "drizzle-orm";
 import { db } from "../../config/database.js";
-import { courses, enrollments } from "../../database/schema.js";
+import { courses, enrollments, quizzes } from "../../database/schema.js";
 import { NotFoundError, ConflictError } from "../../utils/errors.js";
 import { withLock } from "../../utils/lock.js";
 import {
@@ -145,6 +145,13 @@ export class CourseService {
         .from(enrollments)
         .where(eq(enrollments.courseId, courseId));
 
+      const moduleRows = await db
+        .select({ moduleId: quizzes.moduleId })
+        .from(quizzes)
+        .where(eq(quizzes.courseId, courseId))
+        .groupBy(quizzes.moduleId)
+        .orderBy(quizzes.moduleId);
+
       cachedDetail = {
         id: course.id,
         title: course.title,
@@ -153,7 +160,11 @@ export class CourseService {
         isActive: course.isActive,
         enrolledCount: countResult?.value ?? 0,
         contentHash: course.contentHash,
-        modules: [], // TODO: fetch from IPFS/content store
+        modules: moduleRows.map((row, i) => ({
+          id: row.moduleId,
+          title: row.moduleId,
+          order: i + 1,
+        })),
         createdAt: course.createdAt,
       };
 

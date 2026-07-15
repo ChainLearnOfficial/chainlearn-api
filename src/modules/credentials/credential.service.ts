@@ -3,6 +3,7 @@ import { db } from "../../config/database.js";
 import {
   credentials,
   quizSubmissions,
+  quizzes,
   courses,
   users,
 } from "../../database/schema.js";
@@ -56,6 +57,15 @@ export class CredentialService {
 
         if (!submission.score || submission.score < 1) {
           throw new ForbiddenError("Quiz not passed — cannot mint credential");
+        }
+
+        const [quiz] = await tx
+          .select()
+          .from(quizzes)
+          .where(eq(quizzes.id, submission.quizId));
+
+        if (!quiz || quiz.courseId !== courseId) {
+          throw new ForbiddenError("Quiz submission does not belong to this course");
         }
 
         const [existing] = await tx

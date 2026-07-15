@@ -30,6 +30,7 @@ import {
 import { cacheGet, cacheSet, cacheDel, cacheKey } from "../../cache/index.js";
 
 const REWARD_AMOUNT = 10; // credits per passed quiz
+const PASSING_PERCENTAGE = 70;
 
 /**
  * Helper function to handle bad_seq errors from Stellar transactions.
@@ -80,7 +81,13 @@ export async function processRewardClaim(
 
   if (!quiz) return true;
 
-  const proof = createQuizProof(userId, submission.quizId, score);
+  const questions = quiz.questions as Array<unknown>;
+  const percentage = Math.round((submission.score / questions.length) * 100);
+  if (percentage < PASSING_PERCENTAGE) {
+    return true;
+  }
+
+  const proof = createQuizProof(userId, submission.quizId, submission.score);
 
   const [user] = await db.select().from(users).where(eq(users.id, userId));
 
@@ -180,6 +187,14 @@ export class RewardService {
 
         if (!quiz) {
           throw new NotFoundError("Quiz");
+        }
+
+        const questions = quiz.questions as Array<unknown>;
+        const percentage = Math.round((submission.score / questions.length) * 100);
+        if (percentage < PASSING_PERCENTAGE) {
+          throw new ForbiddenError(
+            `Score ${percentage}% below passing threshold of ${PASSING_PERCENTAGE}%`
+          );
         }
 
         const proof = createQuizProof(

@@ -14,7 +14,7 @@ export function createQuizProof(
   score: number
 ): { hash: string; signature: string } {
   const payload = Buffer.from(
-    JSON.stringify({ userAddress, quizId, score, timestamp: Date.now() })
+    JSON.stringify({ userAddress, quizId, score })
   );
 
   const hash = crypto.createHash("sha256").update(payload).digest();
@@ -41,8 +41,17 @@ export function verifyQuizProof(
 ): boolean {
   try {
     const keypair = getPlatformKeypair();
-    const hashBuffer = Buffer.from(hash, "hex");
-    return keypair.verify(hashBuffer, Buffer.from(signature, "base64"));
+
+    const expectedPayload = Buffer.from(
+      JSON.stringify({ userAddress, quizId, score })
+    );
+    const expectedHash = crypto.createHash("sha256").update(expectedPayload).digest();
+
+    if (expectedHash.toString("hex") !== hash) {
+      return false;
+    }
+
+    return keypair.verify(expectedHash, Buffer.from(signature, "base64"));
   } catch (err) {
     logger.warn({ err, quizId }, "Quiz proof verification failed");
     return false;
@@ -63,7 +72,6 @@ export function createMintAuthorization(
       userAddress,
       courseId,
       score,
-      timestamp: Date.now(),
     })
   );
 

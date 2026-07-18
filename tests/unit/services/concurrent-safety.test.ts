@@ -54,6 +54,16 @@ vi.mock("../../../src/utils/logger.js", () => ({
   logger: { info: vi.fn(), error: vi.fn(), warn: vi.fn() },
 }));
 
+vi.mock("../../../src/cache/index.js", () => ({
+  cacheGet: vi.fn().mockResolvedValue(null),
+  cacheSet: vi.fn().mockResolvedValue(undefined),
+  cacheDel: vi.fn().mockResolvedValue(undefined),
+  cacheKey: vi.fn((...parts: string[]) => parts.join(":")),
+  cacheInvalidatePattern: vi.fn().mockResolvedValue(undefined),
+  cacheHits: { labels: vi.fn().mockReturnValue({ inc: vi.fn() }) },
+  cacheMisses: { labels: vi.fn().mockReturnValue({ inc: vi.fn() }) },
+}));
+
 import { db } from "../../../src/config/database.js";
 import { rewardService } from "../../../src/modules/rewards/reward.service.js";
 import { credentialService } from "../../../src/modules/credentials/credential.service.js";
@@ -94,7 +104,7 @@ describe("Concurrent Request Safety", () => {
           quizId: "quiz-1",
         },
       ];
-      const quizData = [{ id: "quiz-1", courseId: "course-1" }];
+      const quizData = [{ id: "quiz-1", courseId: "course-1", questions: [{ id: "q1" }] }];
       const userData = [
         {
           id: "user-1",
@@ -204,7 +214,8 @@ describe("Concurrent Request Safety", () => {
   describe("Credential Minting", () => {
     it("should prevent duplicate mint via distributed lock", async () => {
       mockDb.transaction.mockImplementation(async (fn: Function) => {
-        const submissionData = [{ id: "sub-1", userId: "user-1", score: 5 }];
+        const submissionData = [{ id: "sub-1", userId: "user-1", score: 5, quizId: "quiz-1" }];
+        const quizData = [{ id: "quiz-1", courseId: "course-1" }];
         const existingCredData: any[] = [];
         const userData = [
           {
@@ -214,7 +225,7 @@ describe("Concurrent Request Safety", () => {
           },
         ];
 
-        const chainData = [submissionData, existingCredData, userData];
+        const chainData = [submissionData, quizData, existingCredData, userData];
         let callIndex = 0;
 
         const makeChain = (result: any[]) => {
@@ -250,7 +261,8 @@ describe("Concurrent Request Safety", () => {
     it("should throw ConflictError when credential already exists", async () => {
       mockDb.transaction.mockImplementation(async (fn: Function) => {
         const chainData = [
-          [{ id: "sub-1", userId: "user-1", score: 5 }],
+          [{ id: "sub-1", userId: "user-1", score: 5, quizId: "quiz-1" }],
+          [{ id: "quiz-1", courseId: "course-1" }],
           [{ id: "cred-existing", userId: "user-1", courseId: "course-1" }],
         ];
         let callIndex = 0;

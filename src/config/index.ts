@@ -49,21 +49,24 @@ function loadConfig(): Env {
   const result = envSchema.safeParse(process.env);
   if (!result.success) {
     if (process.env.NODE_ENV === "test") {
-      // In test mode, warn but don't exit — tests mock what they need
+      // In test mode, warn but don't exit — tests mock what they need.
+      // Merge with process.env so CI-provided values (DATABASE_URL, REDIS_URL, etc.)
+      // are preserved; only truly missing vars get test defaults.
       console.warn(
         "Missing env vars in test mode (expected if mocking config):",
         result.error.flatten().fieldErrors
       );
       return envSchema.parse({
-        DATABASE_URL: "postgresql://localhost:5432/test",
+        DATABASE_URL: process.env.DATABASE_URL || "postgresql://chainlearn_test:test_password@localhost:5432/chainlearn_test",
+        REDIS_URL: process.env.REDIS_URL || "redis://localhost:6379",
         JWT_SECRET:
-          "test-secret-key-that-is-at-least-sixty-four-characters-long-for-tests",
-        STELLAR_HORIZON_URL: "https://horizon-testnet.stellar.org",
-        STELLAR_SOROBAN_RPC_URL: "https://soroban-testnet.stellar.org",
-        STELLAR_PLATFORM_SECRET: "test",
-        STELLAR_QUIZ_CONTRACT_ID: "test",
-        STELLAR_REWARD_CONTRACT_ID: "test",
-        STELLAR_CREDENTIAL_CONTRACT_ID: "test",
+          process.env.JWT_SECRET || "test-secret-key-that-is-at-least-sixty-four-characters-long-for-tests",
+        STELLAR_HORIZON_URL: process.env.STELLAR_HORIZON_URL || "https://horizon-testnet.stellar.org",
+        STELLAR_SOROBAN_RPC_URL: process.env.STELLAR_SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org",
+        STELLAR_PLATFORM_SECRET: process.env.STELLAR_PLATFORM_SECRET || "test",
+        STELLAR_QUIZ_CONTRACT_ID: process.env.STELLAR_QUIZ_CONTRACT_ID || "test",
+        STELLAR_REWARD_CONTRACT_ID: process.env.STELLAR_REWARD_CONTRACT_ID || "test",
+        STELLAR_CREDENTIAL_CONTRACT_ID: process.env.STELLAR_CREDENTIAL_CONTRACT_ID || "test",
       });
     }
     console.error(

@@ -65,6 +65,16 @@ vi.mock("../../../src/metrics/index.js", () => ({
   stellarTxDurationSeconds: { observe: vi.fn() },
 }));
 
+vi.mock("../../../src/cache/index.js", () => ({
+  cacheGet: vi.fn().mockResolvedValue(null),
+  cacheSet: vi.fn().mockResolvedValue(undefined),
+  cacheDel: vi.fn().mockResolvedValue(undefined),
+  cacheKey: vi.fn((...parts: string[]) => parts.join(":")),
+  cacheInvalidatePattern: vi.fn().mockResolvedValue(undefined),
+  cacheHits: { labels: vi.fn().mockReturnValue({ inc: vi.fn() }) },
+  cacheMisses: { labels: vi.fn().mockReturnValue({ inc: vi.fn() }) },
+}));
+
 import { db } from "../../../src/config/database.js";
 import { processRewardClaim } from "../../../src/modules/rewards/reward.service.js";
 import { invokeContract } from "../../../src/stellar/transactions.js";
@@ -144,7 +154,7 @@ describe("processRewardClaim", () => {
         quizId: "quiz-1",
       },
     ]);
-    const quizChain = makeThenable([{ id: "quiz-1", courseId: "course-1" }]);
+    const quizChain = makeThenable([{ id: "quiz-1", courseId: "course-1", questions: [{ id: "q1" }] }]);
     const userChain = makeThenable([]);
 
     mockDb.select
@@ -166,7 +176,7 @@ describe("processRewardClaim", () => {
         quizId: "quiz-1",
       },
     ]);
-    const quizChain = makeThenable([{ id: "quiz-1", courseId: "course-1" }]);
+    const quizChain = makeThenable([{ id: "quiz-1", courseId: "course-1", questions: [{ id: "q1" }] }]);
     const userChain = makeThenable([
       {
         id: "user-1",
@@ -211,7 +221,7 @@ describe("processRewardClaim", () => {
         quizId: "quiz-1",
       },
     ]);
-    const quizChain = makeThenable([{ id: "quiz-1", courseId: "course-1" }]);
+    const quizChain = makeThenable([{ id: "quiz-1", courseId: "course-1", questions: [{ id: "q1" }] }]);
     const userChain = makeThenable([
       {
         id: "user-1",

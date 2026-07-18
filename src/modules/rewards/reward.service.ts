@@ -80,8 +80,10 @@ export async function processRewardClaim(
     .where(eq(quizzes.id, submission.quizId));
 
   if (!quiz) return true;
+  if (submission.score === null) return true;
 
-  const questions = quiz.questions as Array<unknown>;
+  const questions = quiz.questions as Array<unknown> | null;
+  if (!questions || questions.length === 0) return true;
   const percentage = Math.round((submission.score / questions.length) * 100);
   if (percentage < PASSING_PERCENTAGE) {
     return true;
@@ -189,7 +191,10 @@ export class RewardService {
           throw new NotFoundError("Quiz");
         }
 
-        const questions = quiz.questions as Array<unknown>;
+        const questions = quiz.questions as Array<unknown> | null;
+        if (!questions || questions.length === 0) {
+          throw new ForbiddenError("Quiz has no questions");
+        }
         const percentage = Math.round((submission.score / questions.length) * 100);
         if (percentage < PASSING_PERCENTAGE) {
           throw new ForbiddenError(

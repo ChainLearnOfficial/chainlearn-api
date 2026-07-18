@@ -5,6 +5,7 @@ import { z } from "zod";
 export const mintCredentialSchema = z.object({
   courseId: z.string().uuid("Invalid course ID"),
   submissionId: z.string().uuid("Invalid submission ID"),
+  idempotencyKey: z.string().min(16).max(64),
 });
 
 // ─── Types ──────────────────────────────────────────────────────────────────

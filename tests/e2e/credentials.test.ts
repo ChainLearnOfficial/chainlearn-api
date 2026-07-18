@@ -60,6 +60,7 @@ describe("Credentials API", () => {
         payload: {
           courseId: "00000000-0000-0000-0000-000000000001",
           submissionId: "00000000-0000-0000-0000-000000000002",
+          idempotencyKey: "test-key-credentials-mint-unauth",
         },
       });
 
@@ -77,6 +78,7 @@ describe("Credentials API", () => {
         payload: {
           courseId: "00000000-0000-0000-0000-000000000001",
           submissionId: "00000000-0000-0000-0000-000000000001",
+          idempotencyKey: "test-key-credentials-mint-valid",
         },
       });
 
@@ -101,6 +103,7 @@ describe("Credentials API", () => {
         payload: {
           courseId: "00000000-0000-0000-0000-000000000001",
           submissionId: "00000000-0000-0000-0000-000000000099",
+          idempotencyKey: "test-key-credentials-mint-notpassed",
         },
       });
 
@@ -123,6 +126,7 @@ describe("Credentials API", () => {
         payload: {
           courseId: "00000000-0000-0000-0000-000000000001",
           submissionId: "00000000-0000-0000-0000-000000000001",
+          idempotencyKey: "test-key-credentials-mint-001",
         },
       });
 
@@ -135,6 +139,7 @@ describe("Credentials API", () => {
           payload: {
             courseId: "00000000-0000-0000-0000-000000000001",
             submissionId: "00000000-0000-0000-0000-000000000001",
+            idempotencyKey: "test-key-credentials-mint-002",
           },
         });
 
@@ -144,6 +149,23 @@ describe("Credentials API", () => {
           expect(body.error).toBe("CONFLICT");
         }
       }
+    });
+
+    it("should reject request without idempotency key", async () => {
+      const token = createToken();
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/credentials/mint",
+        headers: { authorization: `Bearer ${token}` },
+        payload: {
+          courseId: "00000000-0000-0000-0000-000000000001",
+          submissionId: "00000000-0000-0000-0000-000000000002",
+        },
+      });
+
+      // Auth may reject (401) or validation may reject missing idempotencyKey (400)
+      expect([400, 401]).toContain(response.statusCode);
     });
   });
 });

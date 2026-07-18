@@ -21,6 +21,7 @@ describe("Rewards API", () => {
         url: "/api/rewards/claim",
         payload: {
           submissionId: "00000000-0000-0000-0000-000000000000",
+          idempotencyKey: "test-key-rewards-claim-unauth",
         },
       });
 
@@ -46,6 +47,47 @@ describe("Rewards API", () => {
       });
 
       // Auth may reject the token (401) or validation may reject the ID (400)
+      expect([400, 401]).toContain(response.statusCode);
+    });
+
+    it("should reject request without idempotency key", async () => {
+      const token = app.jwt.sign({
+        sub: "00000000-0000-0000-0000-000000000001",
+        stellarAddress:
+          "GALICE0000000000000000000000000000000000000000000000000000000",
+      });
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/rewards/claim",
+        headers: { authorization: `Bearer ${token}` },
+        payload: {
+          submissionId: "00000000-0000-0000-0000-000000000000",
+        },
+      });
+
+      // Auth may reject (401) or validation may reject missing idempotencyKey (400)
+      expect([400, 401]).toContain(response.statusCode);
+    });
+
+    it("should reject idempotency key that is too short", async () => {
+      const token = app.jwt.sign({
+        sub: "00000000-0000-0000-0000-000000000001",
+        stellarAddress:
+          "GALICE0000000000000000000000000000000000000000000000000000000",
+      });
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/rewards/claim",
+        headers: { authorization: `Bearer ${token}` },
+        payload: {
+          submissionId: "00000000-0000-0000-0000-000000000000",
+          idempotencyKey: "short",
+        },
+      });
+
+      // Auth may reject (401) or validation may reject short key (400)
       expect([400, 401]).toContain(response.statusCode);
     });
   });

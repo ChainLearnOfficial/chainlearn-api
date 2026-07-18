@@ -20,6 +20,10 @@ import {
   stopRetryProcessor,
   type RetryJob,
 } from "./services/retry-queue.js";
+import {
+  startIdempotencyCleanup,
+  stopIdempotencyCleanup,
+} from "./jobs/cleanup-idempotency.js";
 import { processRewardClaim } from "./modules/rewards/reward.service.js";
 import { warmCourseCache } from "./cache/warmer.js";
 
@@ -161,6 +165,7 @@ async function start() {
   const app = await buildApp();
 
   startRetryProcessor(processRetryJob);
+  startIdempotencyCleanup();
 
   try {
     await warmCourseCache();
@@ -177,6 +182,7 @@ async function start() {
   const shutdown = async (signal: string) => {
     logger.info({ signal }, "Received shutdown signal");
     stopRetryProcessor();
+    stopIdempotencyCleanup();
     await app.close();
     await closeDatabase();
     await closeRedis();

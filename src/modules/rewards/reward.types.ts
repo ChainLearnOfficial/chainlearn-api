@@ -4,6 +4,7 @@ import { z } from "zod";
 
 export const claimRewardSchema = z.object({
   submissionId: z.string().uuid("Invalid submission ID"),
+  idempotencyKey: z.string().min(16).max(64),
 });
 
 // ─── Types ──────────────────────────────────────────────────────────────────

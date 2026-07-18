@@ -101,14 +101,26 @@ export class AuthService {
       throw new UnauthorizedError("Transaction source does not match claimed address");
     }
 
-    // Check time bounds to prevent stale/replay attacks
+    // Verify time bounds exist and are valid (required by SEP-10)
+    if (!transaction.timeBounds) {
+      throw new UnauthorizedError("Transaction missing required time bounds");
+    }
     const now = Math.floor(Date.now() / 1000);
-    if (transaction.timeBounds) {
-      const minTime = parseInt(transaction.timeBounds.minTime, 10);
-      const maxTime = parseInt(transaction.timeBounds.maxTime, 10);
-      if (now < minTime || now > maxTime) {
-        throw new UnauthorizedError("Challenge has expired");
-      }
+    const minTime = parseInt(transaction.timeBounds.minTime, 10);
+    const maxTime = parseInt(transaction.timeBounds.maxTime, 10);
+    if (maxTime === 0) {
+      throw new UnauthorizedError("Transaction missing required time bounds");
+    }
+    if (now < minTime || now > maxTime) {
+      throw new UnauthorizedError("Challenge has expired");
+    }
+
+    // Verify the transaction contains the expected manageData operation
+    const hasManageData = transaction.operations.some(
+      (op) => op.type === "manageData" && op.name === HOME_DOMAIN
+    );
+    if (!hasManageData) {
+      throw new UnauthorizedError("Invalid challenge transaction: missing manageData operation");
     }
 
     // Verify the signature against the claimed public key

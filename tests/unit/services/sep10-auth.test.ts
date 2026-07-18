@@ -151,6 +151,62 @@ describe("AuthService - SEP-10 Verification", () => {
       ).rejects.toThrow("Challenge has expired");
     });
 
+    it("should reject when transaction has no time bounds", async () => {
+      const keypair = StellarSdk.Keypair.random();
+      const stellarAddress = keypair.publicKey();
+
+      mockRedis.exists.mockResolvedValue(1);
+
+      const account = new StellarSdk.Account(stellarAddress, "0");
+      const transaction = new StellarSdk.TransactionBuilder(account, {
+        fee: StellarSdk.BASE_FEE,
+        networkPassphrase: StellarSdk.Networks.TESTNET,
+      })
+        .addOperation(
+          StellarSdk.Operation.manageData({
+            name: "chainlearn.io",
+            value: "test-nonce",
+          })
+        )
+        .setTimeout(StellarSdk.TimeoutInfinite)
+        .build();
+
+      transaction.sign(keypair);
+      const signedXdr = transaction.toEnvelope().toXDR("base64");
+
+      await expect(
+        authService.verifyChallenge(stellarAddress, signedXdr)
+      ).rejects.toThrow("Transaction missing required time bounds");
+    });
+
+    it("should reject when transaction lacks expected manageData operation", async () => {
+      const keypair = StellarSdk.Keypair.random();
+      const stellarAddress = keypair.publicKey();
+
+      mockRedis.exists.mockResolvedValue(1);
+
+      const account = new StellarSdk.Account(stellarAddress, "0");
+      const transaction = new StellarSdk.TransactionBuilder(account, {
+        fee: StellarSdk.BASE_FEE,
+        networkPassphrase: StellarSdk.Networks.TESTNET,
+      })
+        .addOperation(
+          StellarSdk.Operation.manageData({
+            name: "wrong_operation_name",
+            value: "test-nonce",
+          })
+        )
+        .setTimeout(300)
+        .build();
+
+      transaction.sign(keypair);
+      const signedXdr = transaction.toEnvelope().toXDR("base64");
+
+      await expect(
+        authService.verifyChallenge(stellarAddress, signedXdr)
+      ).rejects.toThrow("Invalid challenge transaction: missing manageData operation");
+    });
+
     it("should reject when signature is invalid", async () => {
       const keypair = StellarSdk.Keypair.random();
       const stellarAddress = keypair.publicKey();

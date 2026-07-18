@@ -80,6 +80,7 @@ export async function processRewardClaim(
     .where(eq(quizzes.id, submission.quizId));
 
   if (!quiz) return true;
+  if (submission.score === null) return true;
 
   const questions = quiz.questions as Array<unknown>;
   const percentage = Math.round((submission.score / questions.length) * 100);

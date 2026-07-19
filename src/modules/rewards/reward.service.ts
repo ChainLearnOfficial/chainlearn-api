@@ -84,12 +84,12 @@ export async function processRewardClaim(
 
   const questions = quiz.questions as Array<unknown> | null;
   if (!questions || questions.length === 0) return true;
-  const percentage = Math.round((submission.score / questions.length) * 100);
+  const percentage = Math.round((score / questions.length) * 100);
   if (percentage < PASSING_PERCENTAGE) {
     return true;
   }
 
-  const proof = createQuizProof(userId, submission.quizId, submission.score);
+  const proof = createQuizProof(userId, submission.quizId, score);
 
   const [user] = await db.select().from(users).where(eq(users.id, userId));
 

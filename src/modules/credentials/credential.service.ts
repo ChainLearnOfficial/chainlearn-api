@@ -68,6 +68,17 @@ export class CredentialService {
           throw new ForbiddenError("Quiz submission does not belong to this course");
         }
 
+        const questions = quiz.questions as Array<unknown> | null;
+        if (!questions || questions.length === 0) {
+          throw new ForbiddenError("Quiz has no questions");
+        }
+        const percentage = Math.round((submission.score / questions.length) * 100);
+        if (percentage < 70) {
+          throw new ForbiddenError(
+            `Score ${percentage}% below passing threshold of 70%`,
+          );
+        }
+
         const [existing] = await tx
           .select()
           .from(credentials)

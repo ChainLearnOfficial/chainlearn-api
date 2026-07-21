@@ -67,8 +67,15 @@ export function registerErrorHandler(app: FastifyInstance): void {
     }
   );
 
-  // Handle 404 for unmatched routes
-  app.setNotFoundHandler((_request, reply) => {
+  // Handle 404 for unmatched routes, with backwards compatibility redirect
+  app.setNotFoundHandler((request, reply) => {
+    if (
+      request.url.startsWith("/api/") &&
+      !request.url.startsWith("/api/v")
+    ) {
+      const newPath = request.url.replace("/api/", "/api/v1/");
+      return reply.code(301).redirect(newPath);
+    }
     reply.status(404).send({
       statusCode: 404,
       error: "NOT_FOUND",

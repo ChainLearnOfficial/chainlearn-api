@@ -21,11 +21,11 @@ describe("Users API", () => {
         "GALICE0000000000000000000000000000000000000000000000000000000",
     });
 
-  describe("GET /api/users/me", () => {
+  describe("GET /api/v1/users/me", () => {
     it("should reject unauthenticated requests", async () => {
       const response = await app.inject({
         method: "GET",
-        url: "/api/users/me",
+        url: "/api/v1/users/me",
       });
 
       expect(response.statusCode).toBe(401);
@@ -38,7 +38,7 @@ describe("Users API", () => {
 
       const response = await app.inject({
         method: "GET",
-        url: "/api/users/me",
+        url: "/api/v1/users/me",
         headers: { authorization: `Bearer ${token}` },
       });
 
@@ -56,7 +56,7 @@ describe("Users API", () => {
 
       const response = await app.inject({
         method: "GET",
-        url: "/api/users/me",
+        url: "/api/v1/users/me",
         headers: { authorization: `Bearer ${token}` },
       });
 
@@ -70,11 +70,11 @@ describe("Users API", () => {
     });
   });
 
-  describe("PUT /api/users/me", () => {
+  describe("PUT /api/v1/users/me", () => {
     it("should reject unauthenticated requests", async () => {
       const response = await app.inject({
         method: "PUT",
-        url: "/api/users/me",
+        url: "/api/v1/users/me",
         payload: { displayName: "Alice" },
       });
 
@@ -86,7 +86,7 @@ describe("Users API", () => {
 
       const response = await app.inject({
         method: "PUT",
-        url: "/api/users/me",
+        url: "/api/v1/users/me",
         headers: { authorization: `Bearer ${token}` },
         payload: { displayName: "Alice ChainLearner" },
       });
@@ -104,7 +104,7 @@ describe("Users API", () => {
 
       const response = await app.inject({
         method: "PUT",
-        url: "/api/users/me",
+        url: "/api/v1/users/me",
         headers: { authorization: `Bearer ${token}` },
         payload: {
           background: "Software developer exploring blockchain",
@@ -130,7 +130,7 @@ describe("Users API", () => {
 
       const response = await app.inject({
         method: "PUT",
-        url: "/api/users/me",
+        url: "/api/v1/users/me",
         headers: { authorization: `Bearer ${token}` },
         payload: { background: "" },
       });
@@ -140,11 +140,11 @@ describe("Users API", () => {
     });
   });
 
-  describe("GET /api/users/me/progress", () => {
+  describe("GET /api/v1/users/me/progress", () => {
     it("should reject unauthenticated requests", async () => {
       const response = await app.inject({
         method: "GET",
-        url: "/api/users/me/progress",
+        url: "/api/v1/users/me/progress",
       });
 
       expect(response.statusCode).toBe(401);
@@ -155,7 +155,7 @@ describe("Users API", () => {
 
       const response = await app.inject({
         method: "GET",
-        url: "/api/users/me/progress",
+        url: "/api/v1/users/me/progress",
         headers: { authorization: `Bearer ${token}` },
       });
 

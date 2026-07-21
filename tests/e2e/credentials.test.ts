@@ -21,11 +21,11 @@ describe("Credentials API", () => {
         "GALICE0000000000000000000000000000000000000000000000000000000",
     });
 
-  describe("GET /api/credentials", () => {
+  describe("GET /api/v1/credentials", () => {
     it("should reject unauthenticated requests", async () => {
       const response = await app.inject({
         method: "GET",
-        url: "/api/credentials",
+        url: "/api/v1/credentials",
       });
 
       expect(response.statusCode).toBe(401);
@@ -38,7 +38,7 @@ describe("Credentials API", () => {
 
       const response = await app.inject({
         method: "GET",
-        url: "/api/credentials",
+        url: "/api/v1/credentials",
         headers: { authorization: `Bearer ${token}` },
       });
 
@@ -52,11 +52,11 @@ describe("Credentials API", () => {
     });
   });
 
-  describe("POST /api/credentials/mint", () => {
+  describe("POST /api/v1/credentials/mint", () => {
     it("should reject unauthenticated requests", async () => {
       const response = await app.inject({
         method: "POST",
-        url: "/api/credentials/mint",
+        url: "/api/v1/credentials/mint",
         payload: {
           courseId: "00000000-0000-0000-0000-000000000001",
           submissionId: "00000000-0000-0000-0000-000000000002",
@@ -73,7 +73,7 @@ describe("Credentials API", () => {
       // Attempt to mint — requires a valid passed submission
       const response = await app.inject({
         method: "POST",
-        url: "/api/credentials/mint",
+        url: "/api/v1/credentials/mint",
         headers: { authorization: `Bearer ${token}` },
         payload: {
           courseId: "00000000-0000-0000-0000-000000000001",
@@ -98,7 +98,7 @@ describe("Credentials API", () => {
 
       const response = await app.inject({
         method: "POST",
-        url: "/api/credentials/mint",
+        url: "/api/v1/credentials/mint",
         headers: { authorization: `Bearer ${token}` },
         payload: {
           courseId: "00000000-0000-0000-0000-000000000001",
@@ -121,7 +121,7 @@ describe("Credentials API", () => {
       // First mint attempt
       const first = await app.inject({
         method: "POST",
-        url: "/api/credentials/mint",
+        url: "/api/v1/credentials/mint",
         headers: { authorization: `Bearer ${token}` },
         payload: {
           courseId: "00000000-0000-0000-0000-000000000001",
@@ -134,7 +134,7 @@ describe("Credentials API", () => {
         // Second mint for same course should be rejected
         const response = await app.inject({
           method: "POST",
-          url: "/api/credentials/mint",
+          url: "/api/v1/credentials/mint",
           headers: { authorization: `Bearer ${token}` },
           payload: {
             courseId: "00000000-0000-0000-0000-000000000001",
@@ -156,7 +156,7 @@ describe("Credentials API", () => {
 
       const response = await app.inject({
         method: "POST",
-        url: "/api/credentials/mint",
+        url: "/api/v1/credentials/mint",
         headers: { authorization: `Bearer ${token}` },
         payload: {
           courseId: "00000000-0000-0000-0000-000000000001",

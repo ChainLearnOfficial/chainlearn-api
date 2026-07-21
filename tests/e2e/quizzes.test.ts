@@ -21,11 +21,11 @@ describe("Quizzes API", () => {
         "GALICE0000000000000000000000000000000000000000000000000000000",
     });
 
-  describe("POST /api/quizzes/generate", () => {
+  describe("POST /api/v1/quizzes/generate", () => {
     it("should reject unauthenticated requests", async () => {
       const response = await app.inject({
         method: "POST",
-        url: "/api/quizzes/generate",
+        url: "/api/v1/quizzes/generate",
         payload: {
           courseId: "00000000-0000-0000-0000-000000000001",
           moduleId: "module-1",
@@ -42,7 +42,7 @@ describe("Quizzes API", () => {
 
       const response = await app.inject({
         method: "POST",
-        url: "/api/quizzes/generate",
+        url: "/api/v1/quizzes/generate",
         headers: { authorization: `Bearer ${token}` },
         payload: {
           courseId: "00000000-0000-0000-0000-000000000001",
@@ -64,7 +64,7 @@ describe("Quizzes API", () => {
       // First, get a course to enroll in
       const listResponse = await app.inject({
         method: "GET",
-        url: "/api/courses",
+        url: "/api/v1/courses",
       });
 
       if (listResponse.statusCode === 200) {
@@ -75,14 +75,14 @@ describe("Quizzes API", () => {
           // Enroll in the course
           await app.inject({
             method: "POST",
-            url: `/api/courses/${course.id}/enroll`,
+            url: `/api/v1/courses/${course.id}/enroll`,
             headers: { authorization: `Bearer ${token}` },
           });
 
           // Generate a quiz
           const response = await app.inject({
             method: "POST",
-            url: "/api/quizzes/generate",
+            url: "/api/v1/quizzes/generate",
             headers: { authorization: `Bearer ${token}` },
             payload: {
               courseId: course.id,
@@ -112,7 +112,7 @@ describe("Quizzes API", () => {
 
       const listResponse = await app.inject({
         method: "GET",
-        url: "/api/courses",
+        url: "/api/v1/courses",
       });
 
       if (listResponse.statusCode === 200) {
@@ -122,14 +122,14 @@ describe("Quizzes API", () => {
 
           await app.inject({
             method: "POST",
-            url: `/api/courses/${course.id}/enroll`,
+            url: `/api/v1/courses/${course.id}/enroll`,
             headers: { authorization: `Bearer ${token}` },
           });
 
           // First generation
           const first = await app.inject({
             method: "POST",
-            url: "/api/quizzes/generate",
+            url: "/api/v1/quizzes/generate",
             headers: { authorization: `Bearer ${token}` },
             payload: {
               courseId: course.id,
@@ -140,7 +140,7 @@ describe("Quizzes API", () => {
           // Second generation with same params
           const second = await app.inject({
             method: "POST",
-            url: "/api/quizzes/generate",
+            url: "/api/v1/quizzes/generate",
             headers: { authorization: `Bearer ${token}` },
             payload: {
               courseId: course.id,
@@ -161,11 +161,11 @@ describe("Quizzes API", () => {
     });
   });
 
-  describe("POST /api/quizzes/:id/submit", () => {
+  describe("POST /api/v1/quizzes/:id/submit", () => {
     it("should reject unauthenticated requests", async () => {
       const response = await app.inject({
         method: "POST",
-        url: "/api/quizzes/00000000-0000-0000-0000-000000000001/submit",
+        url: "/api/v1/quizzes/00000000-0000-0000-0000-000000000001/submit",
         payload: {
           answers: [{ questionId: "q1", selectedIndex: 0 }],
         },
@@ -179,7 +179,7 @@ describe("Quizzes API", () => {
 
       const listResponse = await app.inject({
         method: "GET",
-        url: "/api/courses",
+        url: "/api/v1/courses",
       });
 
       if (listResponse.statusCode === 200) {
@@ -189,13 +189,13 @@ describe("Quizzes API", () => {
 
           await app.inject({
             method: "POST",
-            url: `/api/courses/${course.id}/enroll`,
+            url: `/api/v1/courses/${course.id}/enroll`,
             headers: { authorization: `Bearer ${token}` },
           });
 
           const quizResponse = await app.inject({
             method: "POST",
-            url: "/api/quizzes/generate",
+            url: "/api/v1/quizzes/generate",
             headers: { authorization: `Bearer ${token}` },
             payload: {
               courseId: course.id,
@@ -219,7 +219,7 @@ describe("Quizzes API", () => {
 
             const response = await app.inject({
               method: "POST",
-              url: `/api/quizzes/${quiz.id}/submit`,
+              url: `/api/v1/quizzes/${quiz.id}/submit`,
               headers: { authorization: `Bearer ${token}` },
               payload: { answers },
             });
@@ -243,7 +243,7 @@ describe("Quizzes API", () => {
 
       const listResponse = await app.inject({
         method: "GET",
-        url: "/api/courses",
+        url: "/api/v1/courses",
       });
 
       if (listResponse.statusCode === 200) {
@@ -253,13 +253,13 @@ describe("Quizzes API", () => {
 
           await app.inject({
             method: "POST",
-            url: `/api/courses/${course.id}/enroll`,
+            url: `/api/v1/courses/${course.id}/enroll`,
             headers: { authorization: `Bearer ${token}` },
           });
 
           const quizResponse = await app.inject({
             method: "POST",
-            url: "/api/quizzes/generate",
+            url: "/api/v1/quizzes/generate",
             headers: { authorization: `Bearer ${token}` },
             payload: {
               courseId: course.id,
@@ -283,7 +283,7 @@ describe("Quizzes API", () => {
 
             const response = await app.inject({
               method: "POST",
-              url: `/api/quizzes/${quiz.id}/submit`,
+              url: `/api/v1/quizzes/${quiz.id}/submit`,
               headers: { authorization: `Bearer ${token}` },
               payload: { answers },
             });
@@ -303,7 +303,7 @@ describe("Quizzes API", () => {
 
       const listResponse = await app.inject({
         method: "GET",
-        url: "/api/courses",
+        url: "/api/v1/courses",
       });
 
       if (listResponse.statusCode === 200) {
@@ -313,13 +313,13 @@ describe("Quizzes API", () => {
 
           await app.inject({
             method: "POST",
-            url: `/api/courses/${course.id}/enroll`,
+            url: `/api/v1/courses/${course.id}/enroll`,
             headers: { authorization: `Bearer ${token}` },
           });
 
           const quizResponse = await app.inject({
             method: "POST",
-            url: "/api/quizzes/generate",
+            url: "/api/v1/quizzes/generate",
             headers: { authorization: `Bearer ${token}` },
             payload: {
               courseId: course.id,
@@ -343,7 +343,7 @@ describe("Quizzes API", () => {
 
             const response = await app.inject({
               method: "POST",
-              url: `/api/quizzes/${quiz.id}/submit`,
+              url: `/api/v1/quizzes/${quiz.id}/submit`,
               headers: { authorization: `Bearer ${token}` },
               payload: { answers },
             });
@@ -366,7 +366,7 @@ describe("Quizzes API", () => {
 
       const listResponse = await app.inject({
         method: "GET",
-        url: "/api/courses",
+        url: "/api/v1/courses",
       });
 
       if (listResponse.statusCode === 200) {
@@ -376,13 +376,13 @@ describe("Quizzes API", () => {
 
           await app.inject({
             method: "POST",
-            url: `/api/courses/${course.id}/enroll`,
+            url: `/api/v1/courses/${course.id}/enroll`,
             headers: { authorization: `Bearer ${token}` },
           });
 
           const quizResponse = await app.inject({
             method: "POST",
-            url: "/api/quizzes/generate",
+            url: "/api/v1/quizzes/generate",
             headers: { authorization: `Bearer ${token}` },
             payload: {
               courseId: course.id,
@@ -407,7 +407,7 @@ describe("Quizzes API", () => {
             // First submission
             await app.inject({
               method: "POST",
-              url: `/api/quizzes/${quiz.id}/submit`,
+              url: `/api/v1/quizzes/${quiz.id}/submit`,
               headers: { authorization: `Bearer ${token}` },
               payload: { answers },
             });
@@ -415,7 +415,7 @@ describe("Quizzes API", () => {
             // Second submission should be rejected
             const response = await app.inject({
               method: "POST",
-              url: `/api/quizzes/${quiz.id}/submit`,
+              url: `/api/v1/quizzes/${quiz.id}/submit`,
               headers: { authorization: `Bearer ${token}` },
               payload: { answers },
             });

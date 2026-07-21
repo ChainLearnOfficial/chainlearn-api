@@ -21,11 +21,11 @@ describe("Courses API", () => {
         "GALICE0000000000000000000000000000000000000000000000000000000",
     });
 
-  describe("GET /api/courses", () => {
+  describe("GET /api/v1/courses", () => {
     it("should return paginated course list", async () => {
       const response = await app.inject({
         method: "GET",
-        url: "/api/courses",
+        url: "/api/v1/courses",
       });
 
       expect([200, 500]).toContain(response.statusCode);
@@ -43,7 +43,7 @@ describe("Courses API", () => {
     it("should filter by difficulty query param", { timeout: 10000 }, async () => {
       const response = await app.inject({
         method: "GET",
-        url: "/api/courses?difficulty=beginner",
+        url: "/api/v1/courses?difficulty=beginner",
       });
 
       expect([200, 400, 500]).toContain(response.statusCode);
@@ -59,7 +59,7 @@ describe("Courses API", () => {
     it("should return enrolledCount for each course", { timeout: 10000 }, async () => {
       const response = await app.inject({
         method: "GET",
-        url: "/api/courses",
+        url: "/api/v1/courses",
       });
 
       // May return 500 if Redis/DB unavailable
@@ -77,7 +77,7 @@ describe("Courses API", () => {
 
       const response = await app.inject({
         method: "GET",
-        url: "/api/courses",
+        url: "/api/v1/courses",
         headers: { authorization: `Bearer ${token}` },
       });
 
@@ -91,12 +91,12 @@ describe("Courses API", () => {
     });
   });
 
-  describe("GET /api/courses/:id", () => {
+  describe("GET /api/v1/courses/:id", () => {
     it("should return course detail with modules", async () => {
       // First get a valid course ID from the list
       const listResponse = await app.inject({
         method: "GET",
-        url: "/api/courses",
+        url: "/api/v1/courses",
       });
 
       if (listResponse.statusCode === 200) {
@@ -106,7 +106,7 @@ describe("Courses API", () => {
 
           const response = await app.inject({
             method: "GET",
-            url: `/api/courses/${courseId}`,
+            url: `/api/v1/courses/${courseId}`,
           });
 
           expect([200, 404, 500]).toContain(response.statusCode);
@@ -123,7 +123,7 @@ describe("Courses API", () => {
     it("should return 404 for non-existent course", async () => {
       const response = await app.inject({
         method: "GET",
-        url: "/api/courses/00000000-0000-0000-0000-000000000000",
+        url: "/api/v1/courses/00000000-0000-0000-0000-000000000000",
       });
 
       expect([404, 500]).toContain(response.statusCode);
@@ -134,7 +134,7 @@ describe("Courses API", () => {
 
       const listResponse = await app.inject({
         method: "GET",
-        url: "/api/courses",
+        url: "/api/v1/courses",
       });
 
       if (listResponse.statusCode === 200) {
@@ -144,7 +144,7 @@ describe("Courses API", () => {
 
           const response = await app.inject({
             method: "GET",
-            url: `/api/courses/${courseId}`,
+            url: `/api/v1/courses/${courseId}`,
             headers: { authorization: `Bearer ${token}` },
           });
 
@@ -158,11 +158,11 @@ describe("Courses API", () => {
     });
   });
 
-  describe("POST /api/courses/:id/enroll", () => {
+  describe("POST /api/v1/courses/:id/enroll", () => {
     it("should reject unauthenticated requests", async () => {
       const response = await app.inject({
         method: "POST",
-        url: "/api/courses/00000000-0000-0000-0000-000000000001/enroll",
+        url: "/api/v1/courses/00000000-0000-0000-0000-000000000001/enroll",
       });
 
       expect(response.statusCode).toBe(401);
@@ -173,7 +173,7 @@ describe("Courses API", () => {
 
       const listResponse = await app.inject({
         method: "GET",
-        url: "/api/courses",
+        url: "/api/v1/courses",
       });
 
       if (listResponse.statusCode === 200) {
@@ -183,7 +183,7 @@ describe("Courses API", () => {
 
           const response = await app.inject({
             method: "POST",
-            url: `/api/courses/${courseId}/enroll`,
+            url: `/api/v1/courses/${courseId}/enroll`,
             headers: { authorization: `Bearer ${token}` },
           });
 
@@ -203,7 +203,7 @@ describe("Courses API", () => {
 
       const listResponse = await app.inject({
         method: "GET",
-        url: "/api/courses",
+        url: "/api/v1/courses",
       });
 
       if (listResponse.statusCode === 200) {
@@ -214,14 +214,14 @@ describe("Courses API", () => {
           // First enrollment attempt
           await app.inject({
             method: "POST",
-            url: `/api/courses/${courseId}/enroll`,
+            url: `/api/v1/courses/${courseId}/enroll`,
             headers: { authorization: `Bearer ${token}` },
           });
 
           // Second enrollment attempt should be rejected
           const response = await app.inject({
             method: "POST",
-            url: `/api/courses/${courseId}/enroll`,
+            url: `/api/v1/courses/${courseId}/enroll`,
             headers: { authorization: `Bearer ${token}` },
           });
 
@@ -239,7 +239,7 @@ describe("Courses API", () => {
 
       const response = await app.inject({
         method: "POST",
-        url: "/api/courses/00000000-0000-0000-0000-000000000000/enroll",
+        url: "/api/v1/courses/00000000-0000-0000-0000-000000000000/enroll",
         headers: { authorization: `Bearer ${token}` },
       });
 

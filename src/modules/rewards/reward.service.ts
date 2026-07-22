@@ -65,85 +65,91 @@ export async function processRewardClaim(
   userId: string,
   score: number,
 ): Promise<boolean> {
-  const [submission] = await db
-    .select()
-    .from(quizSubmissions)
-    .where(eq(quizSubmissions.id, submissionId));
+  return withLock(`reward:${submissionId}`, async () => {
+    return db.transaction(async (tx) => {
+      const [submission] = await tx
+        .select()
+        .from(quizSubmissions)
+        .where(eq(quizSubmissions.id, submissionId))
+        .for("update");
 
-  if (!submission || submission.rewardClaimed) {
-    return true;
-  }
+      if (!submission || submission.rewardClaimed) {
+        return true;
+      }
 
-  const [quiz] = await db
-    .select()
-    .from(quizzes)
-    .where(eq(quizzes.id, submission.quizId));
+      const [quiz] = await tx
+        .select()
+        .from(quizzes)
+        .where(eq(quizzes.id, submission.quizId));
 
-  if (!quiz) return true;
-  if (submission.score === null) return true;
+      if (!quiz) return true;
+      if (submission.score === null) return true;
 
-  const questions = quiz.questions as Array<unknown> | null;
-  if (!questions || questions.length === 0) return true;
-  const percentage = Math.round((score / questions.length) * 100);
-  if (percentage < PASSING_PERCENTAGE) {
-    return true;
-  }
+      const questions = quiz.questions as Array<unknown> | null;
+      if (!questions || questions.length === 0) return true;
+      const percentage = Math.round((score / questions.length) * 100);
+      if (percentage < PASSING_PERCENTAGE) {
+        return true;
+      }
 
-  const proof = createQuizProof(userId, submission.quizId, score);
+      const proof = createQuizProof(userId, submission.quizId, score);
 
-  const [user] = await db.select().from(users).where(eq(users.id, userId));
+      const [user] = await tx.select().from(users).where(eq(users.id, userId));
 
-  if (!user) return true;
+      if (!user) return true;
 
-  const txStart = process.hrtime.bigint();
-  let txHash: string;
-  try {
-    txHash = await invokeContract(
-      config.STELLAR_REWARD_CONTRACT_ID,
-      "claim_reward",
-      [
-        StellarSdk.Address.fromString(user.stellarAddress).toScVal(),
-        StellarSdk.nativeToScVal(score, { type: "u32" }),
-        StellarSdk.nativeToScVal(Buffer.from(proof.signature, "base64")),
-      ],
-    );
-    stellarTxDurationSeconds.observe(
-      { method: "claim_reward", status: "success" },
-      Number(process.hrtime.bigint() - txStart) / 1e9,
-    );
-  } catch (err: unknown) {
-    stellarTxDurationSeconds.observe(
-      { method: "claim_reward", status: "error" },
-      Number(process.hrtime.bigint() - txStart) / 1e9,
-    );
-    if (err instanceof StellarError && err.message.includes("bad_seq")) {
-      txHash = await handleBadSeqError(submissionId, user.stellarAddress);
-    } else if (err instanceof StellarError && err.message.includes("tx_bad_seq")) {
-      txHash = await handleBadSeqError(submissionId, user.stellarAddress);
-    } else {
-      throw err;
+      const txStart = process.hrtime.bigint();
+      let txHash: string;
+      try {
+        txHash = await invokeContract(
+          config.STELLAR_REWARD_CONTRACT_ID,
+          "claim_reward",
+          [
+            StellarSdk.Address.fromString(user.stellarAddress).toScVal(),
+            StellarSdk.nativeToScVal(score, { type: "u32" }),
+            StellarSdk.nativeToScVal(Buffer.from(proof.signature, "base64")),
+          ],
+        );
+        stellarTxDurationSeconds.observe(
+          { method: "claim_reward", status: "success" },
+          Number(process.hrtime.bigint() - txStart) / 1e9,
+        );
+      } catch (err: unknown) {
+        stellarTxDurationSeconds.observe(
+          { method: "claim_reward", status: "error" },
+          Number(process.hrtime.bigint() - txStart) / 1e9,
+        );
+        if (err instanceof StellarError && err.message.includes("bad_seq")) {
+          txHash = await handleBadSeqError(submissionId, user.stellarAddress);
+        } else if (err instanceof StellarError && err.message.includes("tx_bad_seq")) {
+          txHash = await handleBadSeqError(submissionId, user.stellarAddress);
+        } else {
+          throw err;
+        }
+      }
+
+      await tx
+        .update(quizSubmissions)
+        .set({ rewardClaimed: true, txHash })
+        .where(eq(quizSubmissions.id, submissionId));
+
+      await tx
+        .update(users)
+        .set({
+          credits: sql`${users.credits} + ${REWARD_AMOUNT}`,
+        })
+        .where(eq(users.id, userId));
+
+      return true;
+    });
+  }).then(async (result) => {
+    if (result) {
+      await cacheDel(cacheKey("user", "progress", userId));
+      await cacheDel(cacheKey("user", "profile", userId));
+      await cacheDel(cacheKey("rewards", "history", userId));
     }
-  }
-
-  await db.transaction(async (tx) => {
-    await tx
-      .update(quizSubmissions)
-      .set({ rewardClaimed: true, txHash })
-      .where(eq(quizSubmissions.id, submissionId));
-
-    await tx
-      .update(users)
-      .set({
-        credits: sql`${users.credits} + ${REWARD_AMOUNT}`,
-      })
-      .where(eq(users.id, userId));
+    return result;
   });
-
-  await cacheDel(cacheKey("user", "progress", userId));
-  await cacheDel(cacheKey("user", "profile", userId));
-  await cacheDel(cacheKey("rewards", "history", userId));
-
-  return true;
 }
 
 export class RewardService {

@@ -75,6 +75,10 @@ vi.mock("../../../src/cache/index.js", () => ({
   cacheMisses: { labels: vi.fn().mockReturnValue({ inc: vi.fn() }) },
 }));
 
+vi.mock("../../../src/utils/lock.js", () => ({
+  withLock: vi.fn(async (_key: string, fn: () => Promise<any>) => fn()),
+}));
+
 import { db } from "../../../src/config/database.js";
 import { processRewardClaim } from "../../../src/modules/rewards/reward.service.js";
 import { invokeContract } from "../../../src/stellar/transactions.js";
@@ -88,6 +92,7 @@ function makeThenable(result: any[]) {
   obj.select = vi.fn().mockReturnValue(obj);
   obj.from = vi.fn().mockReturnValue(obj);
   obj.where = vi.fn().mockReturnValue(obj);
+  obj.for = vi.fn().mockReturnValue(obj);
   obj.update = vi.fn().mockReturnValue(obj);
   obj.set = vi.fn().mockReturnValue(obj);
   return obj;
@@ -98,100 +103,24 @@ describe("processRewardClaim", () => {
     vi.clearAllMocks();
   });
 
-  it("should return true when submission does not exist", async () => {
-    const submissionChain = makeThenable([]);
-
-    mockDb.select.mockReturnValue(submissionChain);
-
-    const result = await processRewardClaim("sub-1", "user-1", 5);
-    expect(result).toBe(true);
-  });
-
-  it("should return true when reward is already claimed", async () => {
-    const submissionChain = makeThenable([
-      {
-        id: "sub-1",
-        userId: "user-1",
-        score: 5,
-        rewardClaimed: true,
-        quizId: "quiz-1",
-      },
-    ]);
-
-    mockDb.select.mockReturnValue(submissionChain);
-
-    const result = await processRewardClaim("sub-1", "user-1", 5);
-    expect(result).toBe(true);
-  });
-
-  it("should return true when quiz does not exist", async () => {
-    const submissionChain = makeThenable([
-      {
-        id: "sub-1",
-        userId: "user-1",
-        score: 5,
-        rewardClaimed: false,
-        quizId: "quiz-1",
-      },
-    ]);
-    const quizChain = makeThenable([]);
-
-    mockDb.select
-      .mockReturnValueOnce(submissionChain)
-      .mockReturnValueOnce(quizChain);
-
-    const result = await processRewardClaim("sub-1", "user-1", 5);
-    expect(result).toBe(true);
-  });
-
-  it("should return true when user does not exist", async () => {
-    const submissionChain = makeThenable([
-      {
-        id: "sub-1",
-        userId: "user-1",
-        score: 5,
-        rewardClaimed: false,
-        quizId: "quiz-1",
-      },
-    ]);
-    const quizChain = makeThenable([{ id: "quiz-1", courseId: "course-1", questions: [{ id: "q1" }] }]);
-    const userChain = makeThenable([]);
-
-    mockDb.select
-      .mockReturnValueOnce(submissionChain)
-      .mockReturnValueOnce(quizChain)
-      .mockReturnValueOnce(userChain);
-
-    const result = await processRewardClaim("sub-1", "user-1", 5);
-    expect(result).toBe(true);
-  });
-
-  it("should successfully process claim and update DB in transaction", async () => {
-    const submissionChain = makeThenable([
-      {
-        id: "sub-1",
-        userId: "user-1",
-        score: 5,
-        rewardClaimed: false,
-        quizId: "quiz-1",
-      },
-    ]);
-    const quizChain = makeThenable([{ id: "quiz-1", courseId: "course-1", questions: [{ id: "q1" }] }]);
-    const userChain = makeThenable([
-      {
-        id: "user-1",
-        stellarAddress:
-          "GALICE0000000000000000000000000000000000000000000000000000000",
-      },
-    ]);
-
-    mockDb.select
-      .mockReturnValueOnce(submissionChain)
-      .mockReturnValueOnce(quizChain)
-      .mockReturnValueOnce(userChain);
-
+  function mockTxWithSelects(selectResults: any[][]) {
     mockDb.transaction.mockImplementation(async (fn: Function) => {
       const tx: any = {};
+      for (const result of selectResults) {
+        const chain = {
+          from: vi.fn().mockReturnValue({
+            where: vi.fn().mockReturnValue({
+              for: vi.fn().mockResolvedValue(result),
+              then: (r: Function) => Promise.resolve(result).then(r),
+            }),
+            then: (r: Function) => Promise.resolve(result).then(r),
+          }),
+          then: (r: Function) => Promise.resolve(result).then(r),
+        };
+        tx.select = tx.select
+          ? tx.select.mockReturnValueOnce(chain)
+          : vi.fn().mockReturnValueOnce(chain);
+      }
       tx.update = vi.fn().mockReturnValue({
         set: vi.fn().mockReturnValue({
           where: vi.fn().mockResolvedValue(undefined),
@@ -199,6 +128,47 @@ describe("processRewardClaim", () => {
       });
       return fn(tx);
     });
+  }
+
+  it("should return true when submission does not exist", async () => {
+    mockTxWithSelects([[]]);
+    const result = await processRewardClaim("sub-1", "user-1", 5);
+    expect(result).toBe(true);
+  });
+
+  it("should return true when reward is already claimed", async () => {
+    mockTxWithSelects([
+      [{ id: "sub-1", userId: "user-1", score: 5, rewardClaimed: true, quizId: "quiz-1" }],
+    ]);
+    const result = await processRewardClaim("sub-1", "user-1", 5);
+    expect(result).toBe(true);
+  });
+
+  it("should return true when quiz does not exist", async () => {
+    mockTxWithSelects([
+      [{ id: "sub-1", userId: "user-1", score: 5, rewardClaimed: false, quizId: "quiz-1" }],
+      [],
+    ]);
+    const result = await processRewardClaim("sub-1", "user-1", 5);
+    expect(result).toBe(true);
+  });
+
+  it("should return true when user does not exist", async () => {
+    mockTxWithSelects([
+      [{ id: "sub-1", userId: "user-1", score: 5, rewardClaimed: false, quizId: "quiz-1" }],
+      [{ id: "quiz-1", courseId: "course-1", questions: [{ id: "q1" }] }],
+      [],
+    ]);
+    const result = await processRewardClaim("sub-1", "user-1", 5);
+    expect(result).toBe(true);
+  });
+
+  it("should successfully process claim and update DB in transaction", async () => {
+    mockTxWithSelects([
+      [{ id: "sub-1", userId: "user-1", score: 5, rewardClaimed: false, quizId: "quiz-1" }],
+      [{ id: "quiz-1", courseId: "course-1", questions: [{ id: "q1" }] }],
+      [{ id: "user-1", stellarAddress: "GALICE0000000000000000000000000000000000000000000000000000000" }],
+    ]);
 
     const result = await processRewardClaim("sub-1", "user-1", 5);
 
@@ -212,28 +182,11 @@ describe("processRewardClaim", () => {
   });
 
   it("should throw when on-chain transaction fails", async () => {
-    const submissionChain = makeThenable([
-      {
-        id: "sub-1",
-        userId: "user-1",
-        score: 5,
-        rewardClaimed: false,
-        quizId: "quiz-1",
-      },
+    mockTxWithSelects([
+      [{ id: "sub-1", userId: "user-1", score: 5, rewardClaimed: false, quizId: "quiz-1" }],
+      [{ id: "quiz-1", courseId: "course-1", questions: [{ id: "q1" }] }],
+      [{ id: "user-1", stellarAddress: "GALICE0000000000000000000000000000000000000000000000000000000" }],
     ]);
-    const quizChain = makeThenable([{ id: "quiz-1", courseId: "course-1", questions: [{ id: "q1" }] }]);
-    const userChain = makeThenable([
-      {
-        id: "user-1",
-        stellarAddress:
-          "GALICE0000000000000000000000000000000000000000000000000000000",
-      },
-    ]);
-
-    mockDb.select
-      .mockReturnValueOnce(submissionChain)
-      .mockReturnValueOnce(quizChain)
-      .mockReturnValueOnce(userChain);
 
     vi.mocked(invokeContract).mockRejectedValue(new Error("Stellar error"));
 

@@ -215,7 +215,7 @@ describe("Concurrent Request Safety", () => {
     it("should prevent duplicate mint via distributed lock", async () => {
       mockDb.transaction.mockImplementation(async (fn: Function) => {
         const submissionData = [{ id: "sub-1", userId: "user-1", score: 5, quizId: "quiz-1" }];
-        const quizData = [{ id: "quiz-1", courseId: "course-1" }];
+        const quizData = [{ id: "quiz-1", courseId: "course-1", questions: [{ id: "q1" }] }];
         const existingCredData: any[] = [];
         const userData = [
           {
@@ -262,7 +262,7 @@ describe("Concurrent Request Safety", () => {
       mockDb.transaction.mockImplementation(async (fn: Function) => {
         const chainData = [
           [{ id: "sub-1", userId: "user-1", score: 5, quizId: "quiz-1" }],
-          [{ id: "quiz-1", courseId: "course-1" }],
+          [{ id: "quiz-1", courseId: "course-1", questions: [{ id: "q1" }] }],
           [{ id: "cred-existing", userId: "user-1", courseId: "course-1" }],
         ];
         let callIndex = 0;

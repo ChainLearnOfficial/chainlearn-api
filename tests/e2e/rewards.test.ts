@@ -14,11 +14,11 @@ describe("Rewards API", () => {
     await app.close();
   });
 
-  describe("POST /api/rewards/claim", () => {
+  describe("POST /api/v1/rewards/claim", () => {
     it("should reject unauthenticated requests", async () => {
       const response = await app.inject({
         method: "POST",
-        url: "/api/rewards/claim",
+        url: "/api/v1/rewards/claim",
         payload: {
           submissionId: "00000000-0000-0000-0000-000000000000",
           idempotencyKey: "test-key-rewards-claim-unauth",
@@ -39,7 +39,7 @@ describe("Rewards API", () => {
 
       const response = await app.inject({
         method: "POST",
-        url: "/api/rewards/claim",
+        url: "/api/v1/rewards/claim",
         headers: { authorization: `Bearer ${token}` },
         payload: {
           submissionId: "not-a-uuid",
@@ -59,7 +59,7 @@ describe("Rewards API", () => {
 
       const response = await app.inject({
         method: "POST",
-        url: "/api/rewards/claim",
+        url: "/api/v1/rewards/claim",
         headers: { authorization: `Bearer ${token}` },
         payload: {
           submissionId: "00000000-0000-0000-0000-000000000000",
@@ -79,7 +79,7 @@ describe("Rewards API", () => {
 
       const response = await app.inject({
         method: "POST",
-        url: "/api/rewards/claim",
+        url: "/api/v1/rewards/claim",
         headers: { authorization: `Bearer ${token}` },
         payload: {
           submissionId: "00000000-0000-0000-0000-000000000000",
@@ -92,11 +92,11 @@ describe("Rewards API", () => {
     });
   });
 
-  describe("GET /api/rewards/history", () => {
+  describe("GET /api/v1/rewards/history", () => {
     it("should reject unauthenticated requests", async () => {
       const response = await app.inject({
         method: "GET",
-        url: "/api/rewards/history",
+        url: "/api/v1/rewards/history",
       });
 
       expect(response.statusCode).toBe(401);
@@ -111,7 +111,7 @@ describe("Rewards API", () => {
 
       const response = await app.inject({
         method: "GET",
-        url: "/api/rewards/history",
+        url: "/api/v1/rewards/history",
         headers: { authorization: `Bearer ${token}` },
       });
 

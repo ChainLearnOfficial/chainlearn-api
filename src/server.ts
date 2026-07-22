@@ -27,13 +27,8 @@ import {
 import { processRewardClaim } from "./modules/rewards/reward.service.js";
 import { warmCourseCache } from "./cache/warmer.js";
 
-// Route modules
-import { authRoutes } from "./modules/auth/auth.routes.js";
-import { userRoutes } from "./modules/users/user.routes.js";
-import { courseRoutes } from "./modules/courses/course.routes.js";
-import { quizRoutes } from "./modules/quizzes/quiz.routes.js";
-import { rewardRoutes } from "./modules/rewards/reward.routes.js";
-import { credentialRoutes } from "./modules/credentials/credential.routes.js";
+// Versioned route modules
+import { registerVersionedRoutes } from "./routes/versioning.js";
 
 // Shutdown helpers
 import { pool, closeDatabase } from "./config/database.js";
@@ -151,12 +146,7 @@ async function buildApp() {
   });
 
   // ─── API Routes ─────────────────────────────────────────────────────────
-  await app.register(authRoutes, { prefix: "/api/auth" });
-  await app.register(userRoutes, { prefix: "/api/users" });
-  await app.register(courseRoutes, { prefix: "/api/courses" });
-  await app.register(quizRoutes, { prefix: "/api/quizzes" });
-  await app.register(rewardRoutes, { prefix: "/api/rewards" });
-  await app.register(credentialRoutes, { prefix: "/api/credentials" });
+  await registerVersionedRoutes(app);
 
   return app;
 }

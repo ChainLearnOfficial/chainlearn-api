@@ -108,6 +108,7 @@ export const quizSubmissions = pgTable(
     score: integer("score"),
     feedback: text("feedback"),
     rewardClaimed: boolean("reward_claimed").notNull().default(false),
+    rewardPending: boolean("reward_pending").notNull().default(false),
     rewardFailed: boolean("reward_failed").notNull().default(false),
     txHash: varchar("tx_hash", { length: 64 }),
     submittedAt: timestamp("submitted_at", { withTimezone: true })

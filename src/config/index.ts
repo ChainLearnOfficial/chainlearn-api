@@ -39,6 +39,7 @@ const envSchema = z.object({
 
   // AI service (chainlearn-ai) used for quiz generation
   AI_SERVICE_URL: z.string().url().default("http://localhost:8000"),
+  AI_TIMEOUT_MS: z.coerce.number().default(30_000),
 });
 
 export type Env = z.infer<typeof envSchema>;

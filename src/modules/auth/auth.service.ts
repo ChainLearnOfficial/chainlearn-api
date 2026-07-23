@@ -76,12 +76,11 @@ export class AuthService {
     stellarAddress: string,
     signedChallenge: string
   ): Promise<AuthResponse> {
-    // Retrieve stored challenge from Redis
-    // Check that a challenge exists (single-use, must not be consumed yet)
-    const challengeExists = await redis.exists(
+    // Atomically retrieve and delete the challenge (single-use, must not be consumed yet)
+    const challengeData = await redis.getdel(
       `${CHALLENGE_PREFIX}${stellarAddress}`
     );
-    if (!challengeExists) {
+    if (!challengeData) {
       throw new UnauthorizedError("Challenge expired or not found");
     }
 
@@ -145,9 +144,6 @@ export class AuthService {
       }
       throw new UnauthorizedError("Signature verification failed");
     }
-
-    // Clean up the challenge (single-use)
-    await redis.del(`${CHALLENGE_PREFIX}${stellarAddress}`);
 
     // Find or create user
     let user = await db.query.users.findFirst({

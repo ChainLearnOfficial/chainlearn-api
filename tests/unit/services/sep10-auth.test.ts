@@ -4,18 +4,14 @@ import * as StellarSdk from "@stellar/stellar-sdk";
 vi.mock("ioredis", () => ({
   default: vi.fn().mockImplementation(() => ({
     setex: vi.fn(),
-    get: vi.fn(),
-    del: vi.fn(),
-    exists: vi.fn(),
+    getdel: vi.fn(),
   })),
 }));
 
 vi.mock("../../../src/config/redis.js", () => ({
   redis: {
     setex: vi.fn(),
-    get: vi.fn(),
-    del: vi.fn(),
-    exists: vi.fn(),
+    getdel: vi.fn(),
   },
 }));
 
@@ -73,7 +69,7 @@ describe("AuthService - SEP-10 Verification", () => {
     it("should reject when no challenge exists in Redis", async () => {
       const stellarAddress =
         "GALICE0000000000000000000000000000000000000000000000000000000";
-      mockRedis.exists.mockResolvedValue(0);
+      mockRedis.getdel.mockResolvedValue(null);
 
       await expect(
         authService.verifyChallenge(stellarAddress, "some-signed-challenge")
@@ -83,7 +79,7 @@ describe("AuthService - SEP-10 Verification", () => {
     it("should reject invalid transaction envelope", async () => {
       const stellarAddress =
         "GALICE0000000000000000000000000000000000000000000000000000000";
-      mockRedis.exists.mockResolvedValue(1);
+      mockRedis.getdel.mockResolvedValue('{"challengeEnvelope":"test"}');
 
       await expect(
         authService.verifyChallenge(stellarAddress, "invalid-xdr-data")
@@ -96,7 +92,7 @@ describe("AuthService - SEP-10 Verification", () => {
       const differentKeypair = StellarSdk.Keypair.random();
       const differentAddress = differentKeypair.publicKey();
 
-      mockRedis.exists.mockResolvedValue(1);
+      mockRedis.getdel.mockResolvedValue('{"challengeEnvelope":"test"}');
 
       const account = new StellarSdk.Account(differentAddress, "0");
       const transaction = new StellarSdk.TransactionBuilder(account, {
@@ -124,7 +120,7 @@ describe("AuthService - SEP-10 Verification", () => {
       const keypair = StellarSdk.Keypair.random();
       const stellarAddress = keypair.publicKey();
 
-      mockRedis.exists.mockResolvedValue(1);
+      mockRedis.getdel.mockResolvedValue('{"challengeEnvelope":"test"}');
 
       const account = new StellarSdk.Account(stellarAddress, "0");
       const transaction = new StellarSdk.TransactionBuilder(account, {
@@ -155,7 +151,7 @@ describe("AuthService - SEP-10 Verification", () => {
       const keypair = StellarSdk.Keypair.random();
       const stellarAddress = keypair.publicKey();
 
-      mockRedis.exists.mockResolvedValue(1);
+      mockRedis.getdel.mockResolvedValue('{"challengeEnvelope":"test"}');
 
       const account = new StellarSdk.Account(stellarAddress, "0");
       const transaction = new StellarSdk.TransactionBuilder(account, {
@@ -183,7 +179,7 @@ describe("AuthService - SEP-10 Verification", () => {
       const keypair = StellarSdk.Keypair.random();
       const stellarAddress = keypair.publicKey();
 
-      mockRedis.exists.mockResolvedValue(1);
+      mockRedis.getdel.mockResolvedValue('{"challengeEnvelope":"test"}');
 
       const account = new StellarSdk.Account(stellarAddress, "0");
       const transaction = new StellarSdk.TransactionBuilder(account, {
@@ -211,7 +207,7 @@ describe("AuthService - SEP-10 Verification", () => {
       const keypair = StellarSdk.Keypair.random();
       const stellarAddress = keypair.publicKey();
 
-      mockRedis.exists.mockResolvedValue(1);
+      mockRedis.getdel.mockResolvedValue('{"challengeEnvelope":"test"}');
 
       const account = new StellarSdk.Account(stellarAddress, "0");
       const transaction = new StellarSdk.TransactionBuilder(account, {
@@ -240,8 +236,7 @@ describe("AuthService - SEP-10 Verification", () => {
       const keypair = StellarSdk.Keypair.random();
       const stellarAddress = keypair.publicKey();
 
-      mockRedis.exists.mockResolvedValue(1);
-      mockRedis.del.mockResolvedValue(1);
+      mockRedis.getdel.mockResolvedValue('{"challengeEnvelope":"test"}');
 
       mockDb.query.users.findFirst.mockResolvedValue(null);
       mockDb.insert.mockReturnValue({
@@ -281,7 +276,7 @@ describe("AuthService - SEP-10 Verification", () => {
       expect(result.user.id).toBe("user-1");
       expect(result.user.stellarAddress).toBe(stellarAddress);
       expect(result.user.isNewUser).toBe(true);
-      expect(mockRedis.del).toHaveBeenCalledWith(
+      expect(mockRedis.getdel).toHaveBeenCalledWith(
         `sep10:challenge:${stellarAddress}`
       );
     });
@@ -290,8 +285,7 @@ describe("AuthService - SEP-10 Verification", () => {
       const keypair = StellarSdk.Keypair.random();
       const stellarAddress = keypair.publicKey();
 
-      mockRedis.exists.mockResolvedValue(1);
-      mockRedis.del.mockResolvedValue(1);
+      mockRedis.getdel.mockResolvedValue('{"challengeEnvelope":"test"}');
 
       mockDb.query.users.findFirst.mockResolvedValue({
         id: "existing-user",

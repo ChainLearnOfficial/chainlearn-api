@@ -6,7 +6,12 @@ import {
   courses,
   users,
 } from "../../database/schema.js";
-import { NotFoundError, ForbiddenError, ConflictError } from "../../utils/errors.js";
+import {
+  NotFoundError,
+  ForbiddenError,
+  ConflictError,
+  StellarError,
+} from "../../utils/errors.js";
 import { withLock } from "../../utils/lock.js";
 import { invokeContract } from "../../stellar/transactions.js";
 import { createQuizProof } from "../../stellar/signatures.js";
@@ -31,68 +36,84 @@ export async function processRewardClaim(
   userId: string,
   score: number
 ): Promise<boolean> {
-  const [submission] = await db
-    .select()
-    .from(quizSubmissions)
-    .where(eq(quizSubmissions.id, submissionId));
+  return withLock(`reward:${submissionId}`, async () => {
+    return db.transaction(async (tx) => {
+      const [submission] = await tx
+        .select()
+        .from(quizSubmissions)
+        .where(eq(quizSubmissions.id, submissionId))
+        .for("update");
 
-  if (!submission || submission.rewardClaimed) {
-    return true;
-  }
+      if (!submission || submission.rewardClaimed) {
+        return true;
+      }
 
-  const [quiz] = await db
-    .select()
-    .from(quizzes)
-    .where(eq(quizzes.id, submission.quizId));
+      const [quiz] = await tx
+        .select()
+        .from(quizzes)
+        .where(eq(quizzes.id, submission.quizId));
 
-  if (!quiz) return true;
+      if (!quiz) return true;
 
-  const proof = createQuizProof(userId, submission.quizId, score);
+      const proof = createQuizProof(userId, submission.quizId, score);
 
-  const [user] = await db
-    .select()
-    .from(users)
-    .where(eq(users.id, userId));
+      const [user] = await tx
+        .select()
+        .from(users)
+        .where(eq(users.id, userId));
 
-  if (!user) return true;
+      if (!user) return true;
 
-  const txStart = process.hrtime.bigint();
-  let txHash: string;
-  try {
-    txHash = await invokeContract(
-      config.STELLAR_REWARD_CONTRACT_ID,
-      "claim_reward",
-      [
-        StellarSdk.Address.fromString(user.stellarAddress).toScVal(),
-        StellarSdk.nativeToScVal(score, { type: "u32" }),
-        StellarSdk.nativeToScVal(Buffer.from(proof.signature, "base64")),
-      ]
-    );
-    stellarTxDurationSeconds.observe(
-      { method: "claim_reward", status: "success" },
-      Number(process.hrtime.bigint() - txStart) / 1e9
-    );
-  } catch (err) {
-    stellarTxDurationSeconds.observe(
-      { method: "claim_reward", status: "error" },
-      Number(process.hrtime.bigint() - txStart) / 1e9
-    );
-    throw err;
-  }
+      const txStart = process.hrtime.bigint();
+      let txHash: string;
+      try {
+        txHash = await invokeContract(
+          config.STELLAR_REWARD_CONTRACT_ID,
+          "claim_reward",
+          [
+            StellarSdk.Address.fromString(user.stellarAddress).toScVal(),
+            StellarSdk.nativeToScVal(score, { type: "u32" }),
+            StellarSdk.nativeToScVal(Buffer.from(proof.signature, "base64")),
+          ]
+        );
+        stellarTxDurationSeconds.observe(
+          { method: "claim_reward", status: "success" },
+          Number(process.hrtime.bigint() - txStart) / 1e9
+        );
+      } catch (err) {
+        stellarTxDurationSeconds.observe(
+          { method: "claim_reward", status: "error" },
+          Number(process.hrtime.bigint() - txStart) / 1e9
+        );
+        if (
+          err instanceof StellarError &&
+          err.message.includes("bad_seq")
+        ) {
+          logger.warn(
+            { submissionId },
+            "bad_seq after invoke — the tx might actually succeed on-chain"
+          );
+          txHash = "pending_indexer_confirmation";
+        } else {
+          throw err;
+        }
+      }
 
-  await db
-    .update(quizSubmissions)
-    .set({ rewardClaimed: true, txHash })
-    .where(eq(quizSubmissions.id, submissionId));
+      await tx
+        .update(quizSubmissions)
+        .set({ rewardClaimed: true, txHash })
+        .where(eq(quizSubmissions.id, submissionId));
 
-  await db
-    .update(users)
-    .set({
-      credits: sql`${users.credits} + ${REWARD_AMOUNT}`,
-    })
-    .where(eq(users.id, userId));
+      await tx
+        .update(users)
+        .set({
+          credits: sql`${users.credits} + ${REWARD_AMOUNT}`,
+        })
+        .where(eq(users.id, userId));
 
-  return true;
+      return true;
+    });
+  });
 }
 
 export class RewardService {

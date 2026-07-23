@@ -32,6 +32,9 @@ export class CredentialService {
    * Mint a course completion credential (NFT) for the user.
    * Uses distributed locking + database transaction with row-level lock
    * to prevent duplicate NFT minting from concurrent requests.
+   *
+   * Uses two-phase approach: validate in DB tx, execute Stellar tx outside DB,
+   * then update DB. This prevents holding database connections during network calls.
    */
   async mint(
     userId: string,
@@ -39,7 +42,8 @@ export class CredentialService {
     submissionId: string,
   ): Promise<MintResult> {
     return withLock(`credential:${userId}:${courseId}`, async () => {
-      return db.transaction(async (tx) => {
+      // Phase 1: Validate in a quick DB transaction
+      const mintData = await db.transaction(async (tx) => {
         const [submission] = await tx
           .select()
           .from(quizSubmissions)
@@ -104,76 +108,86 @@ export class CredentialService {
           throw new NotFoundError("User");
         }
 
-        const auth = createMintAuthorization(
-          userId,
-          courseId,
-          submission.score,
-        );
-
-        let txHash: string;
-        const txStart = process.hrtime.bigint();
-        try {
-          txHash = await invokeContract(
-            config.STELLAR_CREDENTIAL_CONTRACT_ID,
-            "mint_credential",
-            [
-              StellarSdk.Address.fromString(user.stellarAddress).toScVal(),
-              StellarSdk.nativeToScVal(nftAssetCode),
-              StellarSdk.nativeToScVal(submission.score, { type: "u32" }),
-              StellarSdk.nativeToScVal(Buffer.from(auth.signature, "base64")),
-            ],
-          );
-          stellarTxDurationSeconds.observe(
-            { method: "mint_credential", status: "success" },
-            Number(process.hrtime.bigint() - txStart) / 1e9,
-          );
-        } catch (err) {
-          stellarTxDurationSeconds.observe(
-            { method: "mint_credential", status: "error" },
-            Number(process.hrtime.bigint() - txStart) / 1e9,
-          );
-          logger.error(
-            { err, userId, courseId },
-            "On-chain credential mint failed",
-          );
-          throw new Error("Failed to mint credential on-chain");
-        }
-
-        const [credential] = await tx
-          .insert(credentials)
-          .values({
-            userId,
-            courseId,
-            score: submission.score,
-            nftAssetCode,
-            nftIssuer: user.stellarAddress,
-            mintTxHash: txHash,
-          })
-          .returning();
-
-        credentialsMintedTotal.inc();
-        auditLog("credential.minted", {
-          credentialId: credential.id,
-          userId,
-          courseId,
-          txHash,
-        });
-        logger.info(
-          { credentialId: credential.id, userId, courseId, txHash },
-          "Credential minted",
-        );
-
-        await cacheDel(cacheKey("user", "progress", userId));
-        await cacheDel(cacheKey("credentials", "list", userId));
-
         return {
-          credentialId: credential.id,
+          userId,
+          courseId,
+          score: submission.score,
+          stellarAddress: user.stellarAddress,
           nftAssetCode,
-          nftIssuer: user.stellarAddress,
-          mintTxHash: txHash,
-          message: "Course completion credential minted successfully",
         };
       });
+
+      // Phase 2: Execute Stellar transaction outside DB (no connection held)
+      const auth = createMintAuthorization(
+        userId,
+        courseId,
+        mintData.score,
+      );
+
+      const txStart = process.hrtime.bigint();
+      let txHash: string;
+      try {
+        txHash = await invokeContract(
+          config.STELLAR_CREDENTIAL_CONTRACT_ID,
+          "mint_credential",
+          [
+            StellarSdk.Address.fromString(mintData.stellarAddress).toScVal(),
+            StellarSdk.nativeToScVal(mintData.nftAssetCode),
+            StellarSdk.nativeToScVal(mintData.score, { type: "u32" }),
+            StellarSdk.nativeToScVal(Buffer.from(auth.signature, "base64")),
+          ],
+        );
+        stellarTxDurationSeconds.observe(
+          { method: "mint_credential", status: "success" },
+          Number(process.hrtime.bigint() - txStart) / 1e9,
+        );
+      } catch (err) {
+        stellarTxDurationSeconds.observe(
+          { method: "mint_credential", status: "error" },
+          Number(process.hrtime.bigint() - txStart) / 1e9,
+        );
+        logger.error(
+          { err, userId, courseId },
+          "On-chain credential mint failed",
+        );
+        throw new Error("Failed to mint credential on-chain");
+      }
+
+      // Phase 3: Update DB with result in a quick transaction
+      const [credential] = await db
+        .insert(credentials)
+        .values({
+          userId,
+          courseId,
+          score: mintData.score,
+          nftAssetCode: mintData.nftAssetCode,
+          nftIssuer: mintData.stellarAddress,
+          mintTxHash: txHash,
+        })
+        .returning();
+
+      credentialsMintedTotal.inc();
+      auditLog("credential.minted", {
+        credentialId: credential.id,
+        userId,
+        courseId,
+        txHash,
+      });
+      logger.info(
+        { credentialId: credential.id, userId, courseId, txHash },
+        "Credential minted",
+      );
+
+      await cacheDel(cacheKey("user", "progress", userId));
+      await cacheDel(cacheKey("credentials", "list", userId));
+
+      return {
+        credentialId: credential.id,
+        nftAssetCode: mintData.nftAssetCode,
+        nftIssuer: mintData.stellarAddress,
+        mintTxHash: txHash,
+        message: "Course completion credential minted successfully",
+      };
     });
   }
 

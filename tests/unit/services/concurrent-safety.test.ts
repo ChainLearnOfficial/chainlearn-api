@@ -213,21 +213,21 @@ describe("Concurrent Request Safety", () => {
 
   describe("Credential Minting", () => {
     it("should prevent duplicate mint via distributed lock", async () => {
+      const submissionData = [{ id: "sub-1", userId: "user-1", score: 5, quizId: "quiz-1" }];
+      const quizData = [{ id: "quiz-1", courseId: "course-1", questions: [{ id: "q1" }] }];
+      const existingCredData: any[] = [];
+      const userData = [
+        {
+          id: "user-1",
+          stellarAddress:
+            "GALICE0000000000000000000000000000000000000000000000000000000",
+        },
+      ];
+
+      const chainData = [submissionData, quizData, existingCredData, userData];
+      let callIndex = 0;
+
       mockDb.transaction.mockImplementation(async (fn: Function) => {
-        const submissionData = [{ id: "sub-1", userId: "user-1", score: 5, quizId: "quiz-1" }];
-        const quizData = [{ id: "quiz-1", courseId: "course-1", questions: [{ id: "q1" }] }];
-        const existingCredData: any[] = [];
-        const userData = [
-          {
-            id: "user-1",
-            stellarAddress:
-              "GALICE0000000000000000000000000000000000000000000000000000000",
-          },
-        ];
-
-        const chainData = [submissionData, quizData, existingCredData, userData];
-        let callIndex = 0;
-
         const makeChain = (result: any[]) => {
           const c: any = {};
           c.then = (resolve: Function, reject: Function) =>
@@ -248,6 +248,13 @@ describe("Concurrent Request Safety", () => {
         );
         return fn(rootChain);
       });
+
+      // Mock the direct insert call (outside transaction)
+      const insertChain = {
+        values: vi.fn().mockReturnThis(),
+        returning: vi.fn().mockResolvedValue([{ id: "cred-1" }]),
+      };
+      mockDb.insert.mockReturnValue(insertChain);
 
       const result = await credentialService.mint(
         "user-1",

@@ -59,6 +59,9 @@ async function handleBadSeqError(submissionId: string, stellarAddress: string): 
  * Shared reward claim execution logic.
  * Used by both the direct claim path and the background retry processor.
  * Returns true if the claim succeeded, false if it should be retried.
+ *
+ * Uses two-phase approach: validate in DB tx, execute Stellar tx outside DB,
+ * then update DB. This prevents holding database connections during network calls.
  */
 export async function processRewardClaim(
   submissionId: string,
@@ -66,15 +69,16 @@ export async function processRewardClaim(
   score: number,
 ): Promise<boolean> {
   return withLock(`reward:${submissionId}`, async () => {
-    return db.transaction(async (tx) => {
+    // Phase 1: Validate and mark as pending in a quick DB transaction
+    const claimData = await db.transaction(async (tx) => {
       const [submission] = await tx
         .select()
         .from(quizSubmissions)
         .where(eq(quizSubmissions.id, submissionId))
         .for("update");
 
-      if (!submission || submission.rewardClaimed) {
-        return true;
+      if (!submission || submission.rewardClaimed || submission.rewardPending) {
+        return null;
       }
 
       const [quiz] = await tx
@@ -82,55 +86,81 @@ export async function processRewardClaim(
         .from(quizzes)
         .where(eq(quizzes.id, submission.quizId));
 
-      if (!quiz) return true;
-      if (submission.score === null) return true;
+      if (!quiz) return null;
+      if (submission.score === null) return null;
 
       const questions = quiz.questions as Array<unknown> | null;
-      if (!questions || questions.length === 0) return true;
+      if (!questions || questions.length === 0) return null;
       const percentage = Math.round((score / questions.length) * 100);
       if (percentage < PASSING_PERCENTAGE) {
-        return true;
+        return null;
       }
-
-      const proof = createQuizProof(userId, submission.quizId, score);
 
       const [user] = await tx.select().from(users).where(eq(users.id, userId));
+      if (!user) return null;
 
-      if (!user) return true;
-
-      const txStart = process.hrtime.bigint();
-      let txHash: string;
-      try {
-        txHash = await invokeContract(
-          config.STELLAR_REWARD_CONTRACT_ID,
-          "claim_reward",
-          [
-            StellarSdk.Address.fromString(user.stellarAddress).toScVal(),
-            StellarSdk.nativeToScVal(score, { type: "u32" }),
-            StellarSdk.nativeToScVal(Buffer.from(proof.signature, "base64")),
-          ],
-        );
-        stellarTxDurationSeconds.observe(
-          { method: "claim_reward", status: "success" },
-          Number(process.hrtime.bigint() - txStart) / 1e9,
-        );
-      } catch (err: unknown) {
-        stellarTxDurationSeconds.observe(
-          { method: "claim_reward", status: "error" },
-          Number(process.hrtime.bigint() - txStart) / 1e9,
-        );
-        if (err instanceof StellarError && err.message.includes("bad_seq")) {
-          txHash = await handleBadSeqError(submissionId, user.stellarAddress);
-        } else if (err instanceof StellarError && err.message.includes("tx_bad_seq")) {
-          txHash = await handleBadSeqError(submissionId, user.stellarAddress);
-        } else {
-          throw err;
-        }
-      }
-
+      // Mark as pending to prevent concurrent claims
       await tx
         .update(quizSubmissions)
-        .set({ rewardClaimed: true, txHash })
+        .set({ rewardPending: true })
+        .where(eq(quizSubmissions.id, submissionId));
+
+      return {
+        submissionId,
+        userId,
+        score,
+        stellarAddress: user.stellarAddress,
+        quizId: submission.quizId,
+      };
+    });
+
+    // If validation failed or already pending, return early
+    if (!claimData) {
+      return true;
+    }
+
+    // Phase 2: Execute Stellar transaction outside DB (no connection held)
+    const proof = createQuizProof(userId, claimData.quizId, score);
+    const txStart = process.hrtime.bigint();
+    let txHash: string;
+    try {
+      txHash = await invokeContract(
+        config.STELLAR_REWARD_CONTRACT_ID,
+        "claim_reward",
+        [
+          StellarSdk.Address.fromString(claimData.stellarAddress).toScVal(),
+          StellarSdk.nativeToScVal(score, { type: "u32" }),
+          StellarSdk.nativeToScVal(Buffer.from(proof.signature, "base64")),
+        ],
+      );
+      stellarTxDurationSeconds.observe(
+        { method: "claim_reward", status: "success" },
+        Number(process.hrtime.bigint() - txStart) / 1e9,
+      );
+    } catch (err: unknown) {
+      stellarTxDurationSeconds.observe(
+        { method: "claim_reward", status: "error" },
+        Number(process.hrtime.bigint() - txStart) / 1e9,
+      );
+      if (err instanceof StellarError && err.message.includes("bad_seq")) {
+        txHash = await handleBadSeqError(submissionId, claimData.stellarAddress);
+      } else if (err instanceof StellarError && err.message.includes("tx_bad_seq")) {
+        txHash = await handleBadSeqError(submissionId, claimData.stellarAddress);
+      } else {
+        // Mark as failed and release pending status
+        await db
+          .update(quizSubmissions)
+          .set({ rewardPending: false, rewardFailed: true })
+          .where(eq(quizSubmissions.id, submissionId));
+        throw err;
+      }
+    }
+
+    // Phase 3: Update DB with result in a quick transaction
+    await db.transaction(async (tx) => {
+      await tx
+        .update(quizSubmissions)
+        .set({ rewardClaimed: true, rewardPending: false, txHash })
         .where(eq(quizSubmissions.id, submissionId));
 
       await tx
@@ -139,9 +169,9 @@ export async function processRewardClaim(
           credits: sql`${users.credits} + ${REWARD_AMOUNT}`,
         })
         .where(eq(users.id, userId));
-
-      return true;
     });
+
+    return true;
   }).then(async (result) => {
     if (result) {
       await cacheDel(cacheKey("user", "progress", userId));
@@ -158,13 +188,17 @@ export class RewardService {
    * Uses distributed locking + database transaction with row-level lock
    * to prevent double-spend from concurrent requests.
    * Gracefully degrades when Stellar is unavailable by queuing the claim.
+   *
+   * Uses two-phase approach: validate in DB tx, execute Stellar tx outside DB,
+   * then update DB. This prevents holding database connections during network calls.
    */
   async claimReward(
     userId: string,
     submissionId: string,
   ): Promise<RewardClaimResult> {
     return withLock(`reward:${submissionId}`, async () => {
-      return db.transaction(async (tx) => {
+      // Phase 1: Validate and mark as pending in a quick DB transaction
+      const claimData = await db.transaction(async (tx) => {
         const [submission] = await tx
           .select()
           .from(quizSubmissions)
@@ -182,6 +216,10 @@ export class RewardService {
 
         if (submission.rewardClaimed) {
           throw new ConflictError("Reward already claimed for this submission");
+        }
+
+        if (submission.rewardPending) {
+          throw new ConflictError("Reward claim in progress");
         }
 
         if (!submission.score || submission.score < 1) {
@@ -208,12 +246,6 @@ export class RewardService {
           );
         }
 
-        const proof = createQuizProof(
-          userId,
-          submission.quizId,
-          submission.score,
-        );
-
         const [user] = await tx
           .select()
           .from(users)
@@ -223,61 +255,94 @@ export class RewardService {
           throw new NotFoundError("User");
         }
 
-        let txHash: string | null = null;
-        try {
-
-          txHash = await invokeContract(
-            config.STELLAR_REWARD_CONTRACT_ID,
-            "claim_reward",
-            [
-              StellarSdk.Address.fromString(user.stellarAddress).toScVal(),
-              StellarSdk.nativeToScVal(submission.score, { type: "u32" }),
-              StellarSdk.nativeToScVal(Buffer.from(proof.signature, "base64")),
-            ],
-          );
-        } catch (err: unknown) {
-          if (err instanceof NotFoundError) throw err;
-
-          if (isCircuitBreakerError(err)) {
-            logger.warn(
-              { submissionId },
-              "Stellar circuit breaker open — queuing reward for later",
-            );
-            await enqueueReward({
-              submissionId,
-              userId,
-              score: submission.score,
-            });
-            rewardClaimsTotal.inc({ status: "queued" });
-            auditLog("reward.queued", {
-              userId,
-              submissionId,
-              amount: REWARD_AMOUNT,
-              queued: true,
-            });
-            return {
-              submissionId,
-              amount: REWARD_AMOUNT,
-              txHash: null,
-              queued: true,
-              message:
-                "Reward claim queued — Stellar is temporarily unavailable",
-            };
-          }
-
-          if (err instanceof StellarError && err.message.includes("bad_seq")) {
-            txHash = await handleBadSeqError(submissionId, user.stellarAddress);
-          } else if (err instanceof StellarError && err.message.includes("tx_bad_seq")) {
-            txHash = await handleBadSeqError(submissionId, user.stellarAddress);
-          } else {
-            logger.error({ err, submissionId }, "On-chain reward claim failed");
-            throw new Error("Failed to process on-chain reward");
-          }
-        }
-
+        // Mark as pending to prevent concurrent claims
         await tx
           .update(quizSubmissions)
-          .set({ rewardClaimed: true, txHash })
+          .set({ rewardPending: true })
+          .where(eq(quizSubmissions.id, submissionId));
+
+        return {
+          submissionId,
+          userId,
+          score: submission.score,
+          stellarAddress: user.stellarAddress,
+          quizId: submission.quizId,
+        };
+      });
+
+      // Phase 2: Execute Stellar transaction outside DB (no connection held)
+      const proof = createQuizProof(
+        userId,
+        claimData.quizId,
+        claimData.score,
+      );
+
+      let txHash: string | null = null;
+      try {
+        txHash = await invokeContract(
+          config.STELLAR_REWARD_CONTRACT_ID,
+          "claim_reward",
+          [
+            StellarSdk.Address.fromString(claimData.stellarAddress).toScVal(),
+            StellarSdk.nativeToScVal(claimData.score, { type: "u32" }),
+            StellarSdk.nativeToScVal(Buffer.from(proof.signature, "base64")),
+          ],
+        );
+      } catch (err: unknown) {
+        if (err instanceof NotFoundError) throw err;
+
+        if (isCircuitBreakerError(err)) {
+          logger.warn(
+            { submissionId },
+            "Stellar circuit breaker open — queuing reward for later",
+          );
+          // Release pending status before queuing
+          await db
+            .update(quizSubmissions)
+            .set({ rewardPending: false })
+            .where(eq(quizSubmissions.id, submissionId));
+          await enqueueReward({
+            submissionId,
+            userId,
+            score: claimData.score,
+          });
+          rewardClaimsTotal.inc({ status: "queued" });
+          auditLog("reward.queued", {
+            userId,
+            submissionId,
+            amount: REWARD_AMOUNT,
+            queued: true,
+          });
+          return {
+            submissionId,
+            amount: REWARD_AMOUNT,
+            txHash: null,
+            queued: true,
+            message:
+              "Reward claim queued — Stellar is temporarily unavailable",
+          };
+        }
+
+        if (err instanceof StellarError && err.message.includes("bad_seq")) {
+          txHash = await handleBadSeqError(submissionId, claimData.stellarAddress);
+        } else if (err instanceof StellarError && err.message.includes("tx_bad_seq")) {
+          txHash = await handleBadSeqError(submissionId, claimData.stellarAddress);
+        } else {
+          // Mark as failed and release pending status
+          await db
+            .update(quizSubmissions)
+            .set({ rewardPending: false, rewardFailed: true })
+            .where(eq(quizSubmissions.id, submissionId));
+          logger.error({ err, submissionId }, "On-chain reward claim failed");
+          throw new Error("Failed to process on-chain reward");
+        }
+      }
+
+      // Phase 3: Update DB with result in a quick transaction
+      await db.transaction(async (tx) => {
+        await tx
+          .update(quizSubmissions)
+          .set({ rewardClaimed: true, rewardPending: false, txHash })
           .where(eq(quizSubmissions.id, submissionId));
 
         await tx
@@ -286,31 +351,31 @@ export class RewardService {
             credits: sql`${users.credits} + ${REWARD_AMOUNT}`,
           })
           .where(eq(users.id, userId));
-
-        rewardClaimsTotal.inc({ status: "success" });
-        auditLog("reward.claimed", {
-          userId,
-          submissionId,
-          txHash,
-          amount: REWARD_AMOUNT,
-        });
-        logger.info(
-          { userId, submissionId, txHash, amount: REWARD_AMOUNT },
-          "Reward claimed",
-        );
-
-        await cacheDel(cacheKey("user", "progress", userId));
-        await cacheDel(cacheKey("user", "profile", userId));
-        await cacheDel(cacheKey("rewards", "history", userId));
-
-        return {
-          submissionId,
-          amount: REWARD_AMOUNT,
-          txHash,
-          queued: false,
-          message: `Successfully claimed ${REWARD_AMOUNT} credits`,
-        };
       });
+
+      rewardClaimsTotal.inc({ status: "success" });
+      auditLog("reward.claimed", {
+        userId,
+        submissionId,
+        txHash,
+        amount: REWARD_AMOUNT,
+      });
+      logger.info(
+        { userId, submissionId, txHash, amount: REWARD_AMOUNT },
+        "Reward claimed",
+      );
+
+      await cacheDel(cacheKey("user", "progress", userId));
+      await cacheDel(cacheKey("user", "profile", userId));
+      await cacheDel(cacheKey("rewards", "history", userId));
+
+      return {
+        submissionId,
+        amount: REWARD_AMOUNT,
+        txHash,
+        queued: false,
+        message: `Successfully claimed ${REWARD_AMOUNT} credits`,
+      };
     });
   }
 

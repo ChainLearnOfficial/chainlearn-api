@@ -165,7 +165,7 @@ describe("processRewardClaim", () => {
 
   it("should successfully process claim and update DB in transaction", async () => {
     mockTxWithSelects([
-      [{ id: "sub-1", userId: "user-1", score: 5, rewardClaimed: false, quizId: "quiz-1" }],
+      [{ id: "sub-1", userId: "user-1", score: 5, rewardClaimed: false, rewardPending: false, quizId: "quiz-1" }],
       [{ id: "quiz-1", courseId: "course-1", questions: [{ id: "q1" }] }],
       [{ id: "user-1", stellarAddress: "GALICE0000000000000000000000000000000000000000000000000000000" }],
     ]);
@@ -173,7 +173,8 @@ describe("processRewardClaim", () => {
     const result = await processRewardClaim("sub-1", "user-1", 5);
 
     expect(result).toBe(true);
-    expect(mockDb.transaction).toHaveBeenCalledTimes(1);
+    // Two transactions: one for validation/pending, one for updating result
+    expect(mockDb.transaction).toHaveBeenCalledTimes(2);
     expect(invokeContract).toHaveBeenCalledWith(
       "test-reward-contract",
       "claim_reward",
@@ -183,12 +184,19 @@ describe("processRewardClaim", () => {
 
   it("should throw when on-chain transaction fails", async () => {
     mockTxWithSelects([
-      [{ id: "sub-1", userId: "user-1", score: 5, rewardClaimed: false, quizId: "quiz-1" }],
+      [{ id: "sub-1", userId: "user-1", score: 5, rewardClaimed: false, rewardPending: false, quizId: "quiz-1" }],
       [{ id: "quiz-1", courseId: "course-1", questions: [{ id: "q1" }] }],
       [{ id: "user-1", stellarAddress: "GALICE0000000000000000000000000000000000000000000000000000000" }],
     ]);
 
     vi.mocked(invokeContract).mockRejectedValue(new Error("Stellar error"));
+
+    // Mock the update call that marks the submission as failed
+    mockDb.update.mockReturnValue({
+      set: vi.fn().mockReturnValue({
+        where: vi.fn().mockResolvedValue(undefined),
+      }),
+    });
 
     await expect(
       processRewardClaim("sub-1", "user-1", 5)

@@ -44,16 +44,6 @@ export class StellarClient {
     }
   }
 
-  /** Check if an account exists on the network. */
-  async accountExists(publicKey: string): Promise<boolean> {
-    try {
-      await this.getAccount(publicKey);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
   /** Submit a pre-built transaction envelope to the network. */
   async submitTransaction(
     txEnvelope: StellarSdk.Transaction | StellarSdk.FeeBumpTransaction
@@ -80,11 +70,6 @@ export class StellarClient {
           : "Transaction submission failed"
       );
     }
-  }
-
-  /** Get the Soroban RPC server for advanced usage. */
-  getSorobanRpc(): StellarSdk.rpc.Server {
-    return this.soroban;
   }
 
   /** Expose Horizon server for health checks. */

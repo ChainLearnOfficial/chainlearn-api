@@ -17,7 +17,7 @@ export class RewardController {
     reply: FastifyReply
   ): Promise<void> {
     const { authUser } = request as AuthenticatedRequest;
-    const { submissionId, idempotencyKey } = (request as any).validatedBody;
+    const { submissionId, idempotencyKey } = request.body;
 
     const { cached, response } = await checkIdempotency(
       idempotencyKey,

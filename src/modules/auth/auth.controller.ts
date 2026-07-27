@@ -11,7 +11,7 @@ export class AuthController {
     request: FastifyRequest<{ Body: ChallengeBody }>,
     reply: FastifyReply
   ): Promise<void> {
-    const { stellarAddress } = (request as any).validatedBody;
+    const { stellarAddress } = request.body;
     const result = await authService.createChallenge(stellarAddress);
 
     reply.send({
@@ -28,7 +28,7 @@ export class AuthController {
     request: FastifyRequest<{ Body: VerifyBody }>,
     reply: FastifyReply
   ): Promise<void> {
-    const { stellarAddress, signedChallenge } = (request as any).validatedBody;
+    const { stellarAddress, signedChallenge } = request.body;
 
     const authResult = await authService.verifyChallenge(
       stellarAddress,

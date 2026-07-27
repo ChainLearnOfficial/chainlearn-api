@@ -12,7 +12,7 @@ export class CourseController {
     request: FastifyRequest<{ Querystring: ListCoursesQuery }>,
     reply: FastifyReply
   ): Promise<void> {
-    const query = (request as any).validatedQuery ?? (request.query as ListCoursesQuery);
+    const query = request.query ?? (request.query as ListCoursesQuery);
     const userId = (request as AuthenticatedRequest).authUser?.id ?? null;
     const result = await courseService.listCourses(userId, query);
 
@@ -35,7 +35,7 @@ export class CourseController {
     request: FastifyRequest<{ Params: CourseIdParams }>,
     reply: FastifyReply
   ): Promise<void> {
-    const { id } = (request as any).validatedParams;
+    const { id } = request.params;
     const userId = (request as AuthenticatedRequest).authUser?.id ?? null;
     const course = await courseService.getCourseDetail(id, userId);
 
@@ -50,7 +50,7 @@ export class CourseController {
     request: FastifyRequest<{ Params: CourseIdParams }>,
     reply: FastifyReply
   ): Promise<void> {
-    const { id } = (request as any).validatedParams;
+    const { id } = request.params;
     const { authUser } = request as AuthenticatedRequest;
     await courseService.enroll(authUser.id, id);
 

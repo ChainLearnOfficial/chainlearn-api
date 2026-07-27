@@ -15,10 +15,10 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
         tags: ["users"],
       } as FastifySchema,
     },
-    ((request: any, reply: any) => userController.getMe(request, reply)) as any
+    (request, reply) => userController.getMe(request, reply)
   );
 
-  app.put(
+  app.put<{ Body: import("./user.types.js").UpdateProfileBody }>(
     "/me",
     {
       preHandler: [validate({ body: updateProfileSchema })],
@@ -27,7 +27,7 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
         tags: ["users"],
       } as FastifySchema,
     },
-    ((request: any, reply: any) => userController.updateMe(request, reply)) as any
+    (request, reply) => userController.updateMe(request, reply)
   );
 
   app.get(
@@ -38,6 +38,6 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
         tags: ["users"],
       } as FastifySchema,
     },
-    ((request: any, reply: any) => userController.getProgress(request, reply)) as any
+    (request, reply) => userController.getProgress(request, reply)
   );
 }

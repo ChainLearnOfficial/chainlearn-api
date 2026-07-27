@@ -27,7 +27,7 @@ export class UserController {
     reply: FastifyReply
   ): Promise<void> {
     const { authUser } = request as AuthenticatedRequest;
-    const data = (request as any).validatedBody;
+    const data = request.body;
     const profile = await userService.updateProfile(authUser.id, data);
 
     reply.send({ success: true, data: profile });

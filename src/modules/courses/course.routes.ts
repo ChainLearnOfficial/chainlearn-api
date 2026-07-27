@@ -5,7 +5,7 @@ import { validate } from "../../middleware/validation.js";
 import { listCoursesSchema, courseIdParamsSchema } from "./course.types.js";
 
 export async function courseRoutes(app: FastifyInstance): Promise<void> {
-  app.get(
+  app.get<{ Querystring: import("./course.types.js").ListCoursesQuery }>(
     "/",
     {
       preHandler: [optionalAuth, validate({ querystring: listCoursesSchema })],
@@ -14,10 +14,10 @@ export async function courseRoutes(app: FastifyInstance): Promise<void> {
         tags: ["courses"],
       } as FastifySchema,
     },
-    ((request: any, reply: any) => courseController.list(request, reply)) as any
+    (request, reply) => courseController.list(request, reply)
   );
 
-  app.get(
+  app.get<{ Params: { id: string } }>(
     "/:id",
     {
       preHandler: [optionalAuth, validate({ params: courseIdParamsSchema })],
@@ -26,10 +26,10 @@ export async function courseRoutes(app: FastifyInstance): Promise<void> {
         tags: ["courses"],
       } as FastifySchema,
     },
-    ((request: any, reply: any) => courseController.getById(request, reply)) as any
+    (request, reply) => courseController.getById(request, reply)
   );
 
-  app.post(
+  app.post<{ Params: { id: string } }>(
     "/:id/enroll",
     {
       preHandler: [authGuard, validate({ params: courseIdParamsSchema })],
@@ -38,6 +38,6 @@ export async function courseRoutes(app: FastifyInstance): Promise<void> {
         tags: ["courses"],
       } as FastifySchema,
     },
-    ((request: any, reply: any) => courseController.enroll(request, reply)) as any
+    (request, reply) => courseController.enroll(request, reply)
   );
 }

@@ -142,9 +142,7 @@ export async function processRewardClaim(
         { method: "claim_reward", status: "error" },
         Number(process.hrtime.bigint() - txStart) / 1e9,
       );
-      if (err instanceof StellarError && err.message.includes("bad_seq")) {
-        txHash = await handleBadSeqError(submissionId, claimData.stellarAddress);
-      } else if (err instanceof StellarError && err.message.includes("tx_bad_seq")) {
+      if (err instanceof StellarError && (err.message.includes("bad_seq") || err.message.includes("tx_bad_seq"))) {
         txHash = await handleBadSeqError(submissionId, claimData.stellarAddress);
       } else {
         // Mark as failed and release pending status
@@ -323,9 +321,7 @@ export class RewardService {
           };
         }
 
-        if (err instanceof StellarError && err.message.includes("bad_seq")) {
-          txHash = await handleBadSeqError(submissionId, claimData.stellarAddress);
-        } else if (err instanceof StellarError && err.message.includes("tx_bad_seq")) {
+        if (err instanceof StellarError && (err.message.includes("bad_seq") || err.message.includes("tx_bad_seq"))) {
           txHash = await handleBadSeqError(submissionId, claimData.stellarAddress);
         } else {
           // Mark as failed and release pending status

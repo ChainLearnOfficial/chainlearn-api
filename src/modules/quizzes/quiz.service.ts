@@ -81,7 +81,32 @@ export class QuizService {
         difficulty: data.difficulty ?? "beginner",
         numQuestions: data.numQuestions ?? 5,
       });
-      generatedQuestions = aiQuestions.map((q, i) => ({
+      if (!Array.isArray(aiQuestions)) {
+        throw new Error("AI service returned non-array questions");
+      }
+
+      const validQuestions = aiQuestions.filter((q) => {
+        const hasPrompt =
+          typeof q?.prompt === "string" && q.prompt.trim().length > 0;
+        const hasOptions = Array.isArray(q?.options) && q.options.length > 0;
+        const hasValidIndex =
+          typeof q?.correct_index === "number" &&
+          Number.isInteger(q.correct_index) &&
+          q.correct_index >= 0 &&
+          q.correct_index < (q.options?.length ?? 0);
+
+        const isValid = hasPrompt && hasOptions && hasValidIndex;
+        if (!isValid) {
+          logger.warn({ question: q }, "Invalid AI-generated question skipped");
+        }
+        return isValid;
+      });
+
+      if (validQuestions.length === 0) {
+        throw new Error("AI service returned no valid questions");
+      }
+
+      generatedQuestions = validQuestions.map((q, i) => ({
         id: `q${i + 1}`,
         text: q.prompt,
         options: q.options,
@@ -159,12 +184,16 @@ export class QuizService {
         }
 
         // Grade the quiz
-        const questions = quiz.questions as Array<{
+        const questions = (quiz.questions ?? []) as Array<{
           id: string;
           text: string;
           options: string[];
           correctIndex: number;
         }>;
+
+        if (!questions || questions.length === 0) {
+          throw new ForbiddenError("Quiz has no questions");
+        }
 
         let correctCount = 0;
         const feedbackParts: string[] = [];

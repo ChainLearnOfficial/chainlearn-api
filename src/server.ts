@@ -12,6 +12,7 @@ import { registry, setupInfraMetrics } from "./metrics/index.js";
 import { registerMetricsHook } from "./metrics/fastify-hook.js";
 import { registerErrorHandler } from "./middleware/error-handler.js";
 import { rateLimitOptions } from "./middleware/rate-limit.js";
+import { authGuard } from "./middleware/auth.js";
 import { db } from "./config/database.js";
 import { redis } from "./config/redis.js";
 import { stellarClient } from "./stellar/client.js";
@@ -117,7 +118,7 @@ async function buildApp() {
     });
   });
 
-  app.get("/metrics", async (_request, reply) => {
+  app.get("/metrics", { preHandler: authGuard }, async (_request, reply) => {
     reply.header("Content-Type", registry.contentType);
     return reply.send(await registry.metrics());
   });
@@ -157,9 +158,11 @@ async function start() {
   startRetryProcessor(processRetryJob);
   startIdempotencyCleanup();
 
+  let cacheWarmInterval: ReturnType<typeof setInterval> | null = null;
+
   try {
     await warmCourseCache();
-    setInterval(
+    cacheWarmInterval = setInterval(
       async () => {
         await warmCourseCache();
       },
@@ -173,6 +176,9 @@ async function start() {
     logger.info({ signal }, "Received shutdown signal");
     stopRetryProcessor();
     stopIdempotencyCleanup();
+    if (cacheWarmInterval) {
+      clearInterval(cacheWarmInterval);
+    }
     await app.close();
     await closeDatabase();
     await closeRedis();

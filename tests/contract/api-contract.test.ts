@@ -166,9 +166,9 @@ describe("API Versioning", () => {
       expect(body.status).toBe("ok");
     });
 
-    it("GET /metrics still works", async () => {
+    it("GET /metrics requires authentication", async () => {
       const res = await app.inject({ method: "GET", url: "/metrics" });
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(401);
     });
   });
 

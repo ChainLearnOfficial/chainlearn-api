@@ -29,34 +29,6 @@ export function createQuizProof(
   };
 }
 
-/**
- * Verify a quiz proof signature (for server-side double-check).
- */
-export function verifyQuizProof(
-  userAddress: string,
-  quizId: string,
-  score: number,
-  hash: string,
-  signature: string
-): boolean {
-  try {
-    const keypair = getPlatformKeypair();
-
-    const expectedPayload = Buffer.from(
-      JSON.stringify({ userAddress, quizId, score })
-    );
-    const expectedHash = crypto.createHash("sha256").update(expectedPayload).digest();
-
-    if (expectedHash.toString("hex") !== hash) {
-      return false;
-    }
-
-    return keypair.verify(expectedHash, Buffer.from(signature, "base64"));
-  } catch (err) {
-    logger.warn({ err, quizId }, "Quiz proof verification failed");
-    return false;
-  }
-}
 
 /**
  * Create a signed authorization for credential (NFT) minting.

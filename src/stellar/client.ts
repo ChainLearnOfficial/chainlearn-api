@@ -82,35 +82,6 @@ export class StellarClient {
     }
   }
 
-  /** Invoke a Soroban contract function (read-only). */
-  async callContract(
-    contractId: string,
-    method: string,
-    ...args: StellarSdk.xdr.ScVal[]
-  ): Promise<StellarSdk.rpc.Api.LedgerEntryResult> {
-    try {
-      return await circuitBreakerExecute(() =>
-        stellarRetry.execute(() =>
-          withTimeout(
-            this.soroban.getContractData(
-              contractId,
-              StellarSdk.xdr.ScVal.scvSymbol(method)
-            ),
-            WRITE_TIMEOUT_MS
-          )
-        )
-      );
-    } catch (err) {
-      logger.error({ err, contractId, method }, "Contract call failed");
-      throw new StellarError(`Contract call ${method} failed`);
-    }
-  }
-
-  /** Get the network passphrase for signing. */
-  getPassphrase(): string {
-    return this.networkPassphrase;
-  }
-
   /** Get the Soroban RPC server for advanced usage. */
   getSorobanRpc(): StellarSdk.rpc.Server {
     return this.soroban;

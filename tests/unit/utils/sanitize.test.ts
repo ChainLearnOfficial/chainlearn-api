@@ -1,7 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
   sanitizeText,
-  sanitizeMarkdown,
   sanitizeQuizFeedback,
 } from "../../../src/utils/sanitize.js";
 
@@ -27,21 +26,6 @@ describe("sanitizeText", () => {
   });
 });
 
-describe("sanitizeMarkdown", () => {
-  it("keeps allowed formatting tags", () => {
-    expect(sanitizeMarkdown("<strong>x</strong>")).toBe("<strong>x</strong>");
-  });
-
-  it("drops disallowed tags but keeps allowed ones", () => {
-    expect(sanitizeMarkdown('<script>bad()</script><em>ok</em>')).toBe(
-      "<em>ok</em>"
-    );
-  });
-
-  it("strips attributes from allowed tags", () => {
-    expect(sanitizeMarkdown('<p onclick="x()">t</p>')).toBe("<p>t</p>");
-  });
-});
 
 describe("sanitizeQuizFeedback", () => {
   it("strips injected markup from feedback strings", () => {

@@ -50,7 +50,6 @@ import {
   enqueueReward,
   dequeueReward,
   requeueReward,
-  getQueueLength,
   startRetryProcessor,
   stopRetryProcessor,
 } from "../../../src/services/retry-queue.js";
@@ -147,11 +146,6 @@ describe("Retry Queue", () => {
     expect(mockDb.update).toHaveBeenCalled();
   });
 
-  it("should return queue length", async () => {
-    mockRedis.llen.mockResolvedValueOnce(5);
-    const len = await getQueueLength();
-    expect(len).toBe(5);
-  });
 
   it("should process jobs when processor is started", async () => {
     const processFn = vi.fn().mockResolvedValue(true);

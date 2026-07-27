@@ -48,10 +48,6 @@ export async function requeueReward(job: RetryJob): Promise<void> {
   await redis.lpush(QUEUE_KEY, JSON.stringify(updated));
 }
 
-export async function getQueueLength(): Promise<number> {
-  return redis.llen(QUEUE_KEY);
-}
-
 let processorRunning = false;
 let processorTimer: ReturnType<typeof setTimeout> | null = null;
 

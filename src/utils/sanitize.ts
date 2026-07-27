@@ -7,21 +7,9 @@ const STRICT_OPTIONS: sanitizeHtml.IOptions = {
   disallowedTagsMode: "discard",
 };
 
-// Markdown-ish: allow a small set of formatting tags, no attributes.
-const MARKDOWN_OPTIONS: sanitizeHtml.IOptions = {
-  allowedTags: ["b", "i", "em", "strong", "p", "br", "ul", "ol", "li", "code", "pre"],
-  allowedAttributes: {},
-  disallowedTagsMode: "discard",
-};
-
 /** Strip all HTML/script content and trim. Use for untrusted plain-text input. */
 export function sanitizeText(input: string): string {
   return sanitizeHtml(input, STRICT_OPTIONS).trim();
-}
-
-/** Allow a limited set of formatting tags; strip everything else. */
-export function sanitizeMarkdown(input: string): string {
-  return sanitizeHtml(input, MARKDOWN_OPTIONS).trim();
 }
 
 /**

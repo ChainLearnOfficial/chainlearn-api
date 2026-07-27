@@ -155,18 +155,26 @@ export async function processRewardClaim(
     }
 
     // Phase 3: Update DB with result in a quick transaction
+    const isPending = txHash === "pending_indexer_confirmation";
     await db.transaction(async (tx) => {
-      await tx
-        .update(quizSubmissions)
-        .set({ rewardClaimed: true, rewardPending: false, txHash })
-        .where(eq(quizSubmissions.id, submissionId));
+      if (isPending) {
+        await tx
+          .update(quizSubmissions)
+          .set({ rewardClaimed: false, rewardPending: true, txHash })
+          .where(eq(quizSubmissions.id, submissionId));
+      } else {
+        await tx
+          .update(quizSubmissions)
+          .set({ rewardClaimed: true, rewardPending: false, txHash })
+          .where(eq(quizSubmissions.id, submissionId));
 
-      await tx
-        .update(users)
-        .set({
-          credits: sql`${users.credits} + ${REWARD_AMOUNT}`,
-        })
-        .where(eq(users.id, userId));
+        await tx
+          .update(users)
+          .set({
+            credits: sql`${users.credits} + ${REWARD_AMOUNT}`,
+          })
+          .where(eq(users.id, userId));
+      }
     });
 
     return true;
@@ -335,19 +343,54 @@ export class RewardService {
       }
 
       // Phase 3: Update DB with result in a quick transaction
+      const isPending = txHash === "pending_indexer_confirmation";
       await db.transaction(async (tx) => {
-        await tx
-          .update(quizSubmissions)
-          .set({ rewardClaimed: true, rewardPending: false, txHash })
-          .where(eq(quizSubmissions.id, submissionId));
+        if (isPending) {
+          await tx
+            .update(quizSubmissions)
+            .set({ rewardClaimed: false, rewardPending: true, txHash })
+            .where(eq(quizSubmissions.id, submissionId));
+        } else {
+          await tx
+            .update(quizSubmissions)
+            .set({ rewardClaimed: true, rewardPending: false, txHash })
+            .where(eq(quizSubmissions.id, submissionId));
 
-        await tx
-          .update(users)
-          .set({
-            credits: sql`${users.credits} + ${REWARD_AMOUNT}`,
-          })
-          .where(eq(users.id, userId));
+          await tx
+            .update(users)
+            .set({
+              credits: sql`${users.credits} + ${REWARD_AMOUNT}`,
+            })
+            .where(eq(users.id, userId));
+        }
       });
+
+      if (isPending) {
+        rewardClaimsTotal.inc({ status: "pending" });
+        auditLog("reward.pending_confirmation", {
+          userId,
+          submissionId,
+          txHash,
+          amount: REWARD_AMOUNT,
+        });
+        logger.info(
+          { userId, submissionId, txHash },
+          "Reward claim pending indexer confirmation due to sequence error"
+        );
+
+        await cacheDel(cacheKey("user", "progress", userId));
+        await cacheDel(cacheKey("user", "profile", userId));
+        await cacheDel(cacheKey("rewards", "history", userId));
+
+        return {
+          submissionId,
+          amount: REWARD_AMOUNT,
+          txHash,
+          queued: true,
+          message:
+            "Reward transaction pending confirmation. Credits will be applied once confirmed.",
+        };
+      }
 
       rewardClaimsTotal.inc({ status: "success" });
       auditLog("reward.claimed", {

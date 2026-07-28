@@ -138,7 +138,16 @@ export class UserService {
       rewardsClaimed: rewardsResult.value,
     };
 
-    await cacheSet(cacheKeyString, progress, 10);
+    // #149: was 10s, which is shorter than most request intervals for this
+    // endpoint in practice — the cache was rarely hit, making the Redis
+    // round-trip pure overhead on top of the DB query it was meant to
+    // avoid. Every mutation that actually changes a user's progress
+    // (enroll, credential issuance, reward claim) already explicitly calls
+    // cacheDel on this same key, so a longer TTL doesn't risk serving
+    // stale data after those events — it only affects the fallback expiry
+    // for the rare case nothing invalidated it. Matches DEFAULT_TTL in
+    // cache/index.ts.
+    await cacheSet(cacheKeyString, progress, 60);
 
     return progress;
   }

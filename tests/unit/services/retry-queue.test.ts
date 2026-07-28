@@ -166,6 +166,46 @@ describe("Retry Queue", () => {
     expect(processFn).toHaveBeenCalledWith(job);
   });
 
+  it("should not spawn a duplicate loop when restarted while the previous tick is still in flight", async () => {
+    vi.useFakeTimers();
+    try {
+      let resolveStaleDequeue: (value: string | null) => void = () => {};
+      const staleDequeue = new Promise<string | null>((resolve) => {
+        resolveStaleDequeue = resolve;
+      });
+      mockRedis.rpop.mockReturnValueOnce(staleDequeue as ReturnType<typeof mockRedis.rpop>);
+
+      const staleProcessFn = vi.fn().mockResolvedValue(true);
+      const stalePromise = startRetryProcessor(staleProcessFn);
+
+      // Let the stale tick reach its `await dequeueReward()` point without resolving it.
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Stop before the stale tick completes, then immediately restart.
+      stopRetryProcessor();
+
+      mockRedis.rpop.mockResolvedValue(null);
+      const freshProcessFn = vi.fn().mockResolvedValue(true);
+      await startRetryProcessor(freshProcessFn);
+
+      // Now let the stale tick's dequeue finally resolve.
+      resolveStaleDequeue(null);
+      await stalePromise;
+      await Promise.resolve();
+
+      mockRedis.rpop.mockClear();
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      // Only the fresh loop should still be ticking — a dangling stale loop
+      // would double this call count.
+      expect(mockRedis.rpop).toHaveBeenCalledTimes(1);
+    } finally {
+      stopRetryProcessor();
+      vi.useRealTimers();
+    }
+  });
+
   it("should requeue failed jobs", async () => {
     const processFn = vi.fn().mockResolvedValue(false);
     const job = {

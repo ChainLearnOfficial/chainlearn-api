@@ -50,15 +50,17 @@ export async function requeueReward(job: RetryJob): Promise<void> {
 
 let processorRunning = false;
 let processorTimer: ReturnType<typeof setTimeout> | null = null;
+let processorGeneration = 0;
 
 export async function startRetryProcessor(
   processFn: (job: RetryJob) => Promise<boolean>
 ): Promise<void> {
   if (processorRunning) return;
   processorRunning = true;
+  const generation = ++processorGeneration;
 
   const tick = async () => {
-    if (!processorRunning) return;
+    if (generation !== processorGeneration) return;
     try {
       const job = await dequeueReward();
       if (job) {
@@ -70,17 +72,18 @@ export async function startRetryProcessor(
     } catch (err) {
       logger.error({ err }, "Retry processor tick failed");
     }
-    if (processorRunning) {
+    if (generation === processorGeneration) {
       processorTimer = setTimeout(tick, RETRY_INTERVAL_MS);
     }
   };
 
-  tick();
+  await tick();
   logger.info("Retry processor started");
 }
 
 export function stopRetryProcessor(): void {
   processorRunning = false;
+  processorGeneration++;
   if (processorTimer) {
     clearTimeout(processorTimer);
     processorTimer = null;

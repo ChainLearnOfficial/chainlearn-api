@@ -32,8 +32,7 @@ export const users = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
-  },
-  (table) => [index("idx_users_stellar_address").on(table.stellarAddress)]
+  }
 );
 
 // ─── Courses ────────────────────────────────────────────────────────────────
@@ -137,6 +136,8 @@ export const quizSubmissions = pgTable(
       table.quizId,
       table.userId
     ),
+    index("idx_quiz_submissions_user_id").on(table.userId),
+    index("idx_quiz_submissions_reward_failed").on(table.rewardFailed),
   ]
 );
 

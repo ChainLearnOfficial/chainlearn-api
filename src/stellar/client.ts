@@ -72,6 +72,43 @@ export class StellarClient {
     }
   }
 
+  /**
+   * Execute a read-only Soroban contract call via simulateTransaction.
+   * Uses READ_TIMEOUT_MS — write timeout is inappropriate for reads.
+   */
+  async callContract(
+    tx: StellarSdk.Transaction
+  ): Promise<StellarSdk.rpc.Api.SimulateTransactionResponse> {
+    try {
+      return await circuitBreakerExecute(() =>
+        stellarRetry.execute(() =>
+          withTimeout(this.soroban.simulateTransaction(tx), READ_TIMEOUT_MS)
+        )
+      );
+    } catch (err) {
+      logger.error({ err }, "Soroban contract call failed");
+      throw new StellarError("Contract call failed");
+    }
+  }
+
+  /**
+   * Check whether a Stellar account exists on the network.
+   * Returns false ONLY for genuine 404 (account not found). Any other error
+   * (network timeout, Horizon outage, etc.) is rethrown so callers are not
+   * silently misled into treating an unreachable network as a missing account.
+   */
+  async accountExists(publicKey: string): Promise<boolean> {
+    try {
+      await this.horizon.loadAccount(publicKey);
+      return true;
+    } catch (err: any) {
+      const status = err?.response?.status ?? err?.status;
+      if (status === 404) return false;
+      logger.error({ err, publicKey }, "accountExists check failed");
+      throw new StellarError(`Could not verify account ${publicKey}: ${err?.message ?? err}`);
+    }
+  }
+
   /** Expose Horizon server for health checks. */
   getHorizonServer(): StellarSdk.Horizon.Server {
     return this.horizon;

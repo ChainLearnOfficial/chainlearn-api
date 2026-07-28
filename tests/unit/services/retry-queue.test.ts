@@ -12,10 +12,8 @@ vi.mock("../../../src/config/database.js", () => ({
 vi.mock("../../../src/config/redis.js", () => ({
   redis: {
     ping: vi.fn().mockResolvedValue("PONG"),
-    lpush: vi.fn().mockResolvedValue(1),
-    rpop: vi.fn().mockResolvedValue(null),
-    llen: vi.fn().mockResolvedValue(0),
-    eval: vi.fn().mockResolvedValue(1),
+    zadd: vi.fn().mockResolvedValue(1),
+    eval: vi.fn().mockResolvedValue([]),
   },
 }));
 
@@ -48,7 +46,7 @@ vi.mock("@stellar/stellar-sdk", () => ({
 
 import {
   enqueueReward,
-  dequeueReward,
+  dequeueReadyBatch,
   requeueReward,
   startRetryProcessor,
   stopRetryProcessor,
@@ -59,6 +57,18 @@ import { db } from "../../../src/config/database.js";
 const mockRedis = vi.mocked(redis);
 const mockDb = vi.mocked(db);
 
+function jobPayload(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: "job-1",
+    submissionId: "sub-1",
+    userId: "user-1",
+    score: 5,
+    retryCount: 0,
+    createdAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
 describe("Retry Queue", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -68,164 +78,186 @@ describe("Retry Queue", () => {
     stopRetryProcessor();
   });
 
-  it("should enqueue a reward job", async () => {
+  it("should enqueue a reward job scored for immediate processing", async () => {
     await enqueueReward({
       submissionId: "sub-1",
       userId: "user-1",
       score: 5,
     });
 
-    expect(mockRedis.lpush).toHaveBeenCalledWith(
+    expect(mockRedis.zadd).toHaveBeenCalledWith(
       "chainlearn:retry:rewards",
+      expect.any(Number),
       expect.stringContaining('"submissionId":"sub-1"')
     );
   });
 
-  it("should dequeue a reward job", async () => {
-    const job = {
-      submissionId: "sub-1",
-      userId: "user-1",
-      score: 5,
-      retryCount: 0,
-      createdAt: new Date().toISOString(),
-    };
-    mockRedis.rpop.mockResolvedValueOnce(JSON.stringify(job));
+  it("should dequeue a batch of ready jobs via the atomic pop script", async () => {
+    const job = jobPayload();
+    mockRedis.eval.mockResolvedValueOnce([JSON.stringify(job)]);
 
-    const result = await dequeueReward();
-    expect(result).toEqual(job);
-  });
-
-  it("should return null when queue is empty", async () => {
-    mockRedis.rpop.mockResolvedValueOnce(null);
-    const result = await dequeueReward();
-    expect(result).toBeNull();
-  });
-
-  it("should requeue with incremented retry count", async () => {
-    const job = {
-      submissionId: "sub-1",
-      userId: "user-1",
-      score: 5,
-      retryCount: 3,
-      createdAt: new Date().toISOString(),
-    };
-
-    await requeueReward(job);
-
-    expect(mockRedis.lpush).toHaveBeenCalledWith(
+    const result = await dequeueReadyBatch();
+    expect(result).toEqual([job]);
+    expect(mockRedis.eval).toHaveBeenCalledWith(
+      expect.stringContaining("ZRANGEBYSCORE"),
+      1,
       "chainlearn:retry:rewards",
-      expect.stringContaining('"retryCount":4')
+      expect.any(Number),
+      expect.any(Number)
     );
   });
 
-  it("should not requeue when max retries exceeded", async () => {
-    const job = {
-      submissionId: "sub-1",
-      userId: "user-1",
-      score: 5,
-      retryCount: 10,
-      createdAt: new Date().toISOString(),
-    };
+  it("should return an empty array when no jobs are ready", async () => {
+    mockRedis.eval.mockResolvedValueOnce([]);
+    const result = await dequeueReadyBatch();
+    expect(result).toEqual([]);
+  });
+
+  it("should requeue with incremented retry count and a future score (backoff)", async () => {
+    const job = jobPayload({ retryCount: 3 });
+    const before = Date.now();
 
     await requeueReward(job);
 
-    expect(mockRedis.lpush).not.toHaveBeenCalled();
+    expect(mockRedis.zadd).toHaveBeenCalledWith(
+      "chainlearn:retry:rewards",
+      expect.any(Number),
+      expect.stringContaining('"retryCount":4')
+    );
+    const [, score] = mockRedis.zadd.mock.calls[0];
+    expect(score as number).toBeGreaterThan(before); // scheduled in the future, not immediate
+  });
+
+  it("should back off further on later retries, up to the cap", async () => {
+    await requeueReward(jobPayload({ retryCount: 0 }));
+    const [, firstScore] = mockRedis.zadd.mock.calls[0];
+
+    mockRedis.zadd.mockClear();
+    await requeueReward(jobPayload({ retryCount: 5 }));
+    const [, laterScore] = mockRedis.zadd.mock.calls[0];
+
+    expect(laterScore as number).toBeGreaterThan(firstScore as number);
+  });
+
+  it("should not requeue when max retries exceeded", async () => {
+    const job = jobPayload({ retryCount: 10 });
+
+    await requeueReward(job);
+
+    expect(mockRedis.zadd).not.toHaveBeenCalled();
   });
 
   it("should mark reward as failed when max retries exceeded", async () => {
-    const job = {
-      submissionId: "sub-1",
-      userId: "user-1",
-      score: 5,
-      retryCount: 10,
-      createdAt: new Date().toISOString(),
-    };
+    const job = jobPayload({ retryCount: 10 });
 
     await requeueReward(job);
 
     expect(mockDb.update).toHaveBeenCalled();
   });
 
-
-  it("should process jobs when processor is started", async () => {
+  it("should process a batch of ready jobs concurrently when the processor ticks", async () => {
     const processFn = vi.fn().mockResolvedValue(true);
-    const job = {
-      submissionId: "sub-1",
-      userId: "user-1",
-      score: 5,
-      retryCount: 0,
-      createdAt: new Date().toISOString(),
-    };
+    const jobs = [jobPayload({ id: "a", submissionId: "sub-a" }), jobPayload({ id: "b", submissionId: "sub-b" })];
 
-    mockRedis.rpop.mockResolvedValueOnce(JSON.stringify(job));
+    mockRedis.eval.mockResolvedValueOnce(jobs.map((j) => JSON.stringify(j)));
 
-    startRetryProcessor(processFn);
+    await startRetryProcessor(processFn);
 
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(processFn).toHaveBeenCalledTimes(2);
+    expect(processFn).toHaveBeenCalledWith(jobs[0]);
+    expect(processFn).toHaveBeenCalledWith(jobs[1]);
+  });
 
-    expect(processFn).toHaveBeenCalledWith(job);
+  it("should requeue failed jobs from a batch without blocking the others", async () => {
+    const jobs = [jobPayload({ id: "a", submissionId: "sub-a" }), jobPayload({ id: "b", submissionId: "sub-b" })];
+    const processFn = vi.fn().mockImplementation(async (job) => job.submissionId !== "sub-a");
+
+    mockRedis.eval.mockResolvedValueOnce(jobs.map((j) => JSON.stringify(j)));
+
+    await startRetryProcessor(processFn);
+
+    expect(processFn).toHaveBeenCalledTimes(2);
+    expect(mockRedis.zadd).toHaveBeenCalledWith(
+      "chainlearn:retry:rewards",
+      expect.any(Number),
+      expect.stringContaining('"submissionId":"sub-a"')
+    );
+  });
+
+  it("should requeue a job whose processFn throws", async () => {
+    const job = jobPayload();
+    const processFn = vi.fn().mockRejectedValue(new Error("boom"));
+
+    mockRedis.eval.mockResolvedValueOnce([JSON.stringify(job)]);
+
+    await startRetryProcessor(processFn);
+
+    expect(mockRedis.zadd).toHaveBeenCalledWith(
+      "chainlearn:retry:rewards",
+      expect.any(Number),
+      expect.stringContaining('"retryCount":1')
+    );
   });
 
   it("should not spawn a duplicate loop when restarted while the previous tick is still in flight", async () => {
     vi.useFakeTimers();
     try {
-      let resolveStaleDequeue: (value: string | null) => void = () => {};
-      const staleDequeue = new Promise<string | null>((resolve) => {
+      let resolveStaleDequeue: (value: string[]) => void = () => {};
+      const staleDequeue = new Promise<string[]>((resolve) => {
         resolveStaleDequeue = resolve;
       });
-      mockRedis.rpop.mockReturnValueOnce(staleDequeue as ReturnType<typeof mockRedis.rpop>);
+      mockRedis.eval.mockReturnValueOnce(staleDequeue as ReturnType<typeof mockRedis.eval>);
 
       const staleProcessFn = vi.fn().mockResolvedValue(true);
       const stalePromise = startRetryProcessor(staleProcessFn);
 
-      // Let the stale tick reach its `await dequeueReward()` point without resolving it.
+      // Let the stale tick reach its `await dequeueReadyBatch()` point without resolving it.
       await Promise.resolve();
       await Promise.resolve();
 
       // Stop before the stale tick completes, then immediately restart.
       stopRetryProcessor();
 
-      mockRedis.rpop.mockResolvedValue(null);
+      mockRedis.eval.mockResolvedValue([]);
       const freshProcessFn = vi.fn().mockResolvedValue(true);
       await startRetryProcessor(freshProcessFn);
 
       // Now let the stale tick's dequeue finally resolve.
-      resolveStaleDequeue(null);
+      resolveStaleDequeue([]);
       await stalePromise;
       await Promise.resolve();
 
-      mockRedis.rpop.mockClear();
-      await vi.advanceTimersByTimeAsync(30_000);
+      mockRedis.eval.mockClear();
+      await vi.advanceTimersByTimeAsync(5_000);
 
       // Only the fresh loop should still be ticking — a dangling stale loop
       // would double this call count.
-      expect(mockRedis.rpop).toHaveBeenCalledTimes(1);
+      expect(mockRedis.eval).toHaveBeenCalledTimes(1);
     } finally {
       stopRetryProcessor();
       vi.useRealTimers();
     }
   });
 
-  it("should requeue failed jobs", async () => {
-    const processFn = vi.fn().mockResolvedValue(false);
-    const job = {
-      submissionId: "sub-1",
-      userId: "user-1",
-      score: 5,
-      retryCount: 0,
-      createdAt: new Date().toISOString(),
-    };
+  it("should drain immediately (no poll delay) when a batch comes back full", async () => {
+    vi.useFakeTimers();
+    try {
+      const fullBatch = Array.from({ length: 10 }, (_, i) =>
+        JSON.stringify(jobPayload({ id: `job-${i}`, submissionId: `sub-${i}` }))
+      );
+      mockRedis.eval.mockResolvedValueOnce(fullBatch).mockResolvedValueOnce([]);
 
-    mockRedis.rpop.mockResolvedValueOnce(JSON.stringify(job));
+      const processFn = vi.fn().mockResolvedValue(true);
+      await startRetryProcessor(processFn);
 
-    startRetryProcessor(processFn);
+      // A full batch should trigger an immediate re-tick (0ms), not wait for
+      // the normal poll interval.
+      await vi.advanceTimersByTimeAsync(0);
 
-    await new Promise((resolve) => setTimeout(resolve, 100));
-
-    expect(processFn).toHaveBeenCalledWith(job);
-    expect(mockRedis.lpush).toHaveBeenCalledWith(
-      "chainlearn:retry:rewards",
-      expect.stringContaining('"retryCount":1')
-    );
+      expect(mockRedis.eval).toHaveBeenCalledTimes(2);
+    } finally {
+      stopRetryProcessor();
+      vi.useRealTimers();
+    }
   });
 });

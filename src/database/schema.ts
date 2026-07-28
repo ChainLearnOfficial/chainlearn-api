@@ -137,6 +137,7 @@ export const quizSubmissions = pgTable(
       table.quizId,
       table.userId
     ),
+    index("idx_quiz_submissions_user_id").on(table.userId),
   ]
 );
 

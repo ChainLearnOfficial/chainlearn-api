@@ -84,6 +84,35 @@ export class AuthService {
       throw new UnauthorizedError("Challenge expired or not found");
     }
 
+    let storedChallenge: { challengeEnvelope: string };
+    try {
+      storedChallenge = JSON.parse(challengeData);
+    } catch {
+      throw new UnauthorizedError("Corrupt stored challenge");
+    }
+
+    // Decode the transaction the server itself issued, to read back the
+    // random nonce it embedded — this is the value the client's submission
+    // must match. Without this, any validly-signed transaction containing a
+    // manageData operation named HOME_DOMAIN would pass verification,
+    // regardless of whether it's the actual challenge this server issued.
+    let issuedTransaction: StellarSdk.Transaction;
+    try {
+      issuedTransaction = StellarSdk.TransactionBuilder.fromXDR(
+        storedChallenge.challengeEnvelope,
+        getNetworkPassphrase()
+      ) as StellarSdk.Transaction;
+    } catch {
+      throw new UnauthorizedError("Corrupt stored challenge");
+    }
+    const issuedNonceOp = issuedTransaction.operations.find(
+      (op) => op.type === "manageData" && op.name === HOME_DOMAIN
+    ) as StellarSdk.Operation.ManageData | undefined;
+    if (!issuedNonceOp || !issuedNonceOp.value) {
+      throw new UnauthorizedError("Corrupt stored challenge");
+    }
+    const issuedNonce = Buffer.from(issuedNonceOp.value).toString("base64");
+
     // Decode the signed transaction envelope
     let transaction: StellarSdk.Transaction;
     try {
@@ -114,12 +143,21 @@ export class AuthService {
       throw new UnauthorizedError("Challenge has expired");
     }
 
-    // Verify the transaction contains the expected manageData operation
-    const hasManageData = transaction.operations.some(
+    // Verify the transaction's manageData operation carries the exact nonce
+    // this server issued for this address — not merely that some manageData
+    // operation with the right name exists. Per SEP-10, the server must
+    // verify the challenge transaction matches the one it issued; comparing
+    // only the operation name would let any validly-signed transaction with
+    // a manageData op named HOME_DOMAIN (a public, guessable constant) pass.
+    const submittedNonceOp = transaction.operations.find(
       (op) => op.type === "manageData" && op.name === HOME_DOMAIN
-    );
-    if (!hasManageData) {
+    ) as StellarSdk.Operation.ManageData | undefined;
+    if (!submittedNonceOp || !submittedNonceOp.value) {
       throw new UnauthorizedError("Invalid challenge transaction: missing manageData operation");
+    }
+    const submittedNonce = Buffer.from(submittedNonceOp.value).toString("base64");
+    if (submittedNonce !== issuedNonce) {
+      throw new UnauthorizedError("Challenge transaction does not match the issued challenge");
     }
 
     // Verify the signature against the claimed public key

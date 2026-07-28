@@ -168,6 +168,17 @@ export class QuizService {
           throw new NotFoundError("Quiz");
         }
 
+        const enrollment = await tx.query.enrollments.findFirst({
+          where: and(
+            eq(enrollments.userId, userId),
+            eq(enrollments.courseId, quiz.courseId)
+          ),
+        });
+
+        if (!enrollment) {
+          throw new ForbiddenError("Must be enrolled in the course to take a quiz");
+        }
+
         const [existingSubmission] = await tx
           .select()
           .from(quizSubmissions)

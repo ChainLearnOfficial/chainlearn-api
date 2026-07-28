@@ -3,6 +3,7 @@ import { db } from "../../config/database.js";
 import { courses, enrollments, quizzes } from "../../database/schema.js";
 import { NotFoundError, ConflictError } from "../../utils/errors.js";
 import { withLock } from "../../utils/lock.js";
+import { logger } from "../../utils/logger.js";
 import {
   cacheGet,
   cacheSet,
@@ -17,6 +18,32 @@ import type {
 } from "./course.types.js";
 
 export class CourseService {
+  /**
+   * The full set of course IDs a user is enrolled in, cached briefly
+   * (issue #151 — listCourses/getCourseDetail previously re-queried the
+   * enrollments table on every authenticated request regardless of whether
+   * the course list/detail cache itself was a hit). A user's enrollment set
+   * is small and changes rarely, so caching the whole set per user is
+   * cheaper than a per-course cache and trivially invalidated by `enroll()`.
+   */
+  private async getEnrolledCourseIds(userId: string): Promise<Set<string>> {
+    const namespace = "user";
+    const cacheKeyString = cacheKey(namespace, "enrollments", userId);
+
+    const cached = await cacheGet<string[]>(namespace, cacheKeyString);
+    if (cached) return new Set(cached);
+
+    const rows = await db
+      .select({ courseId: enrollments.courseId })
+      .from(enrollments)
+      .where(eq(enrollments.userId, userId));
+
+    const courseIds = rows.map((r) => r.courseId);
+    await cacheSet(cacheKeyString, courseIds, 30);
+
+    return new Set(courseIds);
+  }
+
   async listCourses(
     userId: string | null,
     query: ListCoursesQuery,
@@ -96,21 +123,7 @@ export class CourseService {
     }));
 
     if (userId && finalCourses.length > 0) {
-      const userEnrs = await db
-        .select({ courseId: enrollments.courseId })
-        .from(enrollments)
-        .where(
-          and(
-            eq(enrollments.userId, userId),
-            inArray(
-              enrollments.courseId,
-              finalCourses.map((c) => c.id),
-            ),
-          ),
-        );
-
-      // Check if current user is enrolled in each course
-      const userEnrollments = new Set(userEnrs.map((e) => e.courseId));
+      const userEnrollments = await this.getEnrolledCourseIds(userId);
       for (const course of finalCourses) {
         course.isEnrolled = userEnrollments.has(course.id);
       }
@@ -171,16 +184,11 @@ export class CourseService {
       await cacheSet(cacheKeyString, cachedDetail, 120);
     }
 
-    // Check enrollment
+    // Check enrollment (cached — see getEnrolledCourseIds, issue #151)
     let isEnrolled = false;
     if (userId) {
-      const enr = await db.query.enrollments.findFirst({
-        where: and(
-          eq(enrollments.userId, userId),
-          eq(enrollments.courseId, courseId),
-        ),
-      });
-      isEnrolled = !!enr;
+      const userEnrollments = await this.getEnrolledCourseIds(userId);
+      isEnrolled = userEnrollments.has(courseId);
     }
 
     return {
@@ -219,9 +227,31 @@ export class CourseService {
         await tx.insert(enrollments).values({ userId, courseId });
       });
 
-      await cacheInvalidatePattern("chainlearn:courses:list:*");
-      await cacheDel(cacheKey("courses", "detail", courseId));
-      await cacheDel(cacheKey("user", "progress", userId));
+      // Cache invalidation necessarily happens outside the DB transaction —
+      // Redis isn't part of the Postgres transaction, so there's no way to
+      // make this atomic with the commit above (issue #152). cacheDel/
+      // cacheInvalidatePattern already fail soft (log a warning, never
+      // throw), and every cache touched here has a bounded TTL (<=30s), so
+      // a transient invalidation failure produces bounded staleness rather
+      // than a permanently stale cache. Run them concurrently — reduces the
+      // real-world window between commit and invalidation rather than
+      // running four sequential round-trips one after another — and log
+      // once at this call site (distinct from cacheDel's generic per-key
+      // warning) so a failure here is attributable specifically to an
+      // enrollment, not just "some cache key somewhere".
+      const invalidations = await Promise.allSettled([
+        cacheInvalidatePattern("chainlearn:courses:list:*"),
+        cacheDel(cacheKey("courses", "detail", courseId)),
+        cacheDel(cacheKey("user", "progress", userId)),
+        cacheDel(cacheKey("user", "enrollments", userId)),
+      ]);
+      const failed = invalidations.filter((r) => r.status === "rejected");
+      if (failed.length > 0) {
+        logger.warn(
+          { userId, courseId, failedCount: failed.length },
+          "Post-enroll cache invalidation had failures — affected views may serve stale data until their TTL expires",
+        );
+      }
     });
   }
 }

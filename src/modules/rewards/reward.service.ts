@@ -27,7 +27,13 @@ import {
   stellarTxDurationSeconds,
   rewardClaimsTotal,
 } from "../../metrics/index.js";
-import { cacheGet, cacheSet, cacheDel, cacheKey } from "../../cache/index.js";
+import {
+  cacheGet,
+  cacheSet,
+  cacheDel,
+  cacheKey,
+  cacheInvalidatePattern,
+} from "../../cache/index.js";
 
 const REWARD_AMOUNT = 10; // credits per passed quiz
 const PASSING_PERCENTAGE = 70;
@@ -167,7 +173,12 @@ export async function processRewardClaim(
       } else {
         await tx
           .update(quizSubmissions)
-          .set({ rewardClaimed: true, rewardPending: false, txHash })
+          .set({
+            rewardClaimed: true,
+            rewardPending: false,
+            txHash,
+            rewardAmount: REWARD_AMOUNT,
+          })
           .where(eq(quizSubmissions.id, submissionId));
 
         await tx
@@ -184,7 +195,7 @@ export async function processRewardClaim(
     if (result) {
       await cacheDel(cacheKey("user", "progress", userId));
       await cacheDel(cacheKey("user", "profile", userId));
-      await cacheDel(cacheKey("rewards", "history", userId));
+      await cacheInvalidatePattern(cacheKey("rewards", "history", userId, "*"));
     }
     return result;
   });
@@ -357,7 +368,12 @@ export class RewardService {
         } else {
           await tx
             .update(quizSubmissions)
-            .set({ rewardClaimed: true, rewardPending: false, txHash })
+            .set({
+              rewardClaimed: true,
+              rewardPending: false,
+              txHash,
+              rewardAmount: REWARD_AMOUNT,
+            })
             .where(eq(quizSubmissions.id, submissionId));
 
           await tx
@@ -384,7 +400,7 @@ export class RewardService {
 
         await cacheDel(cacheKey("user", "progress", userId));
         await cacheDel(cacheKey("user", "profile", userId));
-        await cacheDel(cacheKey("rewards", "history", userId));
+        await cacheInvalidatePattern(cacheKey("rewards", "history", userId, "*"));
 
         return {
           submissionId,
@@ -410,7 +426,7 @@ export class RewardService {
 
       await cacheDel(cacheKey("user", "progress", userId));
       await cacheDel(cacheKey("user", "profile", userId));
-      await cacheDel(cacheKey("rewards", "history", userId));
+      await cacheInvalidatePattern(cacheKey("rewards", "history", userId, "*"));
 
       return {
         submissionId,
@@ -423,17 +439,34 @@ export class RewardService {
   }
 
   /**
-   * Get reward history for a user.
+   * Get reward history for a user, paginated (issue #154 — this previously
+   * returned every claimed reward unbounded, which grows without limit for
+   * long-tenured users).
    */
-  async getHistory(userId: string): Promise<RewardHistoryItem[]> {
+  async getHistory(
+    userId: string,
+    page: number,
+    limit: number,
+  ): Promise<{ history: RewardHistoryItem[]; total: number }> {
     const namespace = "rewards";
-    const cacheKeyString = cacheKey(namespace, "history", userId);
+    const cacheKeyString = cacheKey(namespace, "history", userId, page, limit);
 
-    const cached = await cacheGet<RewardHistoryItem[]>(
+    const cached = await cacheGet<{ history: RewardHistoryItem[]; total: number }>(
       namespace,
       cacheKeyString,
     );
     if (cached) return cached;
+
+    const offset = (page - 1) * limit;
+    const where = and(
+      eq(quizSubmissions.userId, userId),
+      eq(quizSubmissions.rewardClaimed, true),
+    );
+
+    const [totalResult] = await db
+      .select({ value: sql<number>`count(*)`.mapWith(Number) })
+      .from(quizSubmissions)
+      .where(where);
 
     const rows = await db
       .select({
@@ -442,30 +475,33 @@ export class RewardService {
         txHash: quizSubmissions.txHash,
         submittedAt: quizSubmissions.submittedAt,
         courseTitle: courses.title,
+        rewardAmount: quizSubmissions.rewardAmount,
       })
       .from(quizSubmissions)
       .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
       .innerJoin(courses, eq(quizzes.courseId, courses.id))
-      .where(
-        and(
-          eq(quizSubmissions.userId, userId),
-          eq(quizSubmissions.rewardClaimed, true),
-        ),
-      )
-      .orderBy(desc(quizSubmissions.submittedAt));
+      .where(where)
+      .orderBy(desc(quizSubmissions.submittedAt))
+      .limit(limit)
+      .offset(offset);
 
     const history = rows.map((row) => ({
       id: row.id,
       courseTitle: row.courseTitle,
       score: row.score ?? 0,
-      amount: REWARD_AMOUNT,
+      // Issue #153: read back the amount actually granted at claim time.
+      // rewardAmount is null on rows claimed before this column existed —
+      // REWARD_AMOUNT was the only value ever granted at that point, so it's
+      // an accurate backfill for pre-migration rows, not a guess.
+      amount: row.rewardAmount ?? REWARD_AMOUNT,
       txHash: row.txHash,
       claimedAt: row.submittedAt,
     }));
 
-    await cacheSet(cacheKeyString, history, 30);
+    const result = { history, total: totalResult?.value ?? 0 };
+    await cacheSet(cacheKeyString, result, 30);
 
-    return history;
+    return result;
   }
 }
 

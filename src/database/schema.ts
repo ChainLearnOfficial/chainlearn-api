@@ -126,6 +126,11 @@ export const quizSubmissions = pgTable(
     rewardClaimed: boolean("reward_claimed").notNull().default(false),
     rewardPending: boolean("reward_pending").notNull().default(false),
     rewardFailed: boolean("reward_failed").notNull().default(false),
+    // The actual credit amount granted when this submission's reward was
+    // claimed. Null until claimed. Historical records must read this back
+    // rather than the current REWARD_AMOUNT constant, since that constant
+    // can change over time (issue #153).
+    rewardAmount: integer("reward_amount"),
     txHash: varchar("tx_hash", { length: 64 }),
     submittedAt: timestamp("submitted_at", { withTimezone: true })
       .notNull()

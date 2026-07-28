@@ -5,7 +5,7 @@ import { authRateLimit } from "../../middleware/rate-limit.js";
 import { challengeSchema, verifySchema } from "./auth.types.js";
 
 export async function authRoutes(app: FastifyInstance): Promise<void> {
-  app.post(
+  app.post<{ Body: import("./auth.types.js").ChallengeBody }>(
     "/challenge",
     {
       config: { rateLimit: authRateLimit },
@@ -22,10 +22,10 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         },
       } as FastifySchema,
     },
-    ((request: any, reply: any) => authController.challenge(request, reply)) as any
+    (request, reply) => authController.challenge(request, reply)
   );
 
-  app.post(
+  app.post<{ Body: import("./auth.types.js").VerifyBody }>(
     "/verify",
     {
       config: { rateLimit: authRateLimit },
@@ -43,6 +43,6 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         },
       } as FastifySchema,
     },
-    ((request: any, reply: any) => authController.verify(request, reply)) as any
+    (request, reply) => authController.verify(request, reply)
   );
 }

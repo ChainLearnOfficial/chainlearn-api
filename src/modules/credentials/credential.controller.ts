@@ -17,7 +17,7 @@ export class CredentialController {
     reply: FastifyReply
   ): Promise<void> {
     const { authUser } = request as AuthenticatedRequest;
-    const { courseId, submissionId, idempotencyKey } = (request as any).validatedBody;
+    const { courseId, submissionId, idempotencyKey } = request.body;
 
     const { cached, response } = await checkIdempotency(
       idempotencyKey,

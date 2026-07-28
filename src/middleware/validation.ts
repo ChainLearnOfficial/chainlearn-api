@@ -20,7 +20,7 @@ export function validate(schemas: ValidationSchemas) {
       if (!result.success) {
         errors.body = formatZodErrors(result.error);
       } else {
-        (request as any).validatedBody = result.data;
+        request.body = result.data;
       }
     }
 
@@ -29,7 +29,7 @@ export function validate(schemas: ValidationSchemas) {
       if (!result.success) {
         errors.querystring = formatZodErrors(result.error);
       } else {
-        (request as any).validatedQuery = result.data;
+        request.query = result.data as any;
       }
     }
 
@@ -38,7 +38,7 @@ export function validate(schemas: ValidationSchemas) {
       if (!result.success) {
         errors.params = formatZodErrors(result.error);
       } else {
-        (request as any).validatedParams = result.data;
+        request.params = result.data as any;
       }
     }
 

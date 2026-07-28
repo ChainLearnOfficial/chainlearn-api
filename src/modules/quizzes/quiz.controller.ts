@@ -13,7 +13,7 @@ export class QuizController {
     reply: FastifyReply
   ): Promise<void> {
     const { authUser } = request as AuthenticatedRequest;
-    const data = (request as any).validatedBody;
+    const data = request.body;
     const quiz = await quizService.generateQuiz(authUser.id, data);
 
     reply.status(201).send({ success: true, data: quiz });
@@ -28,8 +28,8 @@ export class QuizController {
     reply: FastifyReply
   ): Promise<void> {
     const { authUser } = request as AuthenticatedRequest;
-    const { id } = (request as any).validatedParams;
-    const data = (request as any).validatedBody;
+    const { id } = request.params;
+    const data = request.body;
     const result = await quizService.submitQuiz(authUser.id, id, data);
 
     reply.send({ success: true, data: result });

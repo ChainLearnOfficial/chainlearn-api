@@ -8,7 +8,7 @@ import { claimRewardSchema } from "./reward.types.js";
 export async function rewardRoutes(app: FastifyInstance): Promise<void> {
   app.addHook("onRequest", authGuard);
 
-  app.post(
+  app.post<{ Body: import("./reward.types.js").ClaimRewardBody }>(
     "/claim",
     {
       config: { rateLimit: claimRateLimit },
@@ -18,7 +18,7 @@ export async function rewardRoutes(app: FastifyInstance): Promise<void> {
         tags: ["rewards"],
       } as FastifySchema,
     },
-    ((request: any, reply: any) => rewardController.claim(request, reply)) as any
+    (request, reply) => rewardController.claim(request, reply)
   );
 
   app.get(
@@ -29,6 +29,6 @@ export async function rewardRoutes(app: FastifyInstance): Promise<void> {
         tags: ["rewards"],
       } as FastifySchema,
     },
-    ((request: any, reply: any) => rewardController.history(request, reply)) as any
+    (request, reply) => rewardController.history(request, reply)
   );
 }

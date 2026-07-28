@@ -7,7 +7,7 @@ import { generateQuizSchema, submitQuizSchema, quizIdParamsSchema } from "./quiz
 export async function quizRoutes(app: FastifyInstance): Promise<void> {
   app.addHook("onRequest", authGuard);
 
-  app.post(
+  app.post<{ Body: import("./quiz.types.js").GenerateQuizBody }>(
     "/generate",
     {
       preHandler: [validate({ body: generateQuizSchema })],
@@ -16,10 +16,10 @@ export async function quizRoutes(app: FastifyInstance): Promise<void> {
         tags: ["quizzes"],
       } as FastifySchema,
     },
-    ((request: any, reply: any) => quizController.generate(request, reply)) as any
+    (request, reply) => quizController.generate(request, reply)
   );
 
-  app.post(
+  app.post<{ Params: { id: string }, Body: import("./quiz.types.js").SubmitQuizBody }>(
     "/:id/submit",
     {
       preHandler: [
@@ -30,6 +30,6 @@ export async function quizRoutes(app: FastifyInstance): Promise<void> {
         tags: ["quizzes"],
       } as FastifySchema,
     },
-    ((request: any, reply: any) => quizController.submit(request, reply)) as any
+    (request, reply) => quizController.submit(request, reply)
   );
 }

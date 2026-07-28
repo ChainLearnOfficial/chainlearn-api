@@ -7,7 +7,7 @@ import { mintCredentialSchema } from "./credential.types.js";
 export async function credentialRoutes(app: FastifyInstance): Promise<void> {
   app.addHook("onRequest", authGuard);
 
-  app.post(
+  app.post<{ Body: import("./credential.types.js").MintCredentialBody }>(
     "/mint",
     {
       preHandler: [validate({ body: mintCredentialSchema })],
@@ -16,7 +16,7 @@ export async function credentialRoutes(app: FastifyInstance): Promise<void> {
         tags: ["credentials"],
       } as FastifySchema,
     },
-    ((request: any, reply: any) => credentialController.mint(request, reply)) as any
+    (request, reply) => credentialController.mint(request, reply)
   );
 
   app.get(
@@ -27,6 +27,6 @@ export async function credentialRoutes(app: FastifyInstance): Promise<void> {
         tags: ["credentials"],
       } as FastifySchema,
     },
-    ((request: any, reply: any) => credentialController.list(request, reply)) as any
+    (request, reply) => credentialController.list(request, reply)
   );
 }

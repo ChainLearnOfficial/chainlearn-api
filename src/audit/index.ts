@@ -4,6 +4,7 @@ type AuditEvent =
   | "quiz.submitted"
   | "reward.claimed"
   | "reward.queued"
+  | "reward.pending_confirmation"
   | "credential.minted"
   | "auth.login"
   | "auth.login_failed";

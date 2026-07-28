@@ -28,9 +28,9 @@ import {
   rewardClaimsTotal,
 } from "../../metrics/index.js";
 import { cacheGet, cacheSet, cacheDel, cacheKey } from "../../cache/index.js";
+import { PASSING_PERCENTAGE } from "../quizzes/quiz.types.js";
 
 const REWARD_AMOUNT = 10; // credits per passed quiz
-const PASSING_PERCENTAGE = 70;
 
 /**
  * Helper function to handle bad_seq errors from Stellar transactions.

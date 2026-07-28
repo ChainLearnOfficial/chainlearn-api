@@ -38,19 +38,26 @@ export const users = pgTable(
 
 // ─── Courses ────────────────────────────────────────────────────────────────
 
-export const courses = pgTable("courses", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  title: varchar("title", { length: 255 }).notNull(),
-  description: text("description").notNull(),
-  difficulty: varchar("difficulty", { length: 20 })
-    .notNull()
-    .default("beginner"),
-  contentHash: varchar("content_hash", { length: 64 }),
-  isActive: boolean("is_active").notNull().default(true),
-  createdAt: timestamp("created_at", { withTimezone: true })
-    .notNull()
-    .defaultNow(),
-});
+export const courses = pgTable(
+  "courses",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    title: varchar("title", { length: 255 }).notNull(),
+    description: text("description").notNull(),
+    difficulty: varchar("difficulty", { length: 20 })
+      .notNull()
+      .default("beginner"),
+    contentHash: varchar("content_hash", { length: 64 }),
+    isActive: boolean("is_active").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("idx_courses_difficulty").on(table.difficulty),
+    index("idx_courses_is_active").on(table.isActive),
+  ]
+);
 
 // ─── Enrollments ────────────────────────────────────────────────────────────
 
@@ -79,18 +86,28 @@ export const enrollments = pgTable(
 
 // ─── Quizzes ────────────────────────────────────────────────────────────────
 
-export const quizzes = pgTable("quizzes", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  courseId: uuid("course_id")
-    .notNull()
-    .references(() => courses.id, { onDelete: "cascade" }),
-  moduleId: varchar("module_id", { length: 100 }).notNull(),
-  questions: jsonb("questions").notNull(),
-  generatedFor: uuid("generated_for").references(() => users.id),
-  createdAt: timestamp("created_at", { withTimezone: true })
-    .notNull()
-    .defaultNow(),
-});
+export const quizzes = pgTable(
+  "quizzes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    courseId: uuid("course_id")
+      .notNull()
+      .references(() => courses.id, { onDelete: "cascade" }),
+    moduleId: varchar("module_id", { length: 100 }).notNull(),
+    questions: jsonb("questions").notNull(),
+    generatedFor: uuid("generated_for").references(() => users.id),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("idx_quizzes_course_module_generated_for").on(
+      table.courseId,
+      table.moduleId,
+      table.generatedFor
+    ),
+  ]
+);
 
 // ─── Quiz Submissions ───────────────────────────────────────────────────────
 

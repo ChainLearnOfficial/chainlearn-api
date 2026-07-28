@@ -2,6 +2,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import { config } from "./index.js";
 import * as schema from "../database/schema.js";
+import { logger } from "../utils/logger.js";
 
 const pool = new Pool({
   connectionString: config.DATABASE_URL,
@@ -11,7 +12,7 @@ const pool = new Pool({
 });
 
 pool.on("error", (err) => {
-  console.error("Unexpected PG pool error:", err);
+  logger.error({ err }, "Unexpected PG pool error");
 });
 
 export { pool };

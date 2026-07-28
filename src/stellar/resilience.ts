@@ -57,9 +57,17 @@ function recordSuccess(): void {
 function recordFailure(): void {
   failureCount++;
   lastFailureTime = Date.now();
+  
+  // Transition to Open from Closed state when threshold is reached
   if (failureCount >= THRESHOLD && circuitState === CircuitState.Closed) {
     circuitState = CircuitState.Open;
     logger.warn("Circuit breaker opened after consecutive failures");
+  }
+  
+  // If probe fails in HalfOpen state, re-open the circuit
+  if (circuitState === CircuitState.HalfOpen) {
+    circuitState = CircuitState.Open;
+    logger.warn("Circuit breaker re-opened after probe failure in HalfOpen state");
   }
 }
 

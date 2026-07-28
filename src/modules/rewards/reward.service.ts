@@ -154,7 +154,9 @@ export async function processRewardClaim(
       }
     }
 
-    // Phase 3: Update DB with result in a quick transaction
+    // Phase 3: Update DB with result in a quick transaction.
+    // isPending gates credit-granting on a confirmed on-chain result rather
+    // than the uncertain bad_seq outcome above — see #104.
     const isPending = txHash === "pending_indexer_confirmation";
     await db.transaction(async (tx) => {
       if (isPending) {
@@ -342,7 +344,9 @@ export class RewardService {
         }
       }
 
-      // Phase 3: Update DB with result in a quick transaction
+      // Phase 3: Update DB with result in a quick transaction.
+      // isPending gates credit-granting on a confirmed on-chain result
+      // rather than the uncertain bad_seq outcome above — see #104.
       const isPending = txHash === "pending_indexer_confirmation";
       await db.transaction(async (tx) => {
         if (isPending) {

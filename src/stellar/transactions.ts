@@ -59,7 +59,7 @@ export async function invokeContract(
         return result.hash;
       } catch (err: any) {
         if (err instanceof StellarError && (err.message.includes("bad_seq") || err.message.includes("tx_bad_seq"))) {
-          sequenceCache.invalidate(keypair.publicKey());
+          await sequenceCache.invalidate(keypair.publicKey());
           logger.warn({ attempt, err }, "Sequence number conflict, retrying with fresh sequence");
           continue;
         }

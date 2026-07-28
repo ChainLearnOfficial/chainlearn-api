@@ -38,6 +38,10 @@ export async function checkIdempotency(
       expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
     });
   } catch (err: unknown) {
+    // Two concurrent requests can both pass the findFirst check above and
+    // both reach this insert — the loser hits a unique-constraint violation
+    // instead of a clean row insert. Recovering here (rather than letting
+    // it propagate as a raw 500) closes that race — see #106.
     const isUniqueViolation =
       (err as { code?: string })?.code === "23505" ||
       (err instanceof Error &&

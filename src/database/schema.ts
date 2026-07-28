@@ -137,6 +137,7 @@ export const quizSubmissions = pgTable(
       table.userId
     ),
     index("idx_quiz_submissions_user_id").on(table.userId),
+    index("idx_quiz_submissions_reward_failed").on(table.rewardFailed),
   ]
 );
 

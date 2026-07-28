@@ -282,7 +282,17 @@ export class QuizService {
     courseId: string,
     moduleId: string
   ) {
-    // Placeholder quiz generation — in production, call an LLM or content service
+    // Placeholder quiz generation — in production, call an LLM or content
+    // service. There is no per-course/per-module content store to draw
+    // from today (courses only has title/description/difficulty), so this
+    // fallback set is necessarily generic rather than genuinely tailored
+    // to courseId/moduleId (#146). Logging the ids here at least makes it
+    // visible which course/module is receiving the generic fallback,
+    // rather than that happening silently.
+    logger.warn(
+      { courseId, moduleId },
+      "Falling back to generic placeholder questions — no course/module-specific content source available"
+    );
     return [
       {
         id: "q1",

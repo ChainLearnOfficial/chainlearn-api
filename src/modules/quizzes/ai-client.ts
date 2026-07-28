@@ -1,16 +1,20 @@
+import { z } from "zod";
 import { config } from "../../config/index.js";
 import { logger } from "../../utils/logger.js";
+import { createTransientRetryPolicy, createCircuitBreaker } from "../../utils/resilience.js";
 
-interface AiQuizQuestion {
-  prompt: string;
-  options: string[];
-  correct_index: number;
-}
+const aiQuizQuestionSchema = z.object({
+  prompt: z.string(),
+  options: z.array(z.string()),
+  correct_index: z.number().int(),
+});
 
-interface AiQuizResponse {
-  quiz_id: string;
-  questions: AiQuizQuestion[];
-}
+const aiQuizResponseSchema = z.object({
+  quiz_id: z.string(),
+  questions: z.array(aiQuizQuestionSchema),
+});
+
+export type AiQuizQuestion = z.infer<typeof aiQuizQuestionSchema>;
 
 export type AiDifficulty = "beginner" | "intermediate" | "advanced";
 
@@ -22,7 +26,10 @@ export interface GenerateQuizFromAIParams {
   numQuestions: number;
 }
 
-export async function generateQuizFromAI(
+const aiRetry = createTransientRetryPolicy("AI service", { maxAttempts: 3 });
+const aiBreaker = createCircuitBreaker({ label: "AI service" });
+
+async function requestQuiz(
   params: GenerateQuizFromAIParams
 ): Promise<AiQuizQuestion[]> {
   const controller = new AbortController();
@@ -50,8 +57,17 @@ export async function generateQuizFromAI(
       throw new Error(`AI service returned ${response.status}`);
     }
 
-    const data = (await response.json()) as AiQuizResponse;
-    return data.questions;
+    const raw = await response.json();
+    const parsed = aiQuizResponseSchema.safeParse(raw);
+    if (!parsed.success) {
+      logger.error(
+        { issues: parsed.error.issues },
+        "AI service returned a malformed response"
+      );
+      throw new Error("AI service returned a malformed response");
+    }
+
+    return parsed.data.questions;
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") {
       logger.error({ timeout: config.AI_TIMEOUT_MS }, "AI service request timed out");
@@ -61,4 +77,16 @@ export async function generateQuizFromAI(
   } finally {
     clearTimeout(timeout);
   }
+}
+
+/**
+ * Requests a generated quiz from the chainlearn-ai service. Wrapped with the
+ * same retry + circuit breaker pattern used for Stellar calls: transient
+ * failures are retried with backoff, and a persistent outage trips the
+ * breaker so requests fail fast instead of blocking on every quiz request.
+ */
+export async function generateQuizFromAI(
+  params: GenerateQuizFromAIParams
+): Promise<AiQuizQuestion[]> {
+  return aiBreaker.execute(() => aiRetry.execute(() => requestQuiz(params)));
 }

@@ -1,4 +1,41 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+
+// Fake Redis that implements just enough of the real command semantics
+// (EXISTS/INCR/EXPIRE via a Lua script, SET NX/EX, DEL) for the sequence
+// cache's atomic scripts to behave the same way the real server would.
+vi.mock("../../src/config/redis.js", () => {
+  const store = new Map<string, string>();
+  return {
+    redis: {
+      eval: vi.fn(async (script: string, _numKeys: number, key: string, ...args: unknown[]) => {
+        if (script.includes("EXISTS")) {
+          if (!store.has(key)) return null;
+          const next = (BigInt(store.get(key)!) + 1n).toString();
+          store.set(key, next);
+          return next;
+        }
+        // Seed-and-increment script: SET NX, falling back to INCR.
+        const seedValue = String(args[1]);
+        if (!store.has(key)) {
+          store.set(key, seedValue);
+          return seedValue;
+        }
+        const next = (BigInt(store.get(key)!) + 1n).toString();
+        store.set(key, next);
+        return next;
+      }),
+      del: vi.fn(async (key: string) => {
+        const existed = store.delete(key);
+        return existed ? 1 : 0;
+      }),
+      set: vi.fn(async (key: string, value: string) => {
+        store.set(key, String(value));
+        return "OK";
+      }),
+    },
+  };
+});
+
 import { sequenceCache } from "../../src/stellar/sequence-cache.js";
 import { stellarClient } from "../../src/stellar/client.js";
 import { withAccountLock } from "../../src/utils/account-lock.js";
@@ -15,9 +52,9 @@ vi.mock("../../src/stellar/client.js", () => ({
 describe("Stellar Sequence Number Management", () => {
   const accountId = "GBZ5...TEST";
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.resetAllMocks();
-    sequenceCache.invalidate(accountId);
+    await sequenceCache.invalidate(accountId);
   });
 
   it("loads sequence from Horizon on first call and caches it", async () => {
@@ -106,7 +143,7 @@ describe("Stellar Sequence Number Management", () => {
             return seq; // Success
           } catch (err: any) {
             if (err instanceof StellarError && err.message.includes("bad_seq")) {
-              sequenceCache.invalidate(accountId);
+              await sequenceCache.invalidate(accountId);
               continue;
             }
             throw err;
@@ -116,10 +153,49 @@ describe("Stellar Sequence Number Management", () => {
     };
 
     const finalSeq = await simulateTxSubmit();
-    
+
     // First attempt got 101 (100 + 1), failed with bad_seq, cache invalidated.
     // Second attempt hit Horizon, got 105, returned 106 (105 + 1).
     expect(finalSeq).toBe("106");
     expect(stellarClient.getAccount).toHaveBeenCalledTimes(2);
+  });
+
+  it("re-syncs with Horizon after the cache entry expires (TTL)", async () => {
+    const { redis } = await import("../../src/config/redis.js");
+
+    vi.mocked(stellarClient.getAccount).mockResolvedValueOnce({ sequence: "200" } as any);
+    const seq1 = await sequenceCache.getNextSequence(accountId);
+    expect(seq1).toBe("201");
+
+    // Every write to the cache must carry a TTL so a stale entry can't live forever.
+    const seedCall = vi.mocked(redis.eval).mock.calls.find(([script]) =>
+      (script as string).includes("SET")
+    );
+    expect(seedCall).toBeDefined();
+    expect(seedCall![3]).toBeGreaterThan(0); // TTL seconds argument
+
+    // Simulate the entry expiring out of Redis (TTL elapsed).
+    await sequenceCache.invalidate(accountId);
+
+    vi.mocked(stellarClient.getAccount).mockResolvedValueOnce({ sequence: "999" } as any);
+    const seq2 = await sequenceCache.getNextSequence(accountId);
+    expect(seq2).toBe("1000");
+    expect(stellarClient.getAccount).toHaveBeenCalledTimes(2);
+  });
+
+  it("shares the cached sequence across separate SequenceCache instances (multi-process safety)", async () => {
+    const { SequenceCache } = await import("../../src/stellar/sequence-cache.js");
+    const otherInstance = new SequenceCache();
+
+    vi.mocked(stellarClient.getAccount).mockResolvedValueOnce({ sequence: "500" } as any);
+
+    const seqFromFirst = await sequenceCache.getNextSequence(accountId);
+    expect(seqFromFirst).toBe("501");
+
+    // A second instance (standing in for a second process) must observe the
+    // same shared state via Redis rather than loading its own fresh copy.
+    const seqFromSecond = await otherInstance.getNextSequence(accountId);
+    expect(seqFromSecond).toBe("502");
+    expect(stellarClient.getAccount).toHaveBeenCalledTimes(1);
   });
 });

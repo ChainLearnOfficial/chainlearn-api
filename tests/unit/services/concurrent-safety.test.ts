@@ -438,6 +438,13 @@ describe("Concurrent Request Safety", () => {
         rootChain.select = vi.fn().mockImplementation(() =>
           makeChain(chainData[callIndex++])
         );
+        rootChain.query = {
+          enrollments: {
+            findFirst: vi
+              .fn()
+              .mockResolvedValue({ userId: "user-1", courseId: "course-1" }),
+          },
+        };
         return fn(rootChain);
       });
 
@@ -451,7 +458,7 @@ describe("Concurrent Request Safety", () => {
     it("should throw ConflictError when quiz already submitted", async () => {
       mockDb.transaction.mockImplementation(async (fn: Function) => {
         const chainData = [
-          [{ id: "quiz-1", questions: [] }],
+          [{ id: "quiz-1", courseId: "course-1", questions: [] }],
           [{ id: "existing-sub", userId: "user-1", quizId: "quiz-1" }],
         ];
         let callIndex = 0;
@@ -473,6 +480,13 @@ describe("Concurrent Request Safety", () => {
         rootChain.select = vi.fn().mockImplementation(() =>
           makeChain(chainData[callIndex++])
         );
+        rootChain.query = {
+          enrollments: {
+            findFirst: vi
+              .fn()
+              .mockResolvedValue({ userId: "user-1", courseId: "course-1" }),
+          },
+        };
         return fn(rootChain);
       });
 

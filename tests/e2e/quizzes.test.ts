@@ -174,6 +174,74 @@ describe("Quizzes API", () => {
       expect(response.statusCode).toBe(401);
     });
 
+    it("should reject submission from a user not enrolled in the quiz's course", { timeout: 15000 }, async () => {
+      const enrolledToken = createToken();
+      const outsiderToken = app.jwt.sign({
+        sub: "00000000-0000-0000-0000-000000000099",
+        stellarAddress:
+          "GBOUTSIDER0000000000000000000000000000000000000000000000000",
+      });
+
+      const listResponse = await app.inject({
+        method: "GET",
+        url: "/api/v1/courses",
+      });
+
+      if (listResponse.statusCode === 200) {
+        const listBody = JSON.parse(listResponse.payload);
+        if (listBody.data.length > 0) {
+          const course = listBody.data[0];
+
+          // Only the first user enrolls and generates the quiz.
+          await app.inject({
+            method: "POST",
+            url: `/api/v1/courses/${course.id}/enroll`,
+            headers: { authorization: `Bearer ${enrolledToken}` },
+          });
+
+          const quizResponse = await app.inject({
+            method: "POST",
+            url: "/api/v1/quizzes/generate",
+            headers: { authorization: `Bearer ${enrolledToken}` },
+            payload: {
+              courseId: course.id,
+              moduleId: "module-1",
+            },
+          });
+
+          if (
+            quizResponse.statusCode === 200 ||
+            quizResponse.statusCode === 201
+          ) {
+            const quizBody = JSON.parse(quizResponse.payload);
+            const quiz = quizBody.data;
+
+            const answers = quiz.questions.map(
+              (q: { id: string }) => ({
+                questionId: q.id,
+                selectedIndex: 0,
+              }),
+            );
+
+            // The second user, who never enrolled, tries to submit against
+            // the same quiz ID — must be rejected as FORBIDDEN, not graded.
+            const response = await app.inject({
+              method: "POST",
+              url: `/api/v1/quizzes/${quiz.id}/submit`,
+              headers: { authorization: `Bearer ${outsiderToken}` },
+              payload: { answers },
+            });
+
+            expect([401, 403, 500]).toContain(response.statusCode);
+            if (response.statusCode === 403) {
+              const body = JSON.parse(response.payload);
+              expect(body.error).toBe("FORBIDDEN");
+            }
+          }
+        }
+      }
+    });
+
     it("should submit answers and return score", async () => {
       const token = createToken();
 

@@ -80,7 +80,7 @@ vi.mock("../../../src/utils/lock.js", () => ({
 }));
 
 import { db } from "../../../src/config/database.js";
-import { processRewardClaim } from "../../../src/modules/rewards/reward.service.js";
+import { processRewardClaim, selectSubmissionForUpdate } from "../../../src/modules/rewards/reward.service.js";
 import { invokeContract } from "../../../src/stellar/transactions.js";
 
 const mockDb = vi.mocked(db);
@@ -129,6 +129,21 @@ describe("processRewardClaim", () => {
       return fn(tx);
     });
   }
+
+  it("should row-lock the submission lookup for reward claims", async () => {
+    const forSpy = vi.fn().mockResolvedValue([{ id: "sub-1" }]);
+    const whereSpy = vi.fn().mockReturnValue({ for: forSpy });
+    const fromSpy = vi.fn().mockReturnValue({ where: whereSpy });
+    const selectSpy = vi.fn().mockReturnValue({ from: fromSpy });
+    const tx = { select: selectSpy } as any;
+
+    await selectSubmissionForUpdate(tx, "sub-1", "user-1");
+
+    expect(selectSpy).toHaveBeenCalled();
+    expect(fromSpy).toHaveBeenCalled();
+    expect(whereSpy).toHaveBeenCalled();
+    expect(forSpy).toHaveBeenCalledWith("update");
+  });
 
   it("should return true when submission does not exist", async () => {
     mockTxWithSelects([[]]);

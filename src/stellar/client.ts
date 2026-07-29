@@ -123,6 +123,31 @@ export class StellarClient {
     return this.horizon;
   }
 
+  /**
+   * Check whether a submitted Soroban transaction succeeded on-chain.
+   * Uses the Soroban RPC endpoint (getTransaction) rather than Horizon so
+   * that Soroban-specific result data is available. Returns a simplified
+   * status: "SUCCESS", "FAILED", or "NOT_FOUND".
+   * Used by the pending-reward reconciliation job (#207).
+   */
+  async getTransaction(txHash: string): Promise<{ status: "SUCCESS" | "FAILED" | "NOT_FOUND" }> {
+    try {
+      const result = await withTimeout(
+        this.soroban.getTransaction(txHash),
+        READ_TIMEOUT_MS,
+      );
+      if (result.status === StellarSdk.rpc.Api.GetTransactionStatus.SUCCESS) {
+        return { status: "SUCCESS" };
+      }
+      return { status: "FAILED" };
+    } catch (err: any) {
+      const status = err?.response?.status ?? err?.status;
+      if (status === 404) return { status: "NOT_FOUND" };
+      logger.error({ err, txHash }, "getTransaction failed");
+      throw new StellarError(`Could not fetch transaction ${txHash}`);
+    }
+  }
+
   /** Check Soroban RPC health by calling getLatestLedger. */
   async checkSorobanHealth(): Promise<void> {
     try {

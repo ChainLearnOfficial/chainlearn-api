@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import { redis } from "../config/redis.js";
 import { db } from "../config/database.js";
 import { quizSubmissions } from "../database/schema.js";
-import { eq } from "drizzle-orm";
+import { eq, and, lte } from "drizzle-orm";
 import { logger } from "../utils/logger.js";
 
 const QUEUE_KEY = "chainlearn:retry:rewards";
@@ -134,4 +134,58 @@ export function stopRetryProcessor(): void {
     processorTimer = null;
   }
   logger.info("Retry processor stopped");
+}
+
+// How old a submission must be before we consider it "lost" and re-enqueue it.
+// In-flight submissions (still within this window) are not re-enqueued so we
+// don't double-process a claim that is legitimately in progress (#208).
+const LOST_JOB_AGE_MINUTES = 15;
+
+/**
+ * Re-enqueue reward claims that are in the database but absent from Redis.
+ *
+ * After a Redis restart the sorted-set queue is empty but the database still
+ * has unclaimed submissions (rewardClaimed=false, rewardFailed=false,
+ * rewardPending=false) whose original enqueue time has long passed.  This
+ * function finds those rows and pushes them back onto the queue so the retry
+ * processor can attempt them again.
+ *
+ * Call this on startup and optionally on a periodic schedule.
+ */
+export async function recoverLostJobs(): Promise<void> {
+  try {
+    const cutoff = new Date(Date.now() - LOST_JOB_AGE_MINUTES * 60 * 1_000);
+
+    const lost = await db
+      .select({
+        id: quizSubmissions.id,
+        userId: quizSubmissions.userId,
+        score: quizSubmissions.score,
+      })
+      .from(quizSubmissions)
+      .where(
+        and(
+          eq(quizSubmissions.rewardClaimed, false),
+          eq(quizSubmissions.rewardFailed, false),
+          eq(quizSubmissions.rewardPending, false),
+          lte(quizSubmissions.submittedAt, cutoff)
+        )
+      )
+      .limit(100);
+
+    if (lost.length === 0) return;
+
+    for (const row of lost) {
+      if (row.score === null) continue;
+      await enqueueReward({
+        submissionId: row.id,
+        userId: row.userId,
+        score: row.score,
+      });
+    }
+
+    logger.info({ count: lost.length }, "recoverLostJobs: re-enqueued lost reward claims after Redis restart");
+  } catch (err) {
+    logger.error({ err }, "recoverLostJobs failed");
+  }
 }

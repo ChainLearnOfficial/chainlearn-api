@@ -33,10 +33,12 @@ export class StellarClient {
   /** Load account record from Horizon. */
   async getAccount(publicKey: string): Promise<StellarSdk.Horizon.AccountResponse> {
     try {
-      return await circuitBreakerExecute(() =>
-        stellarRetry.execute(() =>
-          withTimeout(this.horizon.loadAccount(publicKey), READ_TIMEOUT_MS)
-        )
+      return await circuitBreakerExecute(
+        () =>
+          stellarRetry.execute(() =>
+            withTimeout(this.horizon.loadAccount(publicKey), READ_TIMEOUT_MS)
+          ),
+        "read"
       );
     } catch (err) {
       logger.error({ err, publicKey }, "Failed to load Stellar account");
@@ -49,10 +51,12 @@ export class StellarClient {
     txEnvelope: StellarSdk.Transaction | StellarSdk.FeeBumpTransaction
   ): Promise<StellarSdk.Horizon.HorizonApi.SubmitTransactionResponse> {
     try {
-      const result = await circuitBreakerExecute(() =>
-        stellarRetry.execute(() =>
-          withTimeout(this.horizon.submitTransaction(txEnvelope), WRITE_TIMEOUT_MS)
-        )
+      const result = await circuitBreakerExecute(
+        () =>
+          stellarRetry.execute(() =>
+            withTimeout(this.horizon.submitTransaction(txEnvelope), WRITE_TIMEOUT_MS)
+          ),
+        "write"
       );
       logger.info({ hash: result.hash }, "Transaction submitted successfully");
       return result;

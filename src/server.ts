@@ -40,7 +40,6 @@ async function processRetryJob(job: RetryJob): Promise<boolean> {
     const success = await processRewardClaim(
       job.submissionId,
       job.userId,
-      job.score,
     );
     if (success) {
       logger.info(

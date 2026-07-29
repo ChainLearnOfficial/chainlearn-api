@@ -18,7 +18,6 @@ export interface RetryJob {
   id: string;
   submissionId: string;
   userId: string;
-  score: number;
   retryCount: number;
   createdAt: string;
 }

@@ -77,6 +77,70 @@ async function handleBadSeqError(submissionId: string, stellarAddress: string): 
   return "pending_indexer_confirmation";
 }
 
+interface RewardClaimData {
+  submissionId: string;
+  userId: string;
+  score: number;
+  stellarAddress: string;
+  quizId: string;
+}
+
+// Phase 2: invoke Stellar, observe metrics, handle bad_seq. Throws on all other errors.
+async function _executeStellarRewardClaim(claimData: RewardClaimData): Promise<string> {
+  const proof = createQuizProof(claimData.userId, claimData.quizId, claimData.score);
+  const txStart = process.hrtime.bigint();
+  try {
+    const txHash = await invokeContract(
+      config.STELLAR_REWARD_CONTRACT_ID,
+      "claim_reward",
+      [
+        StellarSdk.Address.fromString(claimData.stellarAddress).toScVal(),
+        StellarSdk.nativeToScVal(claimData.score, { type: "u32" }),
+        StellarSdk.nativeToScVal(Buffer.from(proof.signature, "base64")),
+      ],
+    );
+    stellarTxDurationSeconds.observe(
+      { method: "claim_reward", status: "success" },
+      Number(process.hrtime.bigint() - txStart) / 1e9,
+    );
+    return txHash;
+  } catch (err: unknown) {
+    stellarTxDurationSeconds.observe(
+      { method: "claim_reward", status: "error" },
+      Number(process.hrtime.bigint() - txStart) / 1e9,
+    );
+    if (
+      err instanceof StellarError &&
+      (err.message.includes("bad_seq") || err.message.includes("tx_bad_seq"))
+    ) {
+      return handleBadSeqError(claimData.submissionId, claimData.stellarAddress);
+    }
+    throw err;
+  }
+}
+
+// Phase 3: write the confirmed or pending-confirmation outcome to the database.
+async function _applyRewardToDb(submissionId: string, userId: string, txHash: string): Promise<void> {
+  const isPending = txHash === "pending_indexer_confirmation";
+  await db.transaction(async (tx) => {
+    if (isPending) {
+      await tx
+        .update(quizSubmissions)
+        .set({ rewardClaimed: false, rewardPending: true, txHash })
+        .where(eq(quizSubmissions.id, submissionId));
+    } else {
+      await tx
+        .update(quizSubmissions)
+        .set({ rewardClaimed: true, rewardPending: false, txHash, rewardAmount: REWARD_AMOUNT })
+        .where(eq(quizSubmissions.id, submissionId));
+      await tx
+        .update(users)
+        .set({ credits: sql`${users.credits} + ${REWARD_AMOUNT}` })
+        .where(eq(users.id, userId));
+    }
+  });
+}
+
 /**
  * Shared reward claim execution logic.
  * Used by both the direct claim path and the background retry processor.
@@ -140,70 +204,18 @@ export async function processRewardClaim(
       return true;
     }
 
-    // Phase 2: Execute Stellar transaction outside DB (no connection held)
-    const proof = createQuizProof(userId, claimData.quizId, claimData.score);
-    const txStart = process.hrtime.bigint();
+    // Phase 2 & 3: Stellar invocation then DB update — shared with claimReward.
     let txHash: string;
     try {
-      txHash = await invokeContract(
-        config.STELLAR_REWARD_CONTRACT_ID,
-        "claim_reward",
-        [
-          StellarSdk.Address.fromString(claimData.stellarAddress).toScVal(),
-          StellarSdk.nativeToScVal(claimData.score, { type: "u32" }),
-          StellarSdk.nativeToScVal(Buffer.from(proof.signature, "base64")),
-        ],
-      );
-      stellarTxDurationSeconds.observe(
-        { method: "claim_reward", status: "success" },
-        Number(process.hrtime.bigint() - txStart) / 1e9,
-      );
+      txHash = await _executeStellarRewardClaim(claimData);
     } catch (err: unknown) {
-      stellarTxDurationSeconds.observe(
-        { method: "claim_reward", status: "error" },
-        Number(process.hrtime.bigint() - txStart) / 1e9,
-      );
-      if (err instanceof StellarError && (err.message.includes("bad_seq") || err.message.includes("tx_bad_seq"))) {
-        txHash = await handleBadSeqError(submissionId, claimData.stellarAddress);
-      } else {
-        // Mark as failed and release pending status
-        await db
-          .update(quizSubmissions)
-          .set({ rewardPending: false, rewardFailed: true })
-          .where(eq(quizSubmissions.id, submissionId));
-        throw err;
-      }
+      await db
+        .update(quizSubmissions)
+        .set({ rewardPending: false, rewardFailed: true })
+        .where(eq(quizSubmissions.id, submissionId));
+      throw err;
     }
-
-    // Phase 3: Update DB with result in a quick transaction.
-    // isPending gates credit-granting on a confirmed on-chain result rather
-    // than the uncertain bad_seq outcome above — see #104.
-    const isPending = txHash === "pending_indexer_confirmation";
-    await db.transaction(async (tx) => {
-      if (isPending) {
-        await tx
-          .update(quizSubmissions)
-          .set({ rewardClaimed: false, rewardPending: true, txHash })
-          .where(eq(quizSubmissions.id, submissionId));
-      } else {
-        await tx
-          .update(quizSubmissions)
-          .set({
-            rewardClaimed: true,
-            rewardPending: false,
-            txHash,
-            rewardAmount: REWARD_AMOUNT,
-          })
-          .where(eq(quizSubmissions.id, submissionId));
-
-        await tx
-          .update(users)
-          .set({
-            credits: sql`${users.credits} + ${REWARD_AMOUNT}`,
-          })
-          .where(eq(users.id, userId));
-      }
-    });
+    await _applyRewardToDb(submissionId, userId, txHash);
 
     return true;
   }).then(async (result) => {
@@ -295,24 +307,10 @@ export class RewardService {
         };
       });
 
-      // Phase 2: Execute Stellar transaction outside DB (no connection held)
-      const proof = createQuizProof(
-        userId,
-        claimData.quizId,
-        claimData.score,
-      );
-
-      let txHash: string | null = null;
+      // Phase 2 & 3: Stellar invocation then DB update — shared with processRewardClaim.
+      let txHash: string;
       try {
-        txHash = await invokeContract(
-          config.STELLAR_REWARD_CONTRACT_ID,
-          "claim_reward",
-          [
-            StellarSdk.Address.fromString(claimData.stellarAddress).toScVal(),
-            StellarSdk.nativeToScVal(claimData.score, { type: "u32" }),
-            StellarSdk.nativeToScVal(Buffer.from(proof.signature, "base64")),
-          ],
-        );
+        txHash = await _executeStellarRewardClaim(claimData);
       } catch (err: unknown) {
         if (err instanceof NotFoundError) throw err;
 
@@ -321,15 +319,11 @@ export class RewardService {
             { submissionId },
             "Stellar circuit breaker open — queuing reward for later",
           );
-          // Release pending status before queuing
           await db
             .update(quizSubmissions)
             .set({ rewardPending: false })
             .where(eq(quizSubmissions.id, submissionId));
-          await enqueueReward({
-            submissionId,
-            userId,
-          });
+          await enqueueReward({ submissionId, userId });
           rewardClaimsTotal.inc({ status: "queued" });
           auditLog("reward.queued", {
             userId,
@@ -342,54 +336,21 @@ export class RewardService {
             amount: REWARD_AMOUNT,
             txHash: null,
             queued: true,
-            message:
-              "Reward claim queued — Stellar is temporarily unavailable",
+            message: "Reward claim queued — Stellar is temporarily unavailable",
           };
         }
 
-        if (err instanceof StellarError && (err.message.includes("bad_seq") || err.message.includes("tx_bad_seq"))) {
-          txHash = await handleBadSeqError(submissionId, claimData.stellarAddress);
-        } else {
-          // Mark as failed and release pending status
-          await db
-            .update(quizSubmissions)
-            .set({ rewardPending: false, rewardFailed: true })
-            .where(eq(quizSubmissions.id, submissionId));
-          logger.error({ err, submissionId }, "On-chain reward claim failed");
-          throw new Error("Failed to process on-chain reward");
-        }
+        await db
+          .update(quizSubmissions)
+          .set({ rewardPending: false, rewardFailed: true })
+          .where(eq(quizSubmissions.id, submissionId));
+        logger.error({ err, submissionId }, "On-chain reward claim failed");
+        throw new Error("Failed to process on-chain reward");
       }
 
-      // Phase 3: Update DB with result in a quick transaction.
-      // isPending gates credit-granting on a confirmed on-chain result
-      // rather than the uncertain bad_seq outcome above — see #104.
+      await _applyRewardToDb(submissionId, userId, txHash);
+
       const isPending = txHash === "pending_indexer_confirmation";
-      await db.transaction(async (tx) => {
-        if (isPending) {
-          await tx
-            .update(quizSubmissions)
-            .set({ rewardClaimed: false, rewardPending: true, txHash })
-            .where(eq(quizSubmissions.id, submissionId));
-        } else {
-          await tx
-            .update(quizSubmissions)
-            .set({
-              rewardClaimed: true,
-              rewardPending: false,
-              txHash,
-              rewardAmount: REWARD_AMOUNT,
-            })
-            .where(eq(quizSubmissions.id, submissionId));
-
-          await tx
-            .update(users)
-            .set({
-              credits: sql`${users.credits} + ${REWARD_AMOUNT}`,
-            })
-            .where(eq(users.id, userId));
-        }
-      });
-
       if (isPending) {
         rewardClaimsTotal.inc({ status: "pending" });
         auditLog("reward.pending_confirmation", {

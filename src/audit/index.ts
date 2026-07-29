@@ -26,7 +26,21 @@ interface AuditFields {
   userAgent?: string;
 }
 
-export function auditLog(event: AuditEvent, fields: AuditFields): void {
+export async function auditLog(event: AuditEvent, fields: AuditFields): Promise<void> {
   logger.info({ audit: true, event, ...fields }, `audit: ${event}`);
-  db.insert(auditLogs).values({ event, fields }).catch((err) => logger.error({ err }, "Failed to persist audit log"));
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await db.insert(auditLogs).values({ event, fields });
+      return;
+    } catch (err) {
+      if (attempt < 2) {
+        await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
+        continue;
+      }
+      logger.error({ err }, "Failed to persist audit log after 3 attempts");
+      process.stdout.write(
+        JSON.stringify({ audit: true, event, ...fields, persistError: String(err) }) + "\n",
+      );
+    }
+  }
 }

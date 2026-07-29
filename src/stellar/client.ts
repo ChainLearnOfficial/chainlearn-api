@@ -37,7 +37,11 @@ export class StellarClient {
     try {
       return await circuitBreakerExecute(() =>
         stellarRetry.execute(() =>
-          withTimeout(this.horizon.loadAccount(publicKey), READ_TIMEOUT_MS),
+          withTimeout(
+            this.horizon.loadAccount(publicKey),
+            READ_TIMEOUT_MS,
+            "read",
+          ),
         ),
       );
     } catch (err) {
@@ -56,6 +60,7 @@ export class StellarClient {
           withTimeout(
             this.horizon.submitTransaction(txEnvelope),
             WRITE_TIMEOUT_MS,
+            "write",
           ),
         ),
       );
@@ -87,7 +92,11 @@ export class StellarClient {
     try {
       return await circuitBreakerExecute(() =>
         stellarRetry.execute(() =>
-          withTimeout(this.soroban.simulateTransaction(tx), READ_TIMEOUT_MS),
+          withTimeout(
+            this.soroban.simulateTransaction(tx),
+            READ_TIMEOUT_MS,
+            "read",
+          ),
         ),
       );
     } catch (err) {
@@ -125,7 +134,7 @@ export class StellarClient {
   async checkSorobanHealth(): Promise<void> {
     try {
       // Use a shorter timeout for health checks (3s) to fail fast if RPC is unreachable
-      await withTimeout(this.soroban.getLatestLedger(), 3_000);
+      await withTimeout(this.soroban.getLatestLedger(), 3_000, "read");
     } catch (err: any) {
       const message = err?.message || String(err);
       logger.warn({ message }, "Soroban RPC health check failed");

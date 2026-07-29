@@ -190,18 +190,27 @@ export class AuthService {
       throw new UnauthorizedError("Signature verification failed");
     }
 
-    // Find or create user
-    let user = await db.query.users.findFirst({
+    // Find or create user atomically. A plain findFirst + insert is a
+    // TOCTOU race: two concurrent registrations for the same address both
+    // see no row, both attempt the insert, and the second throws a unique-
+    // constraint error (500). ON CONFLICT DO UPDATE makes the upsert atomic
+    // so concurrent requests converge on the same row.
+    const existingBefore = await db.query.users.findFirst({
       where: eq(users.stellarAddress, stellarAddress),
     });
 
-    let isNewUser = false;
-    if (!user) {
-      [user] = await db
-        .insert(users)
-        .values({ stellarAddress })
-        .returning();
-      isNewUser = true;
+    const isNewUser = !existingBefore;
+
+    const [user] = await db
+      .insert(users)
+      .values({ stellarAddress })
+      .onConflictDoUpdate({
+        target: users.stellarAddress,
+        set: { updatedAt: new Date() },
+      })
+      .returning();
+
+    if (isNewUser) {
       logger.info({ stellarAddress, userId: user.id }, "New user created");
     }
 

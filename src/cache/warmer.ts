@@ -18,34 +18,33 @@ const WARM_PAGE_LIMIT = 20;
 /**
  * Warms every page of the "all courses" listing (not just page 1), so
  * users on page 2+ hit a warm cache instead of always querying the
- * database (#147). Pages are fetched sequentially and each written to its
- * own cache key, mirroring CourseService.listCourses' own pagination.
+ * database (#147). Pages are fetched sequentially to warm the cache,
+ * mirroring CourseService.listCourses' own pagination.
  */
 export async function warmCourseCache(): Promise<void> {
   try {
     logger.info("Starting course listing cache warming cycle...");
 
     const landingPageQuery = { page: 1, limit: 20 };
-    await courseService.listCourses(null, landingPageQuery);
-    let page = 1;
-    let totalPages = 1;
+    const initialData = await courseService.listCourses(null, landingPageQuery);
 
-    do {
-      const data = await courseService.listCourses(null, {
+    let page = 1;
+    let totalPages = Math.max(
+      1,
+      Math.ceil(initialData.total / WARM_PAGE_LIMIT),
+    );
+
+    while (page <= totalPages) {
+      await courseService.listCourses(null, {
         page,
         limit: WARM_PAGE_LIMIT,
       });
-
-      const key = cacheKey("courses", "list", "all", page, WARM_PAGE_LIMIT);
-      await cacheSet(key, data, 60);
-
-      totalPages = Math.max(1, Math.ceil(data.total / WARM_PAGE_LIMIT));
       page++;
-    } while (page <= totalPages);
+    }
 
     logger.info(
       { pagesWarmed: totalPages },
-      "Course listing cache successfully warmed"
+      "Course listing cache successfully warmed",
     );
   } catch (err) {
     logger.error({ err }, "Cache warming cycle failed step execution");

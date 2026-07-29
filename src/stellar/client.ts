@@ -31,12 +31,16 @@ export class StellarClient {
   }
 
   /** Load account record from Horizon. */
-  async getAccount(publicKey: string): Promise<StellarSdk.Horizon.AccountResponse> {
+  async getAccount(
+    publicKey: string,
+  ): Promise<StellarSdk.Horizon.AccountResponse> {
     try {
-      return await circuitBreakerExecute(() =>
-        stellarRetry.execute(() =>
-          withTimeout(this.horizon.loadAccount(publicKey), READ_TIMEOUT_MS)
-        )
+      return await circuitBreakerExecute(
+        () =>
+          stellarRetry.execute(() =>
+            withTimeout(this.horizon.loadAccount(publicKey), READ_TIMEOUT_MS)
+          ),
+        "read"
       );
     } catch (err) {
       logger.error({ err, publicKey }, "Failed to load Stellar account");
@@ -46,13 +50,16 @@ export class StellarClient {
 
   /** Submit a pre-built transaction envelope to the network. */
   async submitTransaction(
-    txEnvelope: StellarSdk.Transaction | StellarSdk.FeeBumpTransaction
+    txEnvelope: StellarSdk.Transaction | StellarSdk.FeeBumpTransaction,
   ): Promise<StellarSdk.Horizon.HorizonApi.SubmitTransactionResponse> {
     try {
       const result = await circuitBreakerExecute(() =>
         stellarRetry.execute(() =>
-          withTimeout(this.horizon.submitTransaction(txEnvelope), WRITE_TIMEOUT_MS)
-        )
+          withTimeout(
+            this.horizon.submitTransaction(txEnvelope),
+            WRITE_TIMEOUT_MS,
+          ),
+        ),
       );
       logger.info({ hash: result.hash }, "Transaction submitted successfully");
       return result;
@@ -61,13 +68,13 @@ export class StellarClient {
       if (extras) {
         logger.error(
           { resultCodes: extras.result_codes, envelope: extras.envelope_xdr },
-          "Transaction failed"
+          "Transaction failed",
         );
       }
       throw new StellarError(
         extras?.result_codes
           ? `Tx failed: ${JSON.stringify(extras.result_codes)}`
-          : "Transaction submission failed"
+          : "Transaction submission failed",
       );
     }
   }
@@ -77,13 +84,13 @@ export class StellarClient {
    * Uses READ_TIMEOUT_MS — write timeout is inappropriate for reads.
    */
   async callContract(
-    tx: StellarSdk.Transaction
+    tx: StellarSdk.Transaction,
   ): Promise<StellarSdk.rpc.Api.SimulateTransactionResponse> {
     try {
       return await circuitBreakerExecute(() =>
         stellarRetry.execute(() =>
-          withTimeout(this.soroban.simulateTransaction(tx), READ_TIMEOUT_MS)
-        )
+          withTimeout(this.soroban.simulateTransaction(tx), READ_TIMEOUT_MS),
+        ),
       );
     } catch (err) {
       logger.error({ err }, "Soroban contract call failed");
@@ -105,13 +112,27 @@ export class StellarClient {
       const status = err?.response?.status ?? err?.status;
       if (status === 404) return false;
       logger.error({ err, publicKey }, "accountExists check failed");
-      throw new StellarError(`Could not verify account ${publicKey}: ${err?.message ?? err}`);
+      throw new StellarError(
+        `Could not verify account ${publicKey}: ${err?.message ?? err}`,
+      );
     }
   }
 
   /** Expose Horizon server for health checks. */
   getHorizonServer(): StellarSdk.Horizon.Server {
     return this.horizon;
+  }
+
+  /** Check Soroban RPC health by calling getLatestLedger. */
+  async checkSorobanHealth(): Promise<void> {
+    try {
+      // Use a shorter timeout for health checks (3s) to fail fast if RPC is unreachable
+      await withTimeout(this.soroban.getLatestLedger(), 3_000, "read");
+    } catch (err: any) {
+      const message = err?.message || String(err);
+      logger.warn({ message }, "Soroban RPC health check failed");
+      throw err;
+    }
   }
 }
 

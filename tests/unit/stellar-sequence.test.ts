@@ -60,12 +60,27 @@ describe("Stellar Sequence Number Management", () => {
   it("loads sequence from Horizon on first call and caches it", async () => {
     vi.mocked(stellarClient.getAccount).mockResolvedValueOnce({ sequence: "41" } as any);
 
+    // After the fix: cache-miss returns the *current* sequence (41), not 42.
+    // Callers pass this to `new Account(publicKey, 41)` and TransactionBuilder
+    // builds the transaction with sequence 42 — correct for account at seq 41.
     const seq1 = await sequenceCache.getNextSequence(accountId);
-    expect(seq1).toBe("42"); // First call returns seq + 1 (41 + 1 = 42)
+    expect(seq1).toBe("41");
 
+    // Subsequent calls hit the cache; INCR produces the next usable value.
     const seq2 = await sequenceCache.getNextSequence(accountId);
-    expect(seq2).toBe("43"); // Second call returns 42 + 1 = 43
+    expect(seq2).toBe("42");
 
+    expect(stellarClient.getAccount).toHaveBeenCalledTimes(1);
+  });
+
+  it("cache-miss returns on-chain sequence (not seq+1) — regression for #206", async () => {
+    vi.mocked(stellarClient.getAccount).mockResolvedValueOnce({ sequence: "999" } as any);
+
+    const seq = await sequenceCache.getNextSequence(accountId);
+
+    // Must equal the account sequence from Horizon — NOT 1000.
+    // Account(publicKey, 999) → TransactionBuilder → tx sequence 1000 ✓
+    expect(seq).toBe("999");
     expect(stellarClient.getAccount).toHaveBeenCalledTimes(1);
   });
 
@@ -99,8 +114,10 @@ describe("Stellar Sequence Number Management", () => {
     // Verify all 10 succeeded
     expect(sequences.length).toBe(10);
 
-    // Verify sequences are monotonic (101, 102, ..., 110)
+    // Sequences must be monotonic starting from the on-chain value (100).
+    // First call returns 100 (current); subsequent calls increment from there.
     expect(sequences).toEqual([
+      "100",
       "101",
       "102",
       "103",
@@ -110,7 +127,6 @@ describe("Stellar Sequence Number Management", () => {
       "107",
       "108",
       "109",
-      "110",
     ]);
 
     // Verify account lock serialization: max concurrent should be exactly 1
@@ -154,9 +170,10 @@ describe("Stellar Sequence Number Management", () => {
 
     const finalSeq = await simulateTxSubmit();
 
-    // First attempt got 101 (100 + 1), failed with bad_seq, cache invalidated.
-    // Second attempt hit Horizon, got 105, returned 106 (105 + 1).
-    expect(finalSeq).toBe("106");
+    // First attempt: cache miss → Horizon gives 100 → return 100 (seq, not seq+1).
+    // That attempt throws bad_seq → cache invalidated.
+    // Second attempt: cache miss again → Horizon gives 105 → return 105.
+    expect(finalSeq).toBe("105");
     expect(stellarClient.getAccount).toHaveBeenCalledTimes(2);
   });
 
@@ -165,7 +182,7 @@ describe("Stellar Sequence Number Management", () => {
 
     vi.mocked(stellarClient.getAccount).mockResolvedValueOnce({ sequence: "200" } as any);
     const seq1 = await sequenceCache.getNextSequence(accountId);
-    expect(seq1).toBe("201");
+    expect(seq1).toBe("200");
 
     // Every write to the cache must carry a TTL so a stale entry can't live forever.
     const seedCall = vi.mocked(redis.eval).mock.calls.find(([script]) =>
@@ -179,7 +196,7 @@ describe("Stellar Sequence Number Management", () => {
 
     vi.mocked(stellarClient.getAccount).mockResolvedValueOnce({ sequence: "999" } as any);
     const seq2 = await sequenceCache.getNextSequence(accountId);
-    expect(seq2).toBe("1000");
+    expect(seq2).toBe("999");
     expect(stellarClient.getAccount).toHaveBeenCalledTimes(2);
   });
 
@@ -189,13 +206,13 @@ describe("Stellar Sequence Number Management", () => {
 
     vi.mocked(stellarClient.getAccount).mockResolvedValueOnce({ sequence: "500" } as any);
 
+    // First instance: cache miss → Horizon gives 500 → seed 500, return 500.
     const seqFromFirst = await sequenceCache.getNextSequence(accountId);
-    expect(seqFromFirst).toBe("501");
+    expect(seqFromFirst).toBe("500");
 
-    // A second instance (standing in for a second process) must observe the
-    // same shared state via Redis rather than loading its own fresh copy.
+    // Second instance: cache hit → INCR 500 → 501.
     const seqFromSecond = await otherInstance.getNextSequence(accountId);
-    expect(seqFromSecond).toBe("502");
+    expect(seqFromSecond).toBe("501");
     expect(stellarClient.getAccount).toHaveBeenCalledTimes(1);
   });
 });

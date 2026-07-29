@@ -18,12 +18,17 @@ import { stellarClient } from "./stellar/client.js";
 import {
   startRetryProcessor,
   stopRetryProcessor,
+  recoverLostJobs,
   type RetryJob,
 } from "./services/retry-queue.js";
 import {
   startIdempotencyCleanup,
   stopIdempotencyCleanup,
 } from "./jobs/cleanup-idempotency.js";
+import {
+  startReconciliationJob,
+  stopReconciliationJob,
+} from "./jobs/reconcile-pending-rewards.js";
 import { processRewardClaim } from "./modules/rewards/reward.service.js";
 import { warmCourseCache } from "./cache/warmer.js";
 
@@ -167,6 +172,9 @@ async function start() {
 
   startRetryProcessor(processRetryJob);
   startIdempotencyCleanup();
+  startReconciliationJob();
+  // Re-enqueue any reward claims dropped during a Redis restart (#208).
+  recoverLostJobs().catch((err) => logger.error({ err }, "recoverLostJobs startup failed"));
 
   let cacheWarmInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -186,6 +194,7 @@ async function start() {
     logger.info({ signal }, "Received shutdown signal");
     stopRetryProcessor();
     stopIdempotencyCleanup();
+    stopReconciliationJob();
     if (cacheWarmInterval) {
       clearInterval(cacheWarmInterval);
     }

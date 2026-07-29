@@ -77,8 +77,9 @@ async function handleBadSeqError(submissionId: string, stellarAddress: string): 
  * Used by both the direct claim path and the background retry processor.
  * Returns true if the claim succeeded, false if it should be retried.
  *
- * Uses two-phase approach: validate in DB tx, execute Stellar tx outside DB,
- * then update DB. This prevents holding database connections during network calls.
+ * Uses a two-phase approach: validate and mark the submission in a short DB transaction,
+ * execute the Stellar transaction outside the DB transaction, then update the DB once
+ * the on-chain result is known. This prevents holding database connections during network calls.
  */
 export async function processRewardClaim(
   submissionId: string,

@@ -6,6 +6,7 @@ import { eq, and, lte } from "drizzle-orm";
 import { logger } from "../utils/logger.js";
 
 const QUEUE_KEY = "chainlearn:retry:rewards";
+const DEAD_LETTER_QUEUE_KEY = "chainlearn:retry:rewards:dead-letter";
 const MAX_RETRIES = 10;
 const BASE_RETRY_DELAY_MS = 30_000;
 const MAX_RETRY_DELAY_MS = 5 * 60_000;
@@ -52,7 +53,35 @@ export async function dequeueReadyBatch(limit: number = BATCH_SIZE): Promise<Ret
     Date.now(),
     limit
   )) as string[];
-  return raw.map((entry) => JSON.parse(entry) as RetryJob);
+  
+  const jobs: RetryJob[] = [];
+  
+  for (const entry of raw) {
+    try {
+      const job = JSON.parse(entry) as RetryJob;
+      jobs.push(job);
+    } catch (err) {
+      // Job was already removed from the main queue by the atomic script.
+      // Log the error and push to dead-letter queue for manual recovery.
+      logger.error(
+        { err, rawEntry: entry.substring(0, 200) },
+        "Failed to parse retry job JSON — moving to dead-letter queue"
+      );
+      
+      try {
+        await redis.lpush(DEAD_LETTER_QUEUE_KEY, entry);
+      } catch (dlqErr) {
+        // If we can't even write to DLQ, log and continue - better to process
+        // other valid jobs than crash the entire batch.
+        logger.error(
+          { err: dlqErr, rawEntry: entry.substring(0, 200) },
+          "Failed to write malformed job to dead-letter queue"
+        );
+      }
+    }
+  }
+  
+  return jobs;
 }
 
 // Exponential backoff, capped so a job is always retried well within the
@@ -188,4 +217,17 @@ export async function recoverLostJobs(): Promise<void> {
   } catch (err) {
     logger.error({ err }, "recoverLostJobs failed");
   }
+}
+
+/**
+ * Get the count and first few entries from the dead-letter queue.
+ * Used for monitoring and alerting on malformed jobs.
+ */
+export async function inspectDeadLetterQueue(limit: number = 10): Promise<{
+  count: number;
+  entries: string[];
+}> {
+  const count = await redis.llen(DEAD_LETTER_QUEUE_KEY);
+  const entries = await redis.lrange(DEAD_LETTER_QUEUE_KEY, 0, limit - 1);
+  return { count, entries };
 }

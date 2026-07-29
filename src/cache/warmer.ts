@@ -1,5 +1,6 @@
 import { logger } from "../utils/logger.js";
 import { courseService } from "../modules/courses/course.service.js";
+import { cacheKey, cacheSet } from "./index.js";
 
 /**
  * Warms the course listing cache by calling listCourses() itself, the same
@@ -11,6 +12,7 @@ import { courseService } from "../modules/courses/course.service.js";
  * again the moment either one changed. Only calling listCourses() removes
  * the second TTL entirely — there's now exactly one place that decides
  * how long this cache key lives.
+ */
 const WARM_PAGE_LIMIT = 20;
 
 /**

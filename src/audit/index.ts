@@ -1,4 +1,6 @@
 import { logger } from "../utils/logger.js";
+import { db } from "../config/database.js";
+import { auditLogs } from "../database/schema.js";
 
 type AuditEvent =
   | "quiz.submitted"
@@ -22,9 +24,9 @@ interface AuditFields {
   queued?: boolean;
   ip?: string;
   userAgent?: string;
-  [key: string]: unknown;
 }
 
 export function auditLog(event: AuditEvent, fields: AuditFields): void {
   logger.info({ audit: true, event, ...fields }, `audit: ${event}`);
+  db.insert(auditLogs).values({ event, fields }).catch((err) => logger.error({ err }, "Failed to persist audit log"));
 }

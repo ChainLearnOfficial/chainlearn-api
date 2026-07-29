@@ -191,3 +191,14 @@ export const idempotencyKeys = pgTable(
   },
   (table) => [index("idx_idempotency_expires").on(table.expiresAt)]
 );
+
+// ─── Audit Logs ─────────────────────────────────────────────────────────────
+export const auditLogs = pgTable(
+  "audit_logs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    event: varchar("event", { length: 255 }).notNull(),
+    fields: jsonb("fields"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  }
+);

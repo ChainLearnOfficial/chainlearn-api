@@ -31,12 +31,15 @@ export function rateLimitOptions(): FastifyRateLimitOptions {
 /**
  * Stricter limit for unauthenticated auth endpoints. Each challenge stores a
  * value in Redis, so an attacker hitting the global 100/min limit could
- * exhaust Redis memory. Key by IP since there is no user yet.
+ * exhaust Redis memory. Key by the real TCP connection address — never a
+ * proxy header — so an attacker cannot reset their bucket by spoofing
+ * X-Forwarded-For or X-Real-IP.
  */
 export const authRateLimit: RateLimitOptions = {
   max: 20,
   timeWindow: "5 minutes",
-  keyGenerator: (request: FastifyRequest) => request.ip,
+  keyGenerator: (request: FastifyRequest) =>
+    (request.socket?.remoteAddress ?? request.ip) + ":auth",
   errorResponseBuilder,
 };
 

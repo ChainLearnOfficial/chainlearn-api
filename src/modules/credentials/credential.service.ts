@@ -7,6 +7,7 @@ import {
   courses,
   users,
 } from "../../database/schema.js";
+import { PASSING_PERCENTAGE } from "../quizzes/quiz.types.js";
 import {
   NotFoundError,
   ForbiddenError,
@@ -78,9 +79,9 @@ export class CredentialService {
           throw new ForbiddenError("Quiz has no questions");
         }
         const percentage = Math.round((submission.score / questions.length) * 100);
-        if (percentage < 70) {
+        if (percentage < PASSING_PERCENTAGE) {
           throw new ForbiddenError(
-            `Score ${percentage}% below passing threshold of 70%`,
+            `Score ${percentage}% below passing threshold of ${PASSING_PERCENTAGE}%`,
           );
         }
 

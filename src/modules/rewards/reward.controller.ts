@@ -36,6 +36,8 @@ export class RewardController {
 
       await storeIdempotentResponse(
         idempotencyKey,
+        authUser.id,
+        "/rewards/claim",
         200,
         { success: true, data: result },
         result.txHash ?? undefined
@@ -49,10 +51,16 @@ export class RewardController {
           : 500;
 
       // Store generic error message in cache to avoid leaking internal details
-      await storeIdempotentResponse(idempotencyKey, statusCode, {
-        success: false,
-        error: "Failed to process reward claim",
-      });
+      await storeIdempotentResponse(
+        idempotencyKey,
+        authUser.id,
+        "/rewards/claim",
+        statusCode,
+        {
+          success: false,
+          error: "Failed to process reward claim",
+        }
+      );
 
       throw err;
     }

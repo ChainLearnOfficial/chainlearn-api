@@ -40,6 +40,8 @@ export class CredentialController {
 
       await storeIdempotentResponse(
         idempotencyKey,
+        authUser.id,
+        "/credentials/mint",
         201,
         { success: true, data: result },
         result.mintTxHash
@@ -53,10 +55,16 @@ export class CredentialController {
           : 500;
 
       // Store generic error message in cache to avoid leaking internal details
-      await storeIdempotentResponse(idempotencyKey, statusCode, {
-        success: false,
-        error: "Failed to mint credential",
-      });
+      await storeIdempotentResponse(
+        idempotencyKey,
+        authUser.id,
+        "/credentials/mint",
+        statusCode,
+        {
+          success: false,
+          error: "Failed to mint credential",
+        }
+      );
 
       throw err;
     }

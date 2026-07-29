@@ -145,7 +145,7 @@ describe("Idempotency Middleware", () => {
   });
 
   describe("storeIdempotentResponse", () => {
-    it("should update the idempotency key with response data", async () => {
+    it("should update the idempotency key with response data scoped to user and endpoint", async () => {
       const updateChain = makeChainable([]);
       const whereChain = makeChainable([]);
       updateChain.where = vi.fn().mockReturnValue(whereChain);
@@ -153,6 +153,8 @@ describe("Idempotency Middleware", () => {
 
       await storeIdempotentResponse(
         "test-key-1234567890",
+        "user-1",
+        "/rewards/claim",
         200,
         { success: true, data: { id: "1" } },
         "tx-hash-abc"
@@ -172,10 +174,16 @@ describe("Idempotency Middleware", () => {
       updateChain.where = vi.fn().mockReturnValue(whereChain);
       mockDb.update.mockReturnValue(updateChain);
 
-      await storeIdempotentResponse("test-key-1234567890", 400, {
-        success: false,
-        error: "Bad request",
-      });
+      await storeIdempotentResponse(
+        "test-key-1234567890",
+        "user-1",
+        "/rewards/claim",
+        400,
+        {
+          success: false,
+          error: "Bad request",
+        }
+      );
 
       expect(updateChain.set).toHaveBeenCalledWith({
         responseStatus: 400,

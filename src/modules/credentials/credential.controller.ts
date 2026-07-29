@@ -51,12 +51,11 @@ export class CredentialController {
         err && typeof err === "object" && "statusCode" in err
           ? (err as { statusCode: number }).statusCode
           : 500;
-      const message =
-        err instanceof Error ? err.message : "Internal server error";
 
+      // Store generic error message in cache to avoid leaking internal details
       await storeIdempotentResponse(idempotencyKey, statusCode, {
         success: false,
-        error: message,
+        error: "Failed to mint credential",
       });
 
       throw err;

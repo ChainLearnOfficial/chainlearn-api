@@ -1,5 +1,13 @@
 import { z } from "zod";
 
+// ─── Constants ──────────────────────────────────────────────────────────────
+
+// Single source of truth for the quiz passing threshold. Used by both
+// QuizService (to compute `passed` on submission) and RewardService (to
+// re-verify a submission is actually passing before releasing a reward) —
+// previously each defined its own copy, which could silently drift apart.
+export const PASSING_PERCENTAGE = 70;
+
 // ─── Request Schemas ────────────────────────────────────────────────────────
 
 export const generateQuizSchema = z.object({

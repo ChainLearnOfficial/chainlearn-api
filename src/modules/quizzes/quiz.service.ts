@@ -9,15 +9,14 @@ import { generateQuizFromAI } from "./ai-client.js";
 import { sanitizeQuizFeedback } from "../../utils/sanitize.js";
 import { auditLog } from "../../audit/index.js";
 import { quizSubmissionsTotal } from "../../metrics/index.js";
-import type {
-  GenerateQuizBody,
-  SubmitQuizBody,
-  QuizWithQuestions,
-  QuizSubmissionResult,
-  QuizQuestion,
+import {
+  PASSING_PERCENTAGE,
+  type GenerateQuizBody,
+  type SubmitQuizBody,
+  type QuizWithQuestions,
+  type QuizSubmissionResult,
+  type QuizQuestion,
 } from "./quiz.types.js";
-
-const PASSING_PERCENTAGE = 70;
 
 export class QuizService {
   /**
@@ -211,7 +210,41 @@ export class QuizService {
 
         for (const answer of data.answers) {
           const question = questions.find((q) => q.id === answer.questionId);
-          if (!question) continue;
+          if (!question) {
+            logger.warn(
+              { quizId, userId, questionId: answer.questionId },
+              "Submitted answer references an unrecognized questionId — skipping"
+            );
+            continue;
+          }
+
+          // submitQuizSchema only bounds selectedIndex to a static max(20) —
+          // it has no way to know this specific question's real options
+          // length at request-validation time. Re-check it here against the
+          // actual question so an out-of-range index (e.g. 20 on a 4-option
+          // question) is treated as a distinctly-logged invalid answer
+          // rather than silently scored as just "incorrect".
+          if (
+            answer.selectedIndex < 0 ||
+            answer.selectedIndex >= question.options.length
+          ) {
+            logger.warn(
+              {
+                quizId,
+                userId,
+                questionId: answer.questionId,
+                selectedIndex: answer.selectedIndex,
+                optionsCount: question.options.length,
+              },
+              "Submitted selectedIndex is out of range for this question's options — treating as incorrect"
+            );
+            feedbackParts.push(
+              sanitizeQuizFeedback(
+                `Q: "${question.text}" - Incorrect. The correct answer was: "${question.options[question.correctIndex]}"`
+              )
+            );
+            continue;
+          }
 
           if (answer.selectedIndex === question.correctIndex) {
             correctCount++;

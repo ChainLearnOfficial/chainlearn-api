@@ -99,36 +99,19 @@ export class UserService {
       throw new NotFoundError("User");
     }
 
-    const [enrolledResult] = await db
-      .select({ value: count() })
-      .from(enrollments)
-      .where(eq(enrollments.userId, userId));
-
-    const [completedResult] = await db
-      .select({ value: count() })
-      .from(enrollments)
-      .where(
-        sql`${enrollments.userId} = ${userId} AND ${enrollments.completedAt} IS NOT NULL`,
-      );
-
-    const [quizScoreResult] = await db
-      .select({
-        total: sql<number>`COALESCE(SUM(${quizSubmissions.score}), 0)`,
-      })
-      .from(quizSubmissions)
-      .where(eq(quizSubmissions.userId, userId));
-
-    const [credResult] = await db
-      .select({ value: count() })
-      .from(credentials)
-      .where(eq(credentials.userId, userId));
-
-    const [rewardsResult] = await db
-      .select({ value: count() })
-      .from(quizSubmissions)
-      .where(
-        sql`${quizSubmissions.userId} = ${userId} AND ${quizSubmissions.rewardClaimed} = true`,
-      );
+    const [
+      [enrolledResult],
+      [completedResult],
+      [quizScoreResult],
+      [credResult],
+      [rewardsResult],
+    ] = await Promise.all([
+      db.select({ value: count() }).from(enrollments).where(eq(enrollments.userId, userId)),
+      db.select({ value: count() }).from(enrollments).where(sql`${enrollments.userId} = ${userId} AND ${enrollments.completedAt} IS NOT NULL`),
+      db.select({ total: sql<number>`COALESCE(SUM(${quizSubmissions.score}), 0)` }).from(quizSubmissions).where(eq(quizSubmissions.userId, userId)),
+      db.select({ value: count() }).from(credentials).where(eq(credentials.userId, userId)),
+      db.select({ value: count() }).from(quizSubmissions).where(sql`${quizSubmissions.userId} = ${userId} AND ${quizSubmissions.rewardClaimed} = true`)
+    ]);
 
     const progress: UserProgress = {
       enrolledCourses: enrolledResult.value,

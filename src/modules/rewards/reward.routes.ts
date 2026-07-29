@@ -3,7 +3,7 @@ import { rewardController } from "./reward.controller.js";
 import { authGuard } from "../../middleware/auth.js";
 import { validate } from "../../middleware/validation.js";
 import { claimRateLimit } from "../../middleware/rate-limit.js";
-import { claimRewardSchema } from "./reward.types.js";
+import { claimRewardSchema, getHistorySchema } from "./reward.types.js";
 
 export async function rewardRoutes(app: FastifyInstance): Promise<void> {
   app.addHook("onRequest", authGuard);
@@ -21,9 +21,10 @@ export async function rewardRoutes(app: FastifyInstance): Promise<void> {
     (request, reply) => rewardController.claim(request, reply)
   );
 
-  app.get(
+  app.get<{ Querystring: import("./reward.types.js").GetHistoryQuery }>(
     "/history",
     {
+      preHandler: [validate({ querystring: getHistorySchema })],
       schema: {
         description: "Get reward claim history",
         tags: ["rewards"],

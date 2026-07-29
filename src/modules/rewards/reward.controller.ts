@@ -1,7 +1,7 @@
 import type { FastifyRequest, FastifyReply } from "fastify";
 import { rewardService } from "./reward.service.js";
 import type { AuthenticatedRequest } from "../../middleware/auth.js";
-import type { ClaimRewardBody } from "./reward.types.js";
+import type { ClaimRewardBody, GetHistoryQuery } from "./reward.types.js";
 import {
   checkIdempotency,
   storeIdempotentResponse,
@@ -60,16 +60,25 @@ export class RewardController {
 
   /**
    * GET /api/rewards/history
-   * Get reward claim history for the authenticated user.
+   * Get reward claim history for the authenticated user, paginated.
    */
   async history(
-    request: FastifyRequest,
+    request: FastifyRequest<{ Querystring: GetHistoryQuery }>,
     reply: FastifyReply
   ): Promise<void> {
     const { authUser } = request as AuthenticatedRequest;
-    const history = await rewardService.getHistory(authUser.id);
+    const { page, limit } = request.query;
+    const { history, total } = await rewardService.getHistory(
+      authUser.id,
+      page,
+      limit
+    );
 
-    reply.send({ success: true, data: history });
+    reply.send({
+      success: true,
+      data: history,
+      pagination: { page, limit, total },
+    });
   }
 }
 

@@ -7,9 +7,15 @@ export const claimRewardSchema = z.object({
   idempotencyKey: z.string().min(16).max(64),
 });
 
+export const getHistorySchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(50).default(20),
+});
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 export type ClaimRewardBody = z.infer<typeof claimRewardSchema>;
+export type GetHistoryQuery = z.infer<typeof getHistorySchema>;
 
 export interface RewardClaimResult {
   submissionId: string;

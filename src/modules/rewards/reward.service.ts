@@ -32,6 +32,23 @@ import { cacheGet, cacheSet, cacheDel, cacheKey } from "../../cache/index.js";
 const REWARD_AMOUNT = 10; // credits per passed quiz
 const PASSING_PERCENTAGE = 70;
 
+export async function selectSubmissionForUpdate(
+  tx: Parameters<typeof db.transaction>[0] extends (arg: infer T) => any ? T : never,
+  submissionId: string,
+  userId?: string,
+) {
+  const filters = [eq(quizSubmissions.id, submissionId)];
+  if (userId) {
+    filters.push(eq(quizSubmissions.userId, userId));
+  }
+
+  return tx
+    .select()
+    .from(quizSubmissions)
+    .where(and(...filters))
+    .for("update");
+}
+
 /**
  * Helper function to handle bad_seq errors from Stellar transactions.
  * When a bad_seq error occurs, it attempts to fetch the current account sequence
@@ -71,11 +88,7 @@ export async function processRewardClaim(
   return withLock(`reward:${submissionId}`, async () => {
     // Phase 1: Validate and mark as pending in a quick DB transaction
     const claimData = await db.transaction(async (tx) => {
-      const [submission] = await tx
-        .select()
-        .from(quizSubmissions)
-        .where(eq(quizSubmissions.id, submissionId))
-        .for("update");
+      const [submission] = await selectSubmissionForUpdate(tx, submissionId);
 
       if (!submission || submission.rewardClaimed || submission.rewardPending) {
         return null;
@@ -207,16 +220,7 @@ export class RewardService {
     return withLock(`reward:${submissionId}`, async () => {
       // Phase 1: Validate and mark as pending in a quick DB transaction
       const claimData = await db.transaction(async (tx) => {
-        const [submission] = await tx
-          .select()
-          .from(quizSubmissions)
-          .where(
-            and(
-              eq(quizSubmissions.id, submissionId),
-              eq(quizSubmissions.userId, userId),
-            ),
-          )
-          .for("update");
+        const [submission] = await selectSubmissionForUpdate(tx, submissionId, userId);
 
         if (!submission) {
           throw new NotFoundError("Quiz submission");

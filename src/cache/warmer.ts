@@ -1,6 +1,18 @@
 import { logger } from "../utils/logger.js";
 import { courseService } from "../modules/courses/course.service.js";
+import { cacheKey, cacheSet } from "./index.js";
 
+/**
+ * Warms the course listing cache by calling listCourses() itself, the same
+ * way a real request would. listCourses() already writes its own result to
+ * the cache (with its own 30s TTL) on a miss — the warmer used to also
+ * cacheSet the same key with a second, hardcoded 60s TTL of its own (#148).
+ * That meant the warmed entry's actual expiry silently disagreed with
+ * every other write to the same key, and the two TTLs could drift apart
+ * again the moment either one changed. Only calling listCourses() removes
+ * the second TTL entirely — there's now exactly one place that decides
+ * how long this cache key lives.
+ */
 const WARM_PAGE_LIMIT = 20;
 
 /**

@@ -37,11 +37,7 @@ export class StellarClient {
     try {
       return await circuitBreakerExecute(() =>
         stellarRetry.execute(() =>
-          withTimeout(
-            this.horizon.loadAccount(publicKey),
-            READ_TIMEOUT_MS,
-            "read",
-          ),
+          withTimeout(this.horizon.loadAccount(publicKey), READ_TIMEOUT_MS),
         ),
       );
     } catch (err) {
@@ -60,7 +56,6 @@ export class StellarClient {
           withTimeout(
             this.horizon.submitTransaction(txEnvelope),
             WRITE_TIMEOUT_MS,
-            "write",
           ),
         ),
       );
@@ -92,11 +87,7 @@ export class StellarClient {
     try {
       return await circuitBreakerExecute(() =>
         stellarRetry.execute(() =>
-          withTimeout(
-            this.soroban.simulateTransaction(tx),
-            READ_TIMEOUT_MS,
-            "read",
-          ),
+          withTimeout(this.soroban.simulateTransaction(tx), READ_TIMEOUT_MS),
         ),
       );
     } catch (err) {

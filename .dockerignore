@@ -28,7 +28,7 @@ logs
 .eslintrc*
 eslint.config.*
 tsconfig*.json
-drizzle.config.*
+# drizzle.config.*  # uncomment to exclude in dev builds
 fix-routes.js
 Makefile
 

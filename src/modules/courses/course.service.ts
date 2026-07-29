@@ -9,6 +9,7 @@ import {
   cacheDel,
   cacheInvalidatePattern,
   cacheKey,
+  cacheKeyPattern,
 } from "../../cache/index.js";
 import type {
   ListCoursesQuery,
@@ -219,7 +220,7 @@ export class CourseService {
         await tx.insert(enrollments).values({ userId, courseId });
       });
 
-      await cacheInvalidatePattern("chainlearn:courses:list:*");
+      await cacheInvalidatePattern(cacheKeyPattern("courses", "list"));
       await cacheDel(cacheKey("courses", "detail", courseId));
       await cacheDel(cacheKey("user", "progress", userId));
     });

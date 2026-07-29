@@ -119,7 +119,7 @@ export class CredentialService {
 
       // Phase 2: Execute Stellar transaction outside DB (no connection held)
       const auth = createMintAuthorization(
-        userId,
+        mintData.stellarAddress,
         courseId,
         mintData.score,
       );

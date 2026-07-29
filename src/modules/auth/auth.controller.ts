@@ -28,10 +28,11 @@ export class AuthController {
     request: FastifyRequest<{ Body: VerifyBody }>,
     reply: FastifyReply
   ): Promise<void> {
-    const { stellarAddress, signedChallenge } = request.body;
+    const { stellarAddress, challengeId, signedChallenge } = request.body;
 
     const authResult = await authService.verifyChallenge(
       stellarAddress,
+      challengeId,
       signedChallenge
     );
 

@@ -106,7 +106,13 @@ export class StellarClient {
    */
   async accountExists(publicKey: string): Promise<boolean> {
     try {
-      await this.horizon.loadAccount(publicKey);
+      await circuitBreakerExecute(
+        () =>
+          stellarRetry.execute(() =>
+            withTimeout(this.horizon.loadAccount(publicKey), READ_TIMEOUT_MS)
+          ),
+        "read"
+      );
       return true;
     } catch (err: any) {
       const status = err?.response?.status ?? err?.status;

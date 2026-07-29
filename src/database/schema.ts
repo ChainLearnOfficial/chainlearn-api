@@ -9,7 +9,9 @@ import {
   jsonb,
   index,
   uniqueIndex,
+  check,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 // ─── Users ──────────────────────────────────────────────────────────────────
 
@@ -138,6 +140,12 @@ export const quizSubmissions = pgTable(
     ),
     index("idx_quiz_submissions_user_id").on(table.userId),
     index("idx_quiz_submissions_reward_failed").on(table.rewardFailed),
+    check(
+      "chk_reward_mutex",
+      sql`(
+        (reward_claimed::int + reward_pending::int + reward_failed::int) <= 1
+      )`
+    ),
   ]
 );
 

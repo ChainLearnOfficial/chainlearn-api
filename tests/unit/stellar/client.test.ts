@@ -1,5 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+const { mockHorizon, mockSoroban } = vi.hoisted(() => ({
+  mockHorizon: {
+    loadAccount: vi.fn(),
+    submitTransaction: vi.fn(),
+  },
+  mockSoroban: {},
+}));
+
 vi.mock("../../../src/config/stellar.js", () => ({
   getHorizonServer: vi.fn(() => mockHorizon),
   getSorobanServer: vi.fn(() => mockSoroban),
@@ -14,16 +22,9 @@ vi.mock("../../../src/stellar/resilience.js", () => ({
   stellarRetry: {
     execute: vi.fn((fn) => fn()),
   },
-  circuitBreakerExecute: vi.fn((fn) => fn()),
+  circuitBreakerExecute: vi.fn((fn, _operation) => fn()),
   withTimeout: vi.fn((promise) => promise),
 }));
-
-const mockHorizon = {
-  loadAccount: vi.fn(),
-  submitTransaction: vi.fn(),
-};
-
-const mockSoroban = {};
 
 import { StellarClient } from "../../../src/stellar/client.js";
 import { StellarError } from "../../../src/utils/errors.js";

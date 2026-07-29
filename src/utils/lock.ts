@@ -11,13 +11,28 @@ export async function withLock<T>(
   const lockKey = `lock:${key}`;
   const lockValue = crypto.randomUUID();
 
-  const acquired = await redis.set(
-    lockKey,
-    lockValue,
-    "PX",
-    ttlMs,
-    "NX"
-  );
+  let acquired: string | null;
+  try {
+    acquired = await redis.set(
+      lockKey,
+      lockValue,
+      "PX",
+      ttlMs,
+      "NX"
+    );
+  } catch (err) {
+    // Redis connection error - log and proceed without lock rather than
+    // failing the entire operation with a 500. This allows the underlying
+    // operation to succeed even during Redis downtime, trading lock safety
+    // for availability. Operations protected by withLock should also have
+    // database-level constraints as a fallback.
+    logger.error(
+      { err, lockKey },
+      "Redis connection error during lock acquisition - proceeding without lock"
+    );
+    return await fn();
+  }
+
   if (!acquired) {
     throw new ConflictError("Operation in progress, please retry");
   }
@@ -50,13 +65,18 @@ export async function withLock<T>(
     return await fn();
   } finally {
     if (heartbeat) clearInterval(heartbeat);
-    const script = `
-      if redis.call("get", KEYS[1]) == ARGV[1] then
-        return redis.call("del", KEYS[1])
-      else
-        return 0
-      end
-    `;
-    await redis.eval(script, 1, lockKey, lockValue);
+    try {
+      const script = `
+        if redis.call("get", KEYS[1]) == ARGV[1] then
+          return redis.call("del", KEYS[1])
+        else
+          return 0
+        end
+      `;
+      await redis.eval(script, 1, lockKey, lockValue);
+    } catch (err) {
+      // Log but don't throw - lock will expire naturally via TTL
+      logger.error({ err, lockKey }, "Failed to release lock - will expire via TTL");
+    }
   }
 }

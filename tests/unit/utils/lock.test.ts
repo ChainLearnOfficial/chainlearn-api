@@ -120,4 +120,42 @@ describe("withLock", () => {
     // Release call happens at the end
     expect(redis.eval).toHaveBeenCalledTimes(2);
   });
+
+  it("should proceed without lock on Redis connection error during acquisition", async () => {
+    const connectionError = new Error("ECONNREFUSED");
+    (redis.set as any).mockRejectedValue(connectionError);
+
+    const fn = vi.fn().mockResolvedValue("result");
+    const result = await withLock("test", fn);
+
+    expect(result).toBe("result");
+    expect(fn).toHaveBeenCalled();
+    // Lock release should not be attempted since lock was never acquired
+    expect(redis.eval).not.toHaveBeenCalled();
+  });
+
+  it("should handle Redis error during lock release gracefully", async () => {
+    (redis.set as any).mockResolvedValue("OK");
+    const releaseError = new Error("Redis connection lost");
+    (redis.eval as any).mockRejectedValue(releaseError);
+
+    const fn = vi.fn().mockResolvedValue("result");
+    // Should not throw even if release fails
+    const result = await withLock("test", fn);
+
+    expect(result).toBe("result");
+    expect(fn).toHaveBeenCalled();
+    expect(redis.eval).toHaveBeenCalled();
+  });
+
+  it("should allow operations to succeed during Redis downtime", async () => {
+    // Simulate complete Redis failure
+    (redis.set as any).mockRejectedValue(new Error("Connection refused"));
+
+    const fn = vi.fn().mockResolvedValue({ status: "success" });
+    const result = await withLock("critical-operation", fn);
+
+    expect(result).toEqual({ status: "success" });
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
 });

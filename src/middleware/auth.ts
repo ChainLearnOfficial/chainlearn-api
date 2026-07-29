@@ -26,6 +26,12 @@ export async function authGuard(
       throw new UnauthorizedError("User no longer exists");
     }
 
+    // Validate that the stellarAddress in the JWT matches the database record
+    // This provides defense-in-depth against token forgery scenarios
+    if (decoded.stellarAddress !== user.stellarAddress) {
+      throw new UnauthorizedError("Token stellarAddress mismatch");
+    }
+
     (request as AuthenticatedRequest).authUser = {
       id: user.id,
       stellarAddress: user.stellarAddress,

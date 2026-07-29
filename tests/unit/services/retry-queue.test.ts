@@ -14,6 +14,9 @@ vi.mock("../../../src/config/redis.js", () => ({
     ping: vi.fn().mockResolvedValue("PONG"),
     zadd: vi.fn().mockResolvedValue(1),
     eval: vi.fn().mockResolvedValue([]),
+    lpush: vi.fn().mockResolvedValue(1),
+    llen: vi.fn().mockResolvedValue(0),
+    lrange: vi.fn().mockResolvedValue([]),
   },
 }));
 
@@ -50,6 +53,7 @@ import {
   requeueReward,
   startRetryProcessor,
   stopRetryProcessor,
+  inspectDeadLetterQueue,
 } from "../../../src/services/retry-queue.js";
 import { redis } from "../../../src/config/redis.js";
 import { db } from "../../../src/config/database.js";
@@ -259,5 +263,74 @@ describe("Retry Queue", () => {
       stopRetryProcessor();
       vi.useRealTimers();
     }
+  });
+
+  it("should handle malformed JSON and move to dead-letter queue", async () => {
+    const validJob = jobPayload({ id: "valid", submissionId: "sub-valid" });
+    const malformedJson = "{broken json";
+    
+    mockRedis.eval.mockResolvedValueOnce([JSON.stringify(validJob), malformedJson]);
+
+    const result = await dequeueReadyBatch();
+
+    // Should return only the valid job
+    expect(result).toEqual([validJob]);
+    expect(result.length).toBe(1);
+    
+    // Malformed job should be pushed to dead-letter queue
+    expect(mockRedis.lpush).toHaveBeenCalledWith(
+      "chainlearn:retry:rewards:dead-letter",
+      malformedJson
+    );
+  });
+
+  it("should continue processing valid jobs even when one is malformed", async () => {
+    const job1 = jobPayload({ id: "job-1", submissionId: "sub-1" });
+    const job2 = jobPayload({ id: "job-2", submissionId: "sub-2" });
+    const malformed = "not-valid-json";
+    
+    mockRedis.eval.mockResolvedValueOnce([
+      JSON.stringify(job1),
+      malformed,
+      JSON.stringify(job2)
+    ]);
+
+    const result = await dequeueReadyBatch();
+
+    expect(result).toEqual([job1, job2]);
+    expect(result.length).toBe(2);
+    expect(mockRedis.lpush).toHaveBeenCalledWith(
+      "chainlearn:retry:rewards:dead-letter",
+      malformed
+    );
+  });
+
+  it("should handle dead-letter queue write failure gracefully", async () => {
+    const validJob = jobPayload();
+    const malformed = "{bad}";
+    
+    mockRedis.eval.mockResolvedValueOnce([JSON.stringify(validJob), malformed]);
+    mockRedis.lpush.mockRejectedValueOnce(new Error("Redis write failed"));
+
+    // Should not throw - continues processing other jobs
+    const result = await dequeueReadyBatch();
+    
+    expect(result).toEqual([validJob]);
+    expect(mockRedis.lpush).toHaveBeenCalled();
+  });
+
+  it("should inspect dead-letter queue", async () => {
+    mockRedis.llen.mockResolvedValueOnce(5);
+    mockRedis.lrange.mockResolvedValueOnce(["{bad1}", "{bad2}", "{bad3}"]);
+
+    const result = await inspectDeadLetterQueue(3);
+
+    expect(result.count).toBe(5);
+    expect(result.entries).toEqual(["{bad1}", "{bad2}", "{bad3}"]);
+    expect(mockRedis.lrange).toHaveBeenCalledWith(
+      "chainlearn:retry:rewards:dead-letter",
+      0,
+      2
+    );
   });
 });

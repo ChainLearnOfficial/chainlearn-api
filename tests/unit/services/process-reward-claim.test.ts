@@ -188,13 +188,57 @@ describe("processRewardClaim", () => {
     const result = await processRewardClaim("sub-1", "user-1", 5);
 
     expect(result).toBe(true);
-    // Two transactions: one for validation/pending, one for updating result
+    // One transaction for validation/pending and one for updating result
     expect(mockDb.transaction).toHaveBeenCalledTimes(2);
     expect(invokeContract).toHaveBeenCalledWith(
       "test-reward-contract",
       "claim_reward",
       expect.any(Array)
     );
+  });
+
+  it("should perform the Stellar invocation after the validation transaction closes", async () => {
+    let txActive = false;
+    mockDb.transaction.mockImplementation(async (fn: Function) => {
+      txActive = true;
+      try {
+        const selectResults = [
+          [{ id: "sub-1", userId: "user-1", score: 5, rewardClaimed: false, rewardPending: false, quizId: "quiz-1" }],
+          [{ id: "quiz-1", courseId: "course-1", questions: [{ id: "q1" }] }],
+          [{ id: "user-1", stellarAddress: "GALICE0000000000000000000000000000000000000000000000000000000" }],
+        ];
+        let resultIndex = 0;
+
+        const makeQueryChain = (result: any[]) => {
+          const chain: any = {
+            then: (resolve: Function) => Promise.resolve(result).then(resolve),
+            for: vi.fn().mockImplementation(() => Promise.resolve(result)),
+          };
+          chain.select = vi.fn().mockReturnValue(chain);
+          chain.from = vi.fn().mockReturnValue(chain);
+          chain.where = vi.fn().mockImplementation(() => chain);
+          return chain;
+        };
+
+        const tx = {
+          select: vi.fn().mockImplementation(() => makeQueryChain(selectResults[resultIndex++] ?? [])),
+          update: vi.fn().mockReturnValue({
+            set: vi.fn().mockReturnValue({ where: vi.fn().mockResolvedValue(undefined) }),
+          }),
+        } as any;
+
+        return await fn(tx);
+      } finally {
+        txActive = false;
+      }
+    });
+
+    vi.mocked(invokeContract).mockImplementation(async () => {
+      expect(txActive).toBe(false);
+      return "tx-hash-123";
+    });
+
+    await processRewardClaim("sub-1", "user-1", 5);
   });
 
   it("should throw when on-chain transaction fails", async () => {

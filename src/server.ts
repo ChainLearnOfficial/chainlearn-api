@@ -63,6 +63,7 @@ async function buildApp() {
   initTracing();
 
   const app = Fastify({
+    bodyLimit: 1024 * 100, // 100KB
     logger: {
       level: config.NODE_ENV === "production" ? "info" : "debug",
       transport:

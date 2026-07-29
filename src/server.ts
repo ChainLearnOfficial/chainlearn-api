@@ -2,6 +2,7 @@ import { initTracing, shutdownTracing } from "./tracing.js";
 
 import Fastify from "fastify";
 import cors from "@fastify/cors";
+import helmet from "@fastify/helmet";
 import jwt from "@fastify/jwt";
 import rateLimit from "@fastify/rate-limit";
 import { sql } from "drizzle-orm";
@@ -70,6 +71,37 @@ async function buildApp() {
   });
 
   // ─── Plugins ────────────────────────────────────────────────────────────
+
+  // #220: OWASP security headers via @fastify/helmet.
+  // Content-Security-Policy is set to a restrictive baseline — the API only
+  // serves JSON so no scripts/styles are needed; adjust if a docs UI is added.
+  await app.register(helmet, {
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'none'"],
+        scriptSrc: ["'none'"],
+        objectSrc: ["'none'"],
+        frameAncestors: ["'none'"],
+      },
+    },
+    // X-Frame-Options: DENY (redundant with CSP frameAncestors but kept for
+    // older clients that don't support CSP).
+    frameguard: { action: "deny" },
+    // Strict-Transport-Security: 1 year, includeSubDomains, preload.
+    hsts: {
+      maxAge: 31_536_000,
+      includeSubDomains: true,
+      preload: true,
+    },
+    referrerPolicy: { policy: "no-referrer" },
+    // X-Content-Type-Options: nosniff (prevents MIME-sniffing attacks).
+    noSniff: true,
+    // X-XSS-Protection is legacy but still useful for older browsers.
+    xssFilter: true,
+    // Remove X-Powered-By to avoid fingerprinting.
+    hidePoweredBy: true,
+  });
+
   // CSRF note: auth is via the `Authorization: Bearer` header, which is
   // CSRF-safe (cross-site requests can't set custom headers). `credentials:
   // true` only matters if auth ever moves to cookies — if it does, add a CSRF
@@ -182,7 +214,21 @@ async function start() {
     logger.error({ error }, "Cache warmer initialization failed");
   }
 
+  const SHUTDOWN_TIMEOUT_MS = 10_000;
+
   const shutdown = async (signal: string) => {
+    // #216: Force-exit if graceful shutdown exceeds the deadline so the
+    // process doesn't hang indefinitely when DB or Redis is stuck.
+    const forceExit = setTimeout(() => {
+      logger.error(
+        { timeoutMs: SHUTDOWN_TIMEOUT_MS },
+        "Graceful shutdown timed out — forcing exit",
+      );
+      process.exit(1);
+    }, SHUTDOWN_TIMEOUT_MS);
+    // Don't let this timer itself keep the event loop alive.
+    forceExit.unref();
+
     logger.info({ signal }, "Received shutdown signal");
     stopRetryProcessor();
     stopIdempotencyCleanup();
@@ -193,6 +239,7 @@ async function start() {
     await closeDatabase();
     await closeRedis();
     await shutdownTracing();
+    clearTimeout(forceExit);
     logger.info("Server shut down cleanly");
     process.exit(0);
   };

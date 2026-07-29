@@ -77,7 +77,7 @@ export async function processRewardClaim(
         .where(eq(quizSubmissions.id, submissionId))
         .for("update");
 
-      if (!submission || submission.rewardClaimed || submission.rewardPending) {
+      if (!submission || submission.rewardClaimed || submission.rewardPending || submission.rewardFailed) {
         return null;
       }
 

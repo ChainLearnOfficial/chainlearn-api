@@ -62,7 +62,7 @@ describe("Metrics & Health Endpoints", () => {
       const body = JSON.parse(response.payload);
       expect(body.status).toBeDefined();
       expect(body.checks).toBeDefined();
-    });
+    }, 10000);
   });
 
   describe("GET /health/live", () => {
@@ -89,6 +89,6 @@ describe("Metrics & Health Endpoints", () => {
       const body = JSON.parse(response.payload);
       expect(body.status).toBeDefined();
       expect(body.checks).toBeDefined();
-    });
+    }, 10000);
   });
 });

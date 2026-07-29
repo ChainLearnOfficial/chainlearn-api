@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifySchema } from "fastify";
 import { authController } from "./auth.controller.js";
 import { validate } from "../../middleware/validation.js";
+import { authGuard } from "../../middleware/auth.js";
 import { authRateLimit } from "../../middleware/rate-limit.js";
 import { challengeSchema, verifySchema } from "./auth.types.js";
 
@@ -45,5 +46,30 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => authController.verify(request, reply)
+  );
+
+  app.post(
+    "/logout",
+    {
+      preHandler: [authGuard],
+      schema: {
+        description: "Revoke the caller's JWT — the token is immediately invalidated server-side",
+        tags: ["auth"],
+        security: [{ bearerAuth: [] }],
+        response: {
+          200: {
+            type: "object",
+            properties: {
+              success: { type: "boolean" },
+              data: {
+                type: "object",
+                properties: { message: { type: "string" } },
+              },
+            },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => authController.logout(request, reply)
   );
 }

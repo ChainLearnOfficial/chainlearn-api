@@ -84,10 +84,11 @@ async function handleBadSeqError(submissionId: string, stellarAddress: string): 
 export async function processRewardClaim(
   submissionId: string,
   userId: string,
-  score: number,
 ): Promise<boolean> {
   return withLock(`reward:${submissionId}`, async () => {
-    // Phase 1: Validate and mark as pending in a quick DB transaction
+    // Phase 1: Validate and mark as pending in a quick DB transaction.
+    // Score is always read from the database — never trusted from the caller
+    // so a tampered retry-queue payload cannot elevate a failing score.
     const claimData = await db.transaction(async (tx) => {
       const [submission] = await selectSubmissionForUpdate(tx, submissionId);
 
@@ -103,9 +104,10 @@ export async function processRewardClaim(
       if (!quiz) return null;
       if (submission.score === null) return null;
 
+      const dbScore = submission.score;
       const questions = quiz.questions as Array<unknown> | null;
       if (!questions || questions.length === 0) return null;
-      const percentage = Math.round((score / questions.length) * 100);
+      const percentage = Math.round((dbScore / questions.length) * 100);
       if (percentage < PASSING_PERCENTAGE) {
         return null;
       }
@@ -122,7 +124,7 @@ export async function processRewardClaim(
       return {
         submissionId,
         userId,
-        score,
+        score: dbScore,
         stellarAddress: user.stellarAddress,
         quizId: submission.quizId,
       };
@@ -134,7 +136,7 @@ export async function processRewardClaim(
     }
 
     // Phase 2: Execute Stellar transaction outside DB (no connection held)
-    const proof = createQuizProof(userId, claimData.quizId, score);
+    const proof = createQuizProof(userId, claimData.quizId, claimData.score);
     const txStart = process.hrtime.bigint();
     let txHash: string;
     try {
@@ -143,7 +145,7 @@ export async function processRewardClaim(
         "claim_reward",
         [
           StellarSdk.Address.fromString(claimData.stellarAddress).toScVal(),
-          StellarSdk.nativeToScVal(score, { type: "u32" }),
+          StellarSdk.nativeToScVal(claimData.score, { type: "u32" }),
           StellarSdk.nativeToScVal(Buffer.from(proof.signature, "base64")),
         ],
       );
@@ -317,7 +319,6 @@ export class RewardService {
           await enqueueReward({
             submissionId,
             userId,
-            score: claimData.score,
           });
           rewardClaimsTotal.inc({ status: "queued" });
           auditLog("reward.queued", {

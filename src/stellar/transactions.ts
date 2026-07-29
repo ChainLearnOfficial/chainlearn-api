@@ -41,9 +41,9 @@ export async function invokeContract(
           .setTimeout(60)
           .build();
 
-        tx.sign(keypair);
-
-        // Simulate first to avoid submitting doomed txs
+        // Simulate first to avoid submitting doomed txs (signing before
+        // simulation is wasted — assembleTransaction produces a new tx that
+        // must be signed separately)
         const soroban = getSorobanServer();
         const simResult = await soroban.simulateTransaction(tx);
         if (StellarSdk.rpc.Api.isSimulationError(simResult)) {

@@ -99,36 +99,19 @@ export class UserService {
       throw new NotFoundError("User");
     }
 
-    const [enrolledResult] = await db
-      .select({ value: count() })
-      .from(enrollments)
-      .where(eq(enrollments.userId, userId));
-
-    const [completedResult] = await db
-      .select({ value: count() })
-      .from(enrollments)
-      .where(
-        sql`${enrollments.userId} = ${userId} AND ${enrollments.completedAt} IS NOT NULL`,
-      );
-
-    const [quizScoreResult] = await db
-      .select({
-        total: sql<number>`COALESCE(SUM(${quizSubmissions.score}), 0)`,
-      })
-      .from(quizSubmissions)
-      .where(eq(quizSubmissions.userId, userId));
-
-    const [credResult] = await db
-      .select({ value: count() })
-      .from(credentials)
-      .where(eq(credentials.userId, userId));
-
-    const [rewardsResult] = await db
-      .select({ value: count() })
-      .from(quizSubmissions)
-      .where(
-        sql`${quizSubmissions.userId} = ${userId} AND ${quizSubmissions.rewardClaimed} = true`,
-      );
+    const [
+      [enrolledResult],
+      [completedResult],
+      [quizScoreResult],
+      [credResult],
+      [rewardsResult],
+    ] = await Promise.all([
+      db.select({ value: count() }).from(enrollments).where(eq(enrollments.userId, userId)),
+      db.select({ value: count() }).from(enrollments).where(sql`${enrollments.userId} = ${userId} AND ${enrollments.completedAt} IS NOT NULL`),
+      db.select({ total: sql<number>`COALESCE(SUM(${quizSubmissions.score}), 0)` }).from(quizSubmissions).where(eq(quizSubmissions.userId, userId)),
+      db.select({ value: count() }).from(credentials).where(eq(credentials.userId, userId)),
+      db.select({ value: count() }).from(quizSubmissions).where(sql`${quizSubmissions.userId} = ${userId} AND ${quizSubmissions.rewardClaimed} = true`)
+    ]);
 
     const progress: UserProgress = {
       enrolledCourses: enrolledResult.value,
@@ -138,7 +121,16 @@ export class UserService {
       rewardsClaimed: rewardsResult.value,
     };
 
-    await cacheSet(cacheKeyString, progress, 10);
+    // #149: was 10s, which is shorter than most request intervals for this
+    // endpoint in practice — the cache was rarely hit, making the Redis
+    // round-trip pure overhead on top of the DB query it was meant to
+    // avoid. Every mutation that actually changes a user's progress
+    // (enroll, credential issuance, reward claim) already explicitly calls
+    // cacheDel on this same key, so a longer TTL doesn't risk serving
+    // stale data after those events — it only affects the fallback expiry
+    // for the rare case nothing invalidated it. Matches DEFAULT_TTL in
+    // cache/index.ts.
+    await cacheSet(cacheKeyString, progress, 60);
 
     return progress;
   }

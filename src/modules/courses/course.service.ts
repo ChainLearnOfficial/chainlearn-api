@@ -10,6 +10,7 @@ import {
   cacheDel,
   cacheInvalidatePattern,
   cacheKey,
+  cacheKeyPattern,
 } from "../../cache/index.js";
 import type {
   ListCoursesQuery,

@@ -87,9 +87,11 @@ export function createCircuitBreaker(options: CircuitBreakerOptions): CircuitBre
   let circuitState = CircuitState.Closed;
   let failureCount = 0;
   let lastFailureTime = 0;
+  let halfOpenProbeInFlight = false;
 
   function recordSuccess(): void {
     failureCount = 0;
+    halfOpenProbeInFlight = false;
     if (circuitState !== CircuitState.Closed) {
       logger.info({ label }, "Circuit breaker reset to closed");
       circuitState = CircuitState.Closed;
@@ -99,6 +101,7 @@ export function createCircuitBreaker(options: CircuitBreakerOptions): CircuitBre
   function recordFailure(): void {
     failureCount++;
     lastFailureTime = Date.now();
+    halfOpenProbeInFlight = false;
 
     if (failureCount >= threshold && circuitState === CircuitState.Closed) {
       circuitState = CircuitState.Open;
@@ -134,6 +137,13 @@ export function createCircuitBreaker(options: CircuitBreakerOptions): CircuitBre
       throw new CircuitBreakerOpenError(`Circuit breaker is open for ${label}`);
     }
 
+    if (state === CircuitState.HalfOpen) {
+      if (halfOpenProbeInFlight) {
+        throw new CircuitBreakerOpenError(`Circuit breaker is open for ${label}`);
+      }
+      halfOpenProbeInFlight = true;
+    }
+
     try {
       const result = await fn();
       recordSuccess();
@@ -141,6 +151,8 @@ export function createCircuitBreaker(options: CircuitBreakerOptions): CircuitBre
     } catch (err) {
       if (err instanceof Error && isTransientError(err)) {
         recordFailure();
+      } else {
+        halfOpenProbeInFlight = false;
       }
       throw err;
     }

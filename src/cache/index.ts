@@ -28,6 +28,23 @@ export function cacheKey(
   return `chainlearn:${namespace}:${parts.join(":")}`;
 }
 
+/**
+ * Builds a SCAN/DEL wildcard pattern for cacheInvalidatePattern from the
+ * same namespace/parts shape cacheKey uses, instead of callers hand-writing
+ * a literal string like "chainlearn:courses:list:*" (#150). If cacheKey's
+ * format ever changes (prefix, separator, segment order), every pattern
+ * built this way changes with it — a hardcoded literal would otherwise
+ * silently stop matching anything and invalidation would go quiet with no
+ * error, since cacheInvalidatePattern treats "0 keys matched" the same as
+ * "nothing needed invalidating".
+ */
+export function cacheKeyPattern(
+  namespace: string,
+  ...parts: (string | number)[]
+): string {
+  return `${cacheKey(namespace, ...parts)}${parts.length > 0 ? ":" : ""}*`;
+}
+
 export async function cacheGet<T>(
   namespace: string,
   key: string,

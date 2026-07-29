@@ -70,7 +70,7 @@ export async function requeueReward(job: RetryJob): Promise<void> {
     );
     await db
       .update(quizSubmissions)
-      .set({ rewardFailed: true })
+      .set({ rewardFailed: true, rewardClaimed: true })
       .where(eq(quizSubmissions.id, job.submissionId));
     return;
   }

@@ -1,5 +1,4 @@
 import { initTracing, shutdownTracing } from "./tracing.js";
-initTracing();
 
 import Fastify from "fastify";
 import cors from "@fastify/cors";
@@ -56,6 +55,8 @@ async function processRetryJob(job: RetryJob): Promise<boolean> {
 }
 
 async function buildApp() {
+  initTracing();
+
   const app = Fastify({
     logger: {
       level: config.NODE_ENV === "production" ? "info" : "debug",
@@ -74,7 +75,10 @@ async function buildApp() {
   // true` only matters if auth ever moves to cookies — if it does, add a CSRF
   // token (e.g. @fastify/csrf-protection) and restrict the origin list.
   await app.register(cors, {
-    origin: config.NODE_ENV === "production" ? ["https://chainlearn.io"] : ["http://localhost:3000"],
+    origin:
+      config.NODE_ENV === "production"
+        ? ["https://chainlearn.io"]
+        : ["http://localhost:3000"],
     credentials: true,
   });
 
@@ -94,13 +98,15 @@ async function buildApp() {
 
   // ─── Health Check ───────────────────────────────────────────────────────
   app.get("/health", async (_request, reply) => {
-    const [dbCheck, redisCheck, stellarCheck] = await Promise.allSettled([
-      db.execute(sql`SELECT 1`),
-      redis.ping(),
-      stellarClient.getHorizonServer().root(),
-    ]);
+    const [dbCheck, redisCheck, horizonCheck, sorobanCheck] =
+      await Promise.allSettled([
+        db.execute(sql`SELECT 1`),
+        redis.ping(),
+        stellarClient.getHorizonServer().root(),
+        stellarClient.checkSorobanHealth(),
+      ]);
 
-    const allHealthy = [dbCheck, redisCheck, stellarCheck].every(
+    const allHealthy = [dbCheck, redisCheck, horizonCheck, sorobanCheck].every(
       (c) => c.status === "fulfilled",
     );
 
@@ -113,7 +119,8 @@ async function buildApp() {
       checks: {
         database: dbCheck.status === "fulfilled" ? "ok" : "error",
         redis: redisCheck.status === "fulfilled" ? "ok" : "error",
-        stellar: stellarCheck.status === "fulfilled" ? "ok" : "error",
+        horizon: horizonCheck.status === "fulfilled" ? "ok" : "error",
+        soroban: sorobanCheck.status === "fulfilled" ? "ok" : "error",
       },
     });
   });
@@ -126,13 +133,15 @@ async function buildApp() {
   app.get("/health/live", async () => ({ status: "ok" }));
 
   app.get("/health/ready", async (_request, reply) => {
-    const [dbCheck, redisCheck, stellarCheck] = await Promise.allSettled([
-      db.execute(sql`SELECT 1`),
-      redis.ping(),
-      stellarClient.getHorizonServer().root(),
-    ]);
+    const [dbCheck, redisCheck, horizonCheck, sorobanCheck] =
+      await Promise.allSettled([
+        db.execute(sql`SELECT 1`),
+        redis.ping(),
+        stellarClient.getHorizonServer().root(),
+        stellarClient.checkSorobanHealth(),
+      ]);
 
-    const allHealthy = [dbCheck, redisCheck, stellarCheck].every(
+    const allHealthy = [dbCheck, redisCheck, horizonCheck, sorobanCheck].every(
       (c) => c.status === "fulfilled",
     );
 
@@ -141,7 +150,8 @@ async function buildApp() {
       checks: {
         database: dbCheck.status === "fulfilled" ? "ok" : "error",
         redis: redisCheck.status === "fulfilled" ? "ok" : "error",
-        stellar: stellarCheck.status === "fulfilled" ? "ok" : "error",
+        horizon: horizonCheck.status === "fulfilled" ? "ok" : "error",
+        soroban: sorobanCheck.status === "fulfilled" ? "ok" : "error",
       },
     });
   });

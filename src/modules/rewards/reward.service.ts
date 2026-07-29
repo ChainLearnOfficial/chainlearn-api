@@ -36,7 +36,23 @@ import {
 } from "../../cache/index.js";
 
 const REWARD_AMOUNT = 10; // credits per passed quiz
-const PASSING_PERCENTAGE = 70;
+
+export async function selectSubmissionForUpdate(
+  tx: Parameters<typeof db.transaction>[0] extends (arg: infer T) => any ? T : never,
+  submissionId: string,
+  userId?: string,
+) {
+  const filters = [eq(quizSubmissions.id, submissionId)];
+  if (userId) {
+    filters.push(eq(quizSubmissions.userId, userId));
+  }
+
+  return tx
+    .select()
+    .from(quizSubmissions)
+    .where(and(...filters))
+    .for("update");
+}
 
 /**
  * Helper function to handle bad_seq errors from Stellar transactions.
@@ -66,8 +82,9 @@ async function handleBadSeqError(submissionId: string, stellarAddress: string): 
  * Used by both the direct claim path and the background retry processor.
  * Returns true if the claim succeeded, false if it should be retried.
  *
- * Uses two-phase approach: validate in DB tx, execute Stellar tx outside DB,
- * then update DB. This prevents holding database connections during network calls.
+ * Uses a two-phase approach: validate and mark the submission in a short DB transaction,
+ * execute the Stellar transaction outside the DB transaction, then update the DB once
+ * the on-chain result is known. This prevents holding database connections during network calls.
  */
 export async function processRewardClaim(
   submissionId: string,
@@ -77,13 +94,9 @@ export async function processRewardClaim(
   return withLock(`reward:${submissionId}`, async () => {
     // Phase 1: Validate and mark as pending in a quick DB transaction
     const claimData = await db.transaction(async (tx) => {
-      const [submission] = await tx
-        .select()
-        .from(quizSubmissions)
-        .where(eq(quizSubmissions.id, submissionId))
-        .for("update");
+      const [submission] = await selectSubmissionForUpdate(tx, submissionId);
 
-      if (!submission || submission.rewardClaimed || submission.rewardPending) {
+      if (!submission || submission.rewardClaimed || submission.rewardPending || submission.rewardFailed) {
         return null;
       }
 
@@ -218,16 +231,7 @@ export class RewardService {
     return withLock(`reward:${submissionId}`, async () => {
       // Phase 1: Validate and mark as pending in a quick DB transaction
       const claimData = await db.transaction(async (tx) => {
-        const [submission] = await tx
-          .select()
-          .from(quizSubmissions)
-          .where(
-            and(
-              eq(quizSubmissions.id, submissionId),
-              eq(quizSubmissions.userId, userId),
-            ),
-          )
-          .for("update");
+        const [submission] = await selectSubmissionForUpdate(tx, submissionId, userId);
 
         if (!submission) {
           throw new NotFoundError("Quiz submission");

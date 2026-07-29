@@ -33,8 +33,9 @@ export class CredentialService {
    * Uses distributed locking + database transaction with row-level lock
    * to prevent duplicate NFT minting from concurrent requests.
    *
-   * Uses two-phase approach: validate in DB tx, execute Stellar tx outside DB,
-   * then update DB. This prevents holding database connections during network calls.
+   * Uses a two-phase approach: validate and reserve the mint state in a short DB transaction,
+   * execute the Stellar transaction outside the DB transaction, then persist the result.
+   * This prevents holding database connections during network calls.
    */
   async mint(
     userId: string,
@@ -119,7 +120,7 @@ export class CredentialService {
 
       // Phase 2: Execute Stellar transaction outside DB (no connection held)
       const auth = createMintAuthorization(
-        userId,
+        mintData.stellarAddress,
         courseId,
         mintData.score,
       );

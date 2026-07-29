@@ -35,10 +35,12 @@ export class StellarClient {
     publicKey: string,
   ): Promise<StellarSdk.Horizon.AccountResponse> {
     try {
-      return await circuitBreakerExecute(() =>
-        stellarRetry.execute(() =>
-          withTimeout(this.horizon.loadAccount(publicKey), READ_TIMEOUT_MS),
-        ),
+      return await circuitBreakerExecute(
+        () =>
+          stellarRetry.execute(() =>
+            withTimeout(this.horizon.loadAccount(publicKey), READ_TIMEOUT_MS)
+          ),
+        "read"
       );
     } catch (err) {
       logger.error({ err, publicKey }, "Failed to load Stellar account");

@@ -96,6 +96,21 @@ describe("Stellar Resilience", () => {
         vi.useRealTimers();
       }
     });
+
+    it("should isolate breaker state between read and write operations", async () => {
+      const readFailure = vi.fn().mockRejectedValue(new Error("ECONNREFUSED"));
+      const writeSuccess = vi.fn().mockResolvedValue("write-ok");
+
+      for (let i = 0; i < 5; i++) {
+        try {
+          await circuitBreakerExecute(readFailure, "read");
+        } catch {
+          // expected
+        }
+      }
+
+      await expect(circuitBreakerExecute(writeSuccess, "write")).resolves.toBe("write-ok");
+    });
   });
 
   describe("Timeout", () => {

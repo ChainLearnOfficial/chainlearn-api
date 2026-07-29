@@ -35,10 +35,11 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         tags: ["auth"],
         body: {
           type: "object",
-          required: ["stellarAddress", "signedChallenge"],
+          required: ["stellarAddress", "challengeId", "signedChallenge"],
           properties: {
             stellarAddress: { type: "string" },
-            signedChallenge: { type: "string" },
+            challengeId: { type: "string", format: "uuid" },
+            signedChallenge: { type: "string", maxLength: 10000 },
           },
         },
       } as FastifySchema,

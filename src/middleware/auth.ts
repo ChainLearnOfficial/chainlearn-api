@@ -3,48 +3,56 @@ import { UnauthorizedError } from "../utils/errors.js";
 import { db } from "../config/database.js";
 import { users } from "../database/schema.js";
 import { eq } from "drizzle-orm";
+import { logger } from "../utils/logger.js";
 
 /**
  * Extracts and verifies the JWT token, then loads the authenticated user.
  * Sets `request.authUser` on success.
+ *
+ * Only JWT verification errors are converted to 401 — infrastructure errors
+ * (e.g. database outage) propagate so the caller receives a 500, not a
+ * misleading "invalid token" response.
  */
 export async function authGuard(
   request: FastifyRequest,
   reply: FastifyReply
 ): Promise<void> {
+  let decoded: { sub: string; stellarAddress: string };
   try {
-    const decoded = await request.jwtVerify<{
-      sub: string; // user id
+    decoded = await request.jwtVerify<{
+      sub: string;
       stellarAddress: string;
     }>();
-
-    const user = await db.query.users.findFirst({
-      where: eq(users.id, decoded.sub),
-    });
-
-    if (!user) {
-      throw new UnauthorizedError("User no longer exists");
-    }
-
-    (request as AuthenticatedRequest).authUser = {
-      id: user.id,
-      stellarAddress: user.stellarAddress,
-    };
-  } catch (err) {
-    if (err instanceof UnauthorizedError) throw err;
+  } catch {
     throw new UnauthorizedError("Invalid or expired token");
   }
+
+  const user = await db.query.users.findFirst({
+    where: eq(users.id, decoded.sub),
+  });
+
+  if (!user) {
+    throw new UnauthorizedError("User no longer exists");
+  }
+
+  (request as AuthenticatedRequest).authUser = {
+    id: user.id,
+    stellarAddress: user.stellarAddress,
+  };
 }
 
-/** Optional auth — populates user if token present, but does not reject. */
+/** Optional auth — populates user if token present, but does not reject.
+ *  UnauthorizedError is swallowed; infrastructure errors propagate. */
 export async function optionalAuth(
   request: FastifyRequest,
   _reply: FastifyReply
 ): Promise<void> {
   try {
     await authGuard(request, _reply);
-  } catch {
-    // silently ignore — endpoint is accessible without auth
+  } catch (err) {
+    if (err instanceof UnauthorizedError) return;
+    logger.warn({ err }, "optionalAuth: unexpected infrastructure error");
+    throw err;
   }
 }
 

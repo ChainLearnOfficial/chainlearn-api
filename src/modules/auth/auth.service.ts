@@ -48,9 +48,13 @@ export class AuthService {
 
     const challengeEnvelope = transaction.toEnvelope().toXDR("base64");
 
-    // Store challenge in Redis for verification
+    // A random, per-request ID makes the Redis key unpredictable so an
+    // attacker cannot overwrite or delete a pending challenge by issuing a
+    // new createChallenge request for the same address (DoS via key clobber).
+    const challengeId = crypto.randomUUID();
+
     await redis.setex(
-      `${CHALLENGE_PREFIX}${stellarAddress}`,
+      `${CHALLENGE_PREFIX}${stellarAddress}:${challengeId}`,
       CHALLENGE_TTL_SECONDS,
       JSON.stringify({
         challengeEnvelope,
@@ -60,10 +64,11 @@ export class AuthService {
       })
     );
 
-    logger.info({ stellarAddress }, "Challenge created");
+    logger.info({ stellarAddress, challengeId }, "Challenge created");
 
     return {
       challenge: challengeEnvelope,
+      challengeId,
       networkPassphrase: getNetworkPassphrase(),
     };
   }
@@ -74,11 +79,13 @@ export class AuthService {
    */
   async verifyChallenge(
     stellarAddress: string,
+    challengeId: string,
     signedChallenge: string
   ): Promise<AuthResponse> {
-    // Atomically retrieve and delete the challenge (single-use, must not be consumed yet)
+    // Atomically retrieve and delete the challenge (single-use, must not be consumed yet).
+    // The key includes the per-request challengeId so it cannot be guessed or clobbered.
     const challengeData = await redis.getdel(
-      `${CHALLENGE_PREFIX}${stellarAddress}`
+      `${CHALLENGE_PREFIX}${stellarAddress}:${challengeId}`
     );
     if (!challengeData) {
       throw new UnauthorizedError("Challenge expired or not found");

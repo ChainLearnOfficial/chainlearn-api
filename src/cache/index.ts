@@ -2,6 +2,11 @@ import { redis } from "../config/redis.js";
 import { logger } from "../utils/logger.js";
 import { Counter } from "prom-client";
 
+// In-process map used to coalesce concurrent cache-miss fetches for the same
+// key so only one call reaches the DB/source (thundering-herd protection).
+// The promise is stored while the fetch is in flight; all waiters share it.
+const inFlightFetches = new Map<string, Promise<unknown>>();
+
 const DEFAULT_TTL = 60;
 
 export const cacheHits = new Counter({
@@ -76,6 +81,48 @@ export async function cacheSet<T>(
   } catch (err) {
     logger.warn({ err, key }, "Cache write failed");
   }
+}
+
+/**
+ * #217: Cache-aside with thundering-herd protection.
+ *
+ * Returns the cached value when present. On a miss, exactly ONE concurrent
+ * caller executes `fetchFn`; all other callers for the same key await the
+ * same in-flight promise so the backing store receives only one request
+ * regardless of how many requests arrive simultaneously.
+ *
+ * @param namespace - Prometheus label and key segment.
+ * @param key       - Full Redis key (built with cacheKey()).
+ * @param fetchFn   - Async function that fetches the value from the source.
+ * @param ttl       - Cache TTL in seconds (default: DEFAULT_TTL).
+ */
+export async function cacheGetOrSet<T>(
+  namespace: string,
+  key: string,
+  fetchFn: () => Promise<T>,
+  ttl: number = DEFAULT_TTL,
+): Promise<T> {
+  const cached = await cacheGet<T>(namespace, key);
+  if (cached !== null) return cached;
+
+  // Another request for this key is already in flight — join it.
+  const existing = inFlightFetches.get(key);
+  if (existing) {
+    return existing as Promise<T>;
+  }
+
+  // We are the winner: fetch and populate the cache.
+  const fetching = fetchFn()
+    .then(async (value) => {
+      await cacheSet(key, value, ttl);
+      return value;
+    })
+    .finally(() => {
+      inFlightFetches.delete(key);
+    });
+
+  inFlightFetches.set(key, fetching);
+  return fetching;
 }
 
 /**

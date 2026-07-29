@@ -33,7 +33,8 @@ export async function invokeContract(
         const seqNum = await sequenceCache.getNextSequence(keypair.publicKey());
         const account = new StellarSdk.Account(keypair.publicKey(), seqNum);
 
-        const tx = new StellarSdk.TransactionBuilder(account, {
+        // Build an initial transaction for simulation; fee doesn't matter here.
+        const txForSim = new StellarSdk.TransactionBuilder(account, {
           fee: StellarSdk.BASE_FEE,
           networkPassphrase: getNetworkPassphrase(),
         })
@@ -45,14 +46,36 @@ export async function invokeContract(
         // simulation is wasted — assembleTransaction produces a new tx that
         // must be signed separately)
         const soroban = getSorobanServer();
-        const simResult = await soroban.simulateTransaction(tx);
+        const simResult = await soroban.simulateTransaction(txForSim);
         if (StellarSdk.rpc.Api.isSimulationError(simResult)) {
           logger.error({ error: simResult.error }, "Simulation failed");
           throw new StellarError(`Simulation failed: ${simResult.error}`);
         }
 
+        // #218: Compute the total fee from the simulation result.
+        // minResourceFee covers Soroban resource costs; BASE_FEE covers
+        // ledger inclusion. A 20 % buffer absorbs fee-market fluctuations
+        // between simulation and submission without over-paying significantly.
+        const resourceFee = BigInt(
+          (simResult as StellarSdk.rpc.Api.SimulateTransactionSuccessResponse)
+            .minResourceFee ?? "0",
+        );
+        const inclusionFee = BigInt(StellarSdk.BASE_FEE);
+        const totalFee = String(
+          inclusionFee + (resourceFee * 120n) / 100n,
+        );
+
+        // Rebuild the transaction with the computed fee before assembling.
+        const txWithFee = new StellarSdk.TransactionBuilder(account, {
+          fee: totalFee,
+          networkPassphrase: getNetworkPassphrase(),
+        })
+          .addOperation(contract.call(method, ...args))
+          .setTimeout(60)
+          .build();
+
         // Prepare the transaction with the simulation results
-        const preparedTx = StellarSdk.rpc.assembleTransaction(tx, simResult).build();
+        const preparedTx = StellarSdk.rpc.assembleTransaction(txWithFee, simResult).build();
         preparedTx.sign(keypair);
 
         const result = await stellarClient.submitTransaction(preparedTx);

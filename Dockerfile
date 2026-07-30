@@ -27,7 +27,8 @@ ENV NODE_ENV=production
 RUN addgroup -g 1001 -S nodejs && adduser -S nodejs -u 1001
 COPY --from=prune /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
-COPY package.json ./
+COPY package.json drizzle.config.ts ./
+COPY src/database/migrations ./src/database/migrations
 RUN chown -R nodejs:nodejs /app
 USER nodejs
 EXPOSE 3000

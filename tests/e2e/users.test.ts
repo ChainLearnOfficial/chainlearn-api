@@ -42,8 +42,8 @@ describe("Users API", () => {
         headers: { authorization: `Bearer ${token}` },
       });
 
-      // May return 200 (success), 401 (auth rejected), or 500 (DB unavailable)
-      expect([200, 401, 500]).toContain(response.statusCode);
+      // May return 200 (success) or 401 (auth rejected)
+      expect([200, 401]).toContain(response.statusCode);
       if (response.statusCode === 200) {
         const body = JSON.parse(response.payload);
         expect(body.success).toBe(true);
@@ -60,7 +60,7 @@ describe("Users API", () => {
         headers: { authorization: `Bearer ${token}` },
       });
 
-      expect([200, 401, 500]).toContain(response.statusCode);
+      expect([200, 401]).toContain(response.statusCode);
       if (response.statusCode === 200) {
         const body = JSON.parse(response.payload);
         expect(body.data.stellarAddress).toBe(
@@ -91,7 +91,7 @@ describe("Users API", () => {
         payload: { displayName: "Alice ChainLearner" },
       });
 
-      expect([200, 401, 500]).toContain(response.statusCode);
+      expect([200, 401]).toContain(response.statusCode);
       if (response.statusCode === 200) {
         const body = JSON.parse(response.payload);
         expect(body.success).toBe(true);
@@ -112,7 +112,7 @@ describe("Users API", () => {
         },
       });
 
-      expect([200, 401, 500]).toContain(response.statusCode);
+      expect([200, 401]).toContain(response.statusCode);
       if (response.statusCode === 200) {
         const body = JSON.parse(response.payload);
         expect(body.success).toBe(true);
@@ -135,8 +135,8 @@ describe("Users API", () => {
         payload: { background: "" },
       });
 
-      // May return 400 (validation error), 401 (auth rejected), or 500 (DB unavailable)
-      expect([400, 401, 500]).toContain(response.statusCode);
+      // May return 400 (validation error) or 401 (auth rejected)
+      expect([400, 401]).toContain(response.statusCode);
     });
   });
 
@@ -159,7 +159,7 @@ describe("Users API", () => {
         headers: { authorization: `Bearer ${token}` },
       });
 
-      expect([200, 401, 500]).toContain(response.statusCode);
+      expect([200, 401]).toContain(response.statusCode);
       if (response.statusCode === 200) {
         const body = JSON.parse(response.payload);
         expect(body.success).toBe(true);

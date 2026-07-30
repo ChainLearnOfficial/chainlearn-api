@@ -115,8 +115,8 @@ describe("Rewards API", () => {
         headers: { authorization: `Bearer ${token}` },
       });
 
-      // May return 200 (success), 401 (auth rejected), or 500 (DB unavailable)
-      expect([200, 401, 500]).toContain(response.statusCode);
+      // May return 200 (success) or 401 (auth rejected)
+      expect([200, 401]).toContain(response.statusCode);
       if (response.statusCode === 200) {
         const body = JSON.parse(response.payload);
         expect(body.success).toBe(true);

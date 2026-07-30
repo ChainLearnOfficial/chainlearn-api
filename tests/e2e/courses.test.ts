@@ -28,16 +28,14 @@ describe("Courses API", () => {
         url: "/api/v1/courses",
       });
 
-      expect([200, 500]).toContain(response.statusCode);
-      if (response.statusCode === 200) {
-        const body = JSON.parse(response.payload);
-        expect(body.success).toBe(true);
-        expect(Array.isArray(body.data)).toBe(true);
-        expect(body.pagination).toBeDefined();
-        expect(typeof body.pagination.page).toBe("number");
-        expect(typeof body.pagination.limit).toBe("number");
-        expect(typeof body.pagination.total).toBe("number");
-      }
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.payload);
+      expect(body.success).toBe(true);
+      expect(Array.isArray(body.data)).toBe(true);
+      expect(body.pagination).toBeDefined();
+      expect(typeof body.pagination.page).toBe("number");
+      expect(typeof body.pagination.limit).toBe("number");
+      expect(typeof body.pagination.total).toBe("number");
     });
 
     it("should filter by difficulty query param", { timeout: 10000 }, async () => {
@@ -46,7 +44,7 @@ describe("Courses API", () => {
         url: "/api/v1/courses?difficulty=beginner",
       });
 
-      expect([200, 400, 500]).toContain(response.statusCode);
+      expect([200, 400]).toContain(response.statusCode);
       if (response.statusCode === 200) {
         const body = JSON.parse(response.payload);
         expect(body.success).toBe(true);
@@ -62,13 +60,10 @@ describe("Courses API", () => {
         url: "/api/v1/courses",
       });
 
-      // May return 500 if Redis/DB unavailable
-      expect([200, 500]).toContain(response.statusCode);
-      if (response.statusCode === 200) {
-        const body = JSON.parse(response.payload);
-        for (const course of body.data) {
-          expect(typeof course.enrolledCount).toBe("number");
-        }
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.payload);
+      for (const course of body.data) {
+        expect(typeof course.enrolledCount).toBe("number");
       }
     });
 
@@ -81,7 +76,7 @@ describe("Courses API", () => {
         headers: { authorization: `Bearer ${token}` },
       });
 
-      expect([200, 401, 500]).toContain(response.statusCode);
+      expect([200, 401]).toContain(response.statusCode);
       if (response.statusCode === 200) {
         const body = JSON.parse(response.payload);
         for (const course of body.data) {
@@ -109,7 +104,7 @@ describe("Courses API", () => {
             url: `/api/v1/courses/${courseId}`,
           });
 
-          expect([200, 404, 500]).toContain(response.statusCode);
+          expect([200, 404]).toContain(response.statusCode);
           if (response.statusCode === 200) {
             const body = JSON.parse(response.payload);
             expect(body.success).toBe(true);
@@ -126,7 +121,7 @@ describe("Courses API", () => {
         url: "/api/v1/courses/00000000-0000-0000-0000-000000000000",
       });
 
-      expect([404, 500]).toContain(response.statusCode);
+      expect(response.statusCode).toBe(404);
     });
 
     it("should include enrollment status when authenticated", async () => {
@@ -148,7 +143,7 @@ describe("Courses API", () => {
             headers: { authorization: `Bearer ${token}` },
           });
 
-          expect([200, 401, 404, 500]).toContain(response.statusCode);
+          expect([200, 401, 404]).toContain(response.statusCode);
           if (response.statusCode === 200) {
             const body = JSON.parse(response.payload);
             expect(typeof body.data.isEnrolled).toBe("boolean");
@@ -187,8 +182,8 @@ describe("Courses API", () => {
             headers: { authorization: `Bearer ${token}` },
           });
 
-          // 201 (enrolled), 409 (already enrolled), 401 (auth rejected), 500 (DB unavailable)
-          expect([201, 401, 409, 500]).toContain(response.statusCode);
+          // 201 (enrolled), 409 (already enrolled), 401 (auth rejected)
+          expect([201, 401, 409]).toContain(response.statusCode);
           if (response.statusCode === 201) {
             const body = JSON.parse(response.payload);
             expect(body.success).toBe(true);
@@ -225,7 +220,7 @@ describe("Courses API", () => {
             headers: { authorization: `Bearer ${token}` },
           });
 
-          expect([401, 409, 500]).toContain(response.statusCode);
+          expect([401, 409]).toContain(response.statusCode);
           if (response.statusCode === 409) {
             const body = JSON.parse(response.payload);
             expect(body.error).toBe("CONFLICT");
@@ -243,7 +238,7 @@ describe("Courses API", () => {
         headers: { authorization: `Bearer ${token}` },
       });
 
-      expect([401, 404, 500]).toContain(response.statusCode);
+      expect([401, 404]).toContain(response.statusCode);
       if (response.statusCode === 404) {
         const body = JSON.parse(response.payload);
         expect(body.error).toBe("NOT_FOUND");

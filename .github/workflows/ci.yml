@@ -71,7 +71,18 @@ jobs:
         run: npm ci
       - run: npm run db:generate
       - run: npm run db:migrate
-      - run: npm test
+      # Coverage thresholds live in vitest.config.ts — vitest exits non-zero
+      # when any of them regress, so this step is the quality gate.
+      - name: Run tests with coverage
+        run: npm test -- --coverage
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage/
+          retention-days: 14
+          if-no-files-found: error
 
   docker-build:
     name: Docker Build

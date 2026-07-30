@@ -31,6 +31,10 @@ export const users = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
+    // Maintained by the `update_users_updated_at` BEFORE UPDATE trigger
+    // (migration 0009), not by the application. Do not set this column
+    // manually — the trigger overwrites it with NOW() on every UPDATE so that
+    // credit changes and other non-profile writes are reflected too (#229).
     updatedAt: timestamp("updated_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -57,6 +61,13 @@ export const courses = pgTable(
   (table) => [
     index("idx_courses_difficulty").on(table.difficulty),
     index("idx_courses_is_active").on(table.isActive),
+    // Matches the listCourses access pattern (WHERE is_active = true
+    // ORDER BY created_at DESC) so the ordering is served by the index
+    // instead of a sort step (#230).
+    index("idx_courses_active_created").on(
+      table.isActive,
+      sql`${table.createdAt} DESC`
+    ),
   ]
 );
 

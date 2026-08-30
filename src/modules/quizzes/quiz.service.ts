@@ -18,6 +18,7 @@ import { quizSubmissionsTotal } from "../../metrics/index.js";
 import {
   PASSING_PERCENTAGE,
   MAX_RETRIES_PER_MODULE_PER_DAY,
+  MAX_QUIZ_GENERATIONS_PER_MODULE_PER_HOUR,
   type GenerateQuizBody,
   type SubmitQuizBody,
   type QuizWithQuestions,
@@ -49,6 +50,8 @@ export class QuizService {
     if (!enrollment) {
       throw new ForbiddenError("Must be enrolled in the course to take a quiz");
     }
+
+    await this.assertGenerationAllowed(userId, data.courseId, data.moduleId);
 
     // Check for existing quiz for this user/module
     const existing = await db.query.quizzes.findFirst({
@@ -364,6 +367,58 @@ export class QuizService {
         createdAt: newQuiz.createdAt,
       };
     });
+  }
+
+  /**
+   * Enforces MAX_QUIZ_GENERATIONS_PER_MODULE_PER_HOUR using a Redis counter
+   * keyed per user/course/module with a rolling one-hour TTL, mirroring
+   * assertRetryAllowed's pattern below (#291). Keying on
+   * user+course+module (not just user) means the limit is scoped per
+   * module — a user working through many modules isn't penalized by a
+   * shared global counter, but hammering generateQuiz for one module is
+   * capped independently of activity on any other module.
+   */
+  private async assertGenerationAllowed(
+    userId: string,
+    courseId: string,
+    moduleId: string
+  ): Promise<void> {
+    const key = `chainlearn:quiz:generate-count:${userId}:${courseId}:${moduleId}`;
+    const windowSeconds = 60 * 60;
+
+    let count: number;
+    try {
+      count = await redis.incr(key);
+      if (count === 1) {
+        // First generation of the window for this module — start the TTL.
+        await redis.expire(key, windowSeconds);
+      }
+    } catch (err) {
+      // Redis unavailable: fail open rather than blocking generation
+      // entirely, consistent with assertRetryAllowed's degrade-on-Redis-
+      // outage behavior.
+      logger.error({ err, userId, courseId, moduleId }, "Generation-count check failed, proceeding without rate limit");
+      return;
+    }
+
+    if (count > MAX_QUIZ_GENERATIONS_PER_MODULE_PER_HOUR) {
+      let retryAfterSeconds = windowSeconds;
+      try {
+        const ttl = await redis.ttl(key);
+        if (ttl > 0) {
+          retryAfterSeconds = ttl;
+        }
+      } catch (err) {
+        // Fall back to the full window if TTL can't be read — still a
+        // correct (if conservative) Retry-After value.
+        logger.warn({ err, userId, courseId, moduleId }, "Failed to read generation-count TTL for Retry-After");
+      }
+
+      throw new RateLimitError(
+        `Maximum ${MAX_QUIZ_GENERATIONS_PER_MODULE_PER_HOUR} quiz generations per module per hour reached`,
+        retryAfterSeconds
+      );
+    }
   }
 
   /**

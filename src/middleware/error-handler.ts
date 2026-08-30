@@ -4,7 +4,7 @@ import type {
   FastifyRequest,
   FastifyReply,
 } from "fastify";
-import { AppError, ValidationError } from "../utils/errors.js";
+import { AppError, ValidationError, RateLimitError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 import { config } from "../config/index.js";
 import { ZodError } from "zod";
@@ -61,6 +61,12 @@ export function registerErrorHandler(app: FastifyInstance): void {
         };
         if (error instanceof ValidationError) {
           body.details = error.errors;
+        }
+        if (error instanceof RateLimitError && error.retryAfterSeconds !== undefined) {
+          // Set the standard Retry-After header (RFC 9110 §10.2.3) so
+          // clients/proxies can back off automatically instead of just
+          // reading it out of the JSON body.
+          reply.header("Retry-After", String(error.retryAfterSeconds));
         }
         return reply.status(error.statusCode).send(body);
       }

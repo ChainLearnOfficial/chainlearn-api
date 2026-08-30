@@ -36,6 +36,24 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
               items: { type: "string", minLength: 1, maxLength: 50 },
               maxItems: 20,
             },
+            courseModules: {
+              type: "array",
+              maxItems: 100,
+              items: {
+                type: "object",
+                required: ["id", "title"],
+                properties: {
+                  id: { type: "string", minLength: 1, maxLength: 100 },
+                  title: { type: "string", minLength: 1, maxLength: 255 },
+                  description: { type: "string", maxLength: 1000 },
+                  estimatedDurationMinutes: {
+                    type: "integer",
+                    minimum: 1,
+                    maximum: 1440,
+                  },
+                },
+              },
+            },
             contentHash: { type: "string", maxLength: 64 },
           },
         },
@@ -71,6 +89,24 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
               type: "array",
               items: { type: "string", minLength: 1, maxLength: 50 },
               maxItems: 20,
+            },
+            courseModules: {
+              type: "array",
+              maxItems: 100,
+              items: {
+                type: "object",
+                required: ["id", "title"],
+                properties: {
+                  id: { type: "string", minLength: 1, maxLength: 100 },
+                  title: { type: "string", minLength: 1, maxLength: 255 },
+                  description: { type: "string", maxLength: 1000 },
+                  estimatedDurationMinutes: {
+                    type: "integer",
+                    minimum: 1,
+                    maximum: 1440,
+                  },
+                },
+              },
             },
             contentHash: { type: "string", maxLength: 64 },
             isActive: { type: "boolean" },

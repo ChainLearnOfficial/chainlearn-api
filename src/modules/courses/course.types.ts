@@ -19,11 +19,19 @@ export const popularCoursesQuerySchema = z.object({
 
 // ─── Admin Request Schemas ──────────────────────────────────────────────────
 
+export const courseModuleSchema = z.object({
+  id: z.string().min(1).max(100),
+  title: z.string().min(1).max(255),
+  description: z.string().max(1000).optional(),
+  estimatedDurationMinutes: z.coerce.number().int().positive().max(1440).optional(),
+});
+
 export const createCourseSchema = z.object({
   title: z.string().min(1).max(255),
   description: z.string().min(1),
   difficulty: z.enum(["beginner", "intermediate", "advanced"]).default("beginner"),
   tags: z.array(z.string().min(1).max(50)).max(20).default([]),
+  courseModules: z.array(courseModuleSchema).max(100).optional(),
   contentHash: z.string().max(64).optional(),
 });
 
@@ -33,6 +41,7 @@ export const updateCourseSchema = z
     description: z.string().min(1).optional(),
     difficulty: z.enum(["beginner", "intermediate", "advanced"]).optional(),
     tags: z.array(z.string().min(1).max(50)).max(20).optional(),
+    courseModules: z.array(courseModuleSchema).max(100).optional(),
     contentHash: z.string().max(64).optional(),
     isActive: z.boolean().optional(),
   })
@@ -67,6 +76,8 @@ export interface CourseDetail extends CourseSummary {
 export interface CourseModule {
   id: string;
   title: string;
+  description: string | null;
+  estimatedDurationMinutes: number | null;
   order: number;
 }
 
@@ -74,13 +85,18 @@ export interface CourseStats {
   totalCourses: number;
   enrollmentsByDifficulty: Record<"beginner" | "intermediate" | "advanced", number>;
   averageEnrollmentsPerCourse: number;
+}
+
 export interface AdminCourse {
   id: string;
   title: string;
   description: string;
   difficulty: string;
   tags: string[];
+  courseModules: CourseModuleMetadata[];
   contentHash: string | null;
   isActive: boolean;
   createdAt: Date;
 }
+
+export type CourseModuleMetadata = z.infer<typeof courseModuleSchema>;

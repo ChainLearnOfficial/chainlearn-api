@@ -57,6 +57,12 @@ export const courses = pgTable(
       .default("beginner"),
     contentHash: varchar("content_hash", { length: 64 }),
     tags: jsonb("tags").$type<string[]>().notNull().default([]),
+    courseModules: jsonb("course_modules").$type<Array<{
+      id: string;
+      title: string;
+      description?: string;
+      estimatedDurationMinutes?: number;
+    }>>(),
     isActive: boolean("is_active").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()

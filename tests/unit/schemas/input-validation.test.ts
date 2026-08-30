@@ -1,7 +1,11 @@
 import { describe, it, expect } from "vitest";
 import { updateProfileSchema } from "../../../src/modules/users/user.types.js";
 import { submitQuizSchema } from "../../../src/modules/quizzes/quiz.types.js";
-import { listCoursesSchema } from "../../../src/modules/courses/course.types.js";
+import {
+  createCourseSchema,
+  listCoursesSchema,
+} from "../../../src/modules/courses/course.types.js";
+import { batchMintCredentialSchema } from "../../../src/modules/credentials/credential.types.js";
 
 describe("listCoursesSchema", () => {
   it("accepts an optional search term", () => {
@@ -77,5 +81,65 @@ describe("submitQuizSchema", () => {
       answers: [{ questionId: "x".repeat(101), selectedIndex: 0 }],
     });
     expect(result.success).toBe(false);
+  });
+});
+
+describe("createCourseSchema", () => {
+  it("accepts optional course module metadata", () => {
+    const parsed = createCourseSchema.parse({
+      title: "Stellar Basics",
+      description: "Learn Stellar",
+      courseModules: [
+        {
+          id: "intro",
+          title: "Introduction",
+          description: "Network foundations",
+          estimatedDurationMinutes: 15,
+        },
+      ],
+    });
+
+    expect(parsed.courseModules?.[0]).toMatchObject({
+      id: "intro",
+      title: "Introduction",
+      estimatedDurationMinutes: 15,
+    });
+  });
+
+  it("rejects invalid course module duration", () => {
+    const result = createCourseSchema.safeParse({
+      title: "Stellar Basics",
+      description: "Learn Stellar",
+      courseModules: [
+        {
+          id: "intro",
+          title: "Introduction",
+          estimatedDurationMinutes: 0,
+        },
+      ],
+    });
+
+    expect(result.success).toBe(false);
+  });
+});
+
+describe("batchMintCredentialSchema", () => {
+  it("accepts course/submission pairs", () => {
+    const result = batchMintCredentialSchema.safeParse({
+      submissions: [
+        {
+          courseId: "00000000-0000-0000-0000-000000000001",
+          submissionId: "00000000-0000-0000-0000-000000000002",
+        },
+      ],
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects an empty batch", () => {
+    expect(
+      batchMintCredentialSchema.safeParse({ submissions: [] }).success,
+    ).toBe(false);
   });
 });

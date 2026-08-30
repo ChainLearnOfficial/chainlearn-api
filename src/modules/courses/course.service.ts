@@ -21,6 +21,8 @@ import type {
   CourseStats,
   AdminCourse,
   CreateCourseBody,
+  CourseModule,
+  CourseModuleMetadata,
   UpdateCourseBody,
 } from "./course.types.js";
 
@@ -232,12 +234,33 @@ export class CourseService {
         .from(enrollments)
         .where(eq(enrollments.courseId, courseId));
 
-      const moduleRows = await db
-        .select({ moduleId: quizzes.moduleId })
-        .from(quizzes)
-        .where(eq(quizzes.courseId, courseId))
-        .groupBy(quizzes.moduleId)
-        .orderBy(quizzes.moduleId);
+      const moduleMetadata = this.normalizeCourseModules(course.courseModules);
+      let modules: CourseModule[];
+
+      if (moduleMetadata.length > 0) {
+        modules = moduleMetadata.map((module, i) => ({
+          id: module.id,
+          title: module.title,
+          description: module.description ?? null,
+          estimatedDurationMinutes: module.estimatedDurationMinutes ?? null,
+          order: i + 1,
+        }));
+      } else {
+        const moduleRows = await db
+          .select({ moduleId: quizzes.moduleId })
+          .from(quizzes)
+          .where(eq(quizzes.courseId, courseId))
+          .groupBy(quizzes.moduleId)
+          .orderBy(quizzes.moduleId);
+
+        modules = moduleRows.map((row, i) => ({
+          id: row.moduleId,
+          title: row.moduleId,
+          description: null,
+          estimatedDurationMinutes: null,
+          order: i + 1,
+        }));
+      }
 
       cachedDetail = {
         id: course.id,
@@ -247,11 +270,7 @@ export class CourseService {
         isActive: course.isActive,
         enrolledCount: countResult?.value ?? 0,
         contentHash: course.contentHash,
-        modules: moduleRows.map((row, i) => ({
-          id: row.moduleId,
-          title: row.moduleId,
-          order: i + 1,
-        })),
+        modules,
         createdAt: course.createdAt,
       };
 
@@ -422,6 +441,7 @@ export class CourseService {
     const invalidations = await Promise.allSettled([
       cacheInvalidatePattern(cacheKeyPattern("courses", "list")),
       cacheInvalidatePattern(cacheKeyPattern("courses", "popular")),
+      cacheDel(cacheKey("courses", "stats")),
       ...(courseId ? [cacheDel(cacheKey("courses", "detail", courseId))] : []),
     ]);
     const failed = invalidations.filter((r) => r.status === "rejected");
@@ -440,6 +460,7 @@ export class CourseService {
       description: row.description,
       difficulty: row.difficulty,
       tags: row.tags ?? [],
+      courseModules: this.normalizeCourseModules(row.courseModules),
       contentHash: row.contentHash,
       isActive: row.isActive,
       createdAt: row.createdAt,
@@ -454,6 +475,7 @@ export class CourseService {
         description: data.description,
         difficulty: data.difficulty,
         tags: data.tags,
+        courseModules: data.courseModules,
         contentHash: data.contentHash,
       })
       .returning();
@@ -501,6 +523,21 @@ export class CourseService {
     await this.invalidateCourseCaches(courseId);
     await auditLog("course.deleted", { courseId });
     logger.info({ courseId }, "Course soft-deleted");
+  }
+
+  private normalizeCourseModules(
+    modules: CourseModuleMetadata[] | null,
+  ): CourseModuleMetadata[] {
+    if (!Array.isArray(modules)) return [];
+
+    return modules
+      .filter((module) => module.id && module.title)
+      .map((module) => ({
+        id: module.id,
+        title: module.title,
+        description: module.description,
+        estimatedDurationMinutes: module.estimatedDurationMinutes,
+      }));
   }
 }
 

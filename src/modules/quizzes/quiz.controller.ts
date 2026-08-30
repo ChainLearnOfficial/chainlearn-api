@@ -1,7 +1,12 @@
 import type { FastifyRequest, FastifyReply } from "fastify";
 import { quizService } from "./quiz.service.js";
 import type { AuthenticatedRequest } from "../../middleware/auth.js";
-import type { GenerateQuizBody, SubmitQuizBody, QuizIdParams } from "./quiz.types.js";
+import type {
+  GenerateQuizBody,
+  SubmitQuizBody,
+  QuizIdParams,
+  QuizStatsQuery,
+} from "./quiz.types.js";
 
 export class QuizController {
   /**
@@ -48,6 +53,21 @@ export class QuizController {
     const quiz = await quizService.retryQuiz(authUser.id, id);
 
     reply.status(201).send({ success: true, data: quiz });
+  }
+
+  /**
+   * GET /api/quizzes/stats
+   * Aggregate quiz statistics — average score, pass rate, total submissions.
+   * No authentication required.
+   */
+  async stats(
+    request: FastifyRequest<{ Querystring: QuizStatsQuery }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { courseId } = request.query;
+    const stats = await quizService.getQuizStats(courseId);
+
+    reply.send({ success: true, data: stats });
   }
 }
 

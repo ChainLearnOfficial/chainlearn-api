@@ -13,6 +13,13 @@ import {
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
+export interface CourseModuleDefinition {
+  id: string;
+  title: string;
+  description: string;
+  order: number;
+}
+
 // ─── Users ──────────────────────────────────────────────────────────────────
 
 export const users = pgTable(
@@ -56,6 +63,13 @@ export const courses = pgTable(
       .default("beginner"),
     contentHash: varchar("content_hash", { length: 64 }),
     tags: jsonb("tags").$type<string[]>().notNull().default([]),
+    // Admin-defined module structure (#304): id/title/description/order.
+    // Independent of the moduleId strings quizzes reference — this is the
+    // authoring-time definition, not derived from existing quizzes.
+    modules: jsonb("modules")
+      .$type<CourseModuleDefinition[]>()
+      .notNull()
+      .default([]),
     isActive: boolean("is_active").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()

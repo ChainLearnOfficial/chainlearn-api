@@ -13,6 +13,7 @@ import { logger } from "./utils/logger.js";
 import { registry, setupInfraMetrics } from "./metrics/index.js";
 import { registerMetricsHook } from "./metrics/fastify-hook.js";
 import { registerErrorHandler } from "./middleware/error-handler.js";
+import { registerRequestTimeout } from "./middleware/timeout.js";
 import { rateLimitOptions } from "./middleware/rate-limit.js";
 import { authGuard } from "./middleware/auth.js";
 import { db } from "./config/database.js";
@@ -166,6 +167,9 @@ async function buildApp() {
 
   // ─── Error Handler ──────────────────────────────────────────────────────
   registerErrorHandler(app);
+
+  // ─── Request Timeout ────────────────────────────────────────────────────
+  registerRequestTimeout(app);
 
   // ─── Health Check ───────────────────────────────────────────────────────
   app.get("/health", async (_request, reply) => {

@@ -96,3 +96,5 @@ jobs:
           context: .
           push: false
           tags: chainlearn-api:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

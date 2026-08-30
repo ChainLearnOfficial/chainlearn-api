@@ -8,6 +8,10 @@ import { z } from "zod";
 // previously each defined its own copy, which could silently drift apart.
 export const PASSING_PERCENTAGE = 70;
 
+// Max number of times a user may retry a quiz for the same module within a
+// single calendar day (#295).
+export const MAX_RETRIES_PER_MODULE_PER_DAY = 3;
+
 // ─── Request Schemas ────────────────────────────────────────────────────────
 
 export const generateQuizSchema = z.object({

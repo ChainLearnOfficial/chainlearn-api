@@ -1,5 +1,5 @@
 import type { FastifyRequest, FastifyReply } from "fastify";
-import { UnauthorizedError } from "../utils/errors.js";
+import { UnauthorizedError, ForbiddenError } from "../utils/errors.js";
 import { db } from "../config/database.js";
 import { users } from "../database/schema.js";
 import { eq } from "drizzle-orm";
@@ -93,6 +93,27 @@ export async function optionalAuth(
     if (err instanceof UnauthorizedError) return;
     logger.warn({ err }, "optionalAuth: unexpected infrastructure error");
     throw err;
+  }
+}
+
+/**
+ * Restricts a route to admin users. Must run after authGuard — it reads
+ * `request.authUser` set by it and re-fetches the user's isAdmin flag
+ * (not carried on the JWT/AuthUser, so it always reflects the current
+ * database state rather than a stale claim from token-issue time).
+ */
+export async function adminGuard(
+  request: FastifyRequest,
+  _reply: FastifyReply,
+): Promise<void> {
+  const { authUser } = request as AuthenticatedRequest;
+
+  const user = await db.query.users.findFirst({
+    where: eq(users.id, authUser.id),
+  });
+
+  if (!user?.isAdmin) {
+    throw new ForbiddenError("Admin access required");
   }
 }
 

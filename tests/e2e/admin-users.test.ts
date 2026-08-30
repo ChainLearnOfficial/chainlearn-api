@@ -152,6 +152,20 @@ describe("Admin Users API (#288)", () => {
       }
     });
 
+    it("should surface deletedAt (null for active accounts) so admins can distinguish deleted users (#290)", async () => {
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/v1/admin/users",
+        headers: { authorization: `Bearer ${adminToken()}` },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.payload);
+      const admin = body.data.find((u: { id: string }) => u.id === adminUserId);
+      expect(admin).toBeDefined();
+      expect(admin.deletedAt).toBeNull();
+    });
+
     it("should reject invalid page/limit values", async () => {
       const response = await app.inject({
         method: "GET",

@@ -44,6 +44,7 @@ export class AdminUsersService {
         isAdmin: row.isAdmin,
         credits: row.credits,
         createdAt: row.createdAt,
+        deletedAt: row.deletedAt,
       })),
       total: totalResult?.value ?? 0,
     };

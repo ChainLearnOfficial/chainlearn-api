@@ -19,4 +19,9 @@ export interface AdminUserSummary {
   isAdmin: boolean;
   credits: number;
   createdAt: Date;
+  // Non-null for a soft-deleted account (#290) — surfaced rather than
+  // filtered out of the listing so admins can distinguish "user never set
+  // a display name" from "this account was deleted and its profile fields
+  // were cleared".
+  deletedAt: Date | null;
 }

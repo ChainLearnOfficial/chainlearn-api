@@ -15,6 +15,7 @@ import { generateQuizFromAI } from "./ai-client.js";
 import { sanitizeQuizFeedback } from "../../utils/sanitize.js";
 import { auditLog } from "../../audit/index.js";
 import { quizSubmissionsTotal } from "../../metrics/index.js";
+import { cacheDel, cacheKey } from "../../cache/index.js";
 import {
   PASSING_PERCENTAGE,
   MAX_RETRIES_PER_MODULE_PER_DAY,
@@ -243,6 +244,16 @@ export class QuizService {
           .returning();
 
         quizSubmissionsTotal.inc({ result: passed ? "passed" : "failed" });
+
+        // #286: invalidate the cached modules-with-completion view for
+        // this user+course now that this module's completion state has
+        // changed. Redis isn't part of the Postgres transaction (same
+        // reasoning as course.service.ts's enroll()), so this necessarily
+        // runs after the insert rather than atomically with it; cacheDel
+        // fails soft and the cache's own 60s TTL bounds any staleness if
+        // it does fail.
+        await cacheDel(cacheKey("user", "modules", userId, quiz.courseId));
+
         auditLog("quiz.submitted", {
           userId,
           submissionId: submission.id,
@@ -338,6 +349,12 @@ export class QuizService {
           .update(quizSubmissions)
           .set({ superseded: true })
           .where(eq(quizSubmissions.id, submission.id));
+
+        // #286: the module this quiz belongs to just went from completed
+        // back to incomplete (its only submission is now superseded) —
+        // invalidate the cached modules-with-completion view so callers
+        // don't see stale `completed: true` until the 60s TTL expires.
+        await cacheDel(cacheKey("user", "modules", userId, quiz.courseId));
       }
 
       auditLog("quiz.retried", {

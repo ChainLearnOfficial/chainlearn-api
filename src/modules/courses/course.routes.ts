@@ -72,6 +72,20 @@ export async function courseRoutes(app: FastifyInstance): Promise<void> {
     (request, reply) => courseController.getById(request, reply)
   );
 
+  app.get<{ Params: { id: string } }>(
+    "/:id/modules",
+    {
+      preHandler: [authGuard, validate({ params: courseIdParamsSchema })],
+      schema: {
+        description: "List a course's modules with the caller's per-module completion status",
+        tags: ["courses"],
+        security: [{ bearerAuth: [] }],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      } as FastifySchema,
+    },
+    (request, reply) => courseController.modules(request, reply)
+  );
+
   app.post<{ Params: { id: string } }>(
     "/:id/enroll",
     {

@@ -1,7 +1,7 @@
 import { eq, and, count, desc, inArray, ilike, or, sql } from "drizzle-orm";
 import { db } from "../../config/database.js";
-import { courses, enrollments, quizzes } from "../../database/schema.js";
-import { NotFoundError, ConflictError } from "../../utils/errors.js";
+import { courses, enrollments, quizzes, quizSubmissions } from "../../database/schema.js";
+import { NotFoundError, ConflictError, ForbiddenError } from "../../utils/errors.js";
 import { withLock } from "../../utils/lock.js";
 import { logger } from "../../utils/logger.js";
 import { getOnChainContentHash } from "../../stellar/progress-tracker.js";
@@ -22,6 +22,7 @@ import type {
   AdminCourse,
   CreateCourseBody,
   UpdateCourseBody,
+  CourseModuleWithProgress,
 } from "./course.types.js";
 
 const POPULAR_COURSES_TTL_SECONDS = 300;
@@ -269,6 +270,90 @@ export class CourseService {
       ...cachedDetail,
       isEnrolled,
     };
+  }
+
+  /**
+   * List a course's modules in their original order, annotated with
+   * whether the requesting user has completed each one (#286). Restricted
+   * to users enrolled in the course. "Completed" means the user has a
+   * non-superseded quiz submission for that module — a retry (#295)
+   * supersedes the old submission and un-completes the module until the
+   * new quiz is submitted.
+   *
+   * Cached per user+course (60s, matching getProgress's TTL) and
+   * invalidated whenever a submission is recorded for this course
+   * (quiz.service.ts submitQuiz/retryQuiz).
+   */
+  async getCourseModules(
+    userId: string,
+    courseId: string,
+  ): Promise<CourseModuleWithProgress[]> {
+    // Course existence is checked before enrollment — same order as
+    // enroll() and getCourseDetail() — so a bad/non-existent course ID
+    // reliably 404s rather than 403ing (which would otherwise happen for
+    // a non-enrolled caller regardless of whether the course exists).
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+
+    if (!course || !course.isActive) {
+      throw new NotFoundError("Course");
+    }
+
+    const enrollment = await db.query.enrollments.findFirst({
+      where: and(
+        eq(enrollments.userId, userId),
+        eq(enrollments.courseId, courseId),
+      ),
+    });
+
+    if (!enrollment) {
+      throw new ForbiddenError("Must be enrolled in the course to view its modules");
+    }
+
+    const namespace = "user";
+    const cacheKeyString = cacheKey(namespace, "modules", userId, courseId);
+
+    const cached = await cacheGet<CourseModuleWithProgress[]>(
+      namespace,
+      cacheKeyString,
+    );
+    if (cached) return cached;
+
+    const moduleRows = await db
+      .select({ moduleId: quizzes.moduleId })
+      .from(quizzes)
+      .where(eq(quizzes.courseId, courseId))
+      .groupBy(quizzes.moduleId)
+      .orderBy(quizzes.moduleId);
+
+    const completedModuleIds = new Set(
+      (
+        await db
+          .select({ moduleId: quizzes.moduleId })
+          .from(quizSubmissions)
+          .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+          .where(
+            and(
+              eq(quizzes.courseId, courseId),
+              eq(quizSubmissions.userId, userId),
+              eq(quizSubmissions.superseded, false),
+            ),
+          )
+          .groupBy(quizzes.moduleId)
+      ).map((r) => r.moduleId),
+    );
+
+    const result: CourseModuleWithProgress[] = moduleRows.map((row, i) => ({
+      id: row.moduleId,
+      title: row.moduleId,
+      order: i + 1,
+      completed: completedModuleIds.has(row.moduleId),
+    }));
+
+    await cacheSet(cacheKeyString, result, 60);
+
+    return result;
   }
 
   /**

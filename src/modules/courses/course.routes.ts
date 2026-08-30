@@ -2,7 +2,11 @@ import type { FastifyInstance, FastifySchema } from "fastify";
 import { courseController } from "./course.controller.js";
 import { authGuard, optionalAuth } from "../../middleware/auth.js";
 import { validate } from "../../middleware/validation.js";
-import { listCoursesSchema, courseIdParamsSchema } from "./course.types.js";
+import {
+  listCoursesSchema,
+  courseIdParamsSchema,
+  popularCoursesQuerySchema,
+} from "./course.types.js";
 
 export async function courseRoutes(app: FastifyInstance): Promise<void> {
   app.get(
@@ -35,6 +39,24 @@ export async function courseRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => courseController.list(request, reply)
+  );
+
+  app.get<{ Querystring: import("./course.types.js").PopularCoursesQuery }>(
+    "/popular",
+    {
+      preHandler: [validate({ querystring: popularCoursesQuerySchema })],
+      schema: {
+        description: "List the most popular active courses by enrollment count",
+        tags: ["courses"],
+        querystring: {
+          type: "object",
+          properties: {
+            limit: { type: "integer", minimum: 1, maximum: 50, default: 10 },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => courseController.popular(request, reply)
   );
 
   app.get<{ Params: { id: string } }>(

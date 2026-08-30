@@ -55,3 +55,9 @@ export class StellarError extends AppError {
     super(message, 502, "STELLAR_ERROR");
   }
 }
+
+export class RateLimitError extends AppError {
+  constructor(message: string = "Rate limit exceeded") {
+    super(message, 429, "RATE_LIMIT_EXCEEDED");
+  }
+}

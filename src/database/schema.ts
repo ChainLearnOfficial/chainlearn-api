@@ -29,6 +29,7 @@ export const users = pgTable(
     pace: varchar("pace", { length: 20 }).default("medium"),
     language: varchar("language", { length: 10 }).default("en"),
     credits: integer("credits").notNull().default(0),
+    isAdmin: boolean("is_admin").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -55,6 +56,7 @@ export const courses = pgTable(
       .notNull()
       .default("beginner"),
     contentHash: varchar("content_hash", { length: 64 }),
+    tags: jsonb("tags").$type<string[]>().notNull().default([]),
     isActive: boolean("is_active").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
@@ -147,6 +149,11 @@ export const quizSubmissions = pgTable(
     // can change over time (issue #153).
     rewardAmount: integer("reward_amount"),
     txHash: varchar("tx_hash", { length: 64 }),
+    // Set when a retry (POST /quizzes/:id/retry, issue #295) generates a
+    // fresh quiz for the same module — the previous submission is kept for
+    // history/audit rather than deleted, just marked superseded so it no
+    // longer counts as "the" submission for its quiz.
+    superseded: boolean("superseded").notNull().default(false),
     submittedAt: timestamp("submitted_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

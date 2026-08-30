@@ -61,4 +61,18 @@ export async function quizRoutes(app: FastifyInstance): Promise<void> {
     },
     (request, reply) => quizController.submit(request, reply)
   );
+
+  app.post<{ Params: { id: string } }>(
+    "/:id/retry",
+    {
+      preHandler: [validate({ params: quizIdParamsSchema })],
+      schema: {
+        description: "Retry a previously submitted quiz with fresh questions",
+        tags: ["quizzes"],
+        security: [{ bearerAuth: [] }],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      } as FastifySchema,
+    },
+    (request, reply) => quizController.retry(request, reply)
+  );
 }

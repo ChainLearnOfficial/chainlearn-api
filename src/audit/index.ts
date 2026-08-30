@@ -5,18 +5,24 @@ import { getRequestId } from "../utils/request-context.js";
 
 type AuditEvent =
   | "quiz.submitted"
+  | "quiz.retried"
   | "reward.claimed"
   | "reward.queued"
   | "reward.pending_confirmation"
   | "credential.minted"
   | "auth.login"
-  | "auth.login_failed";
+  | "auth.login_failed"
+  | "course.enrolled"
+  | "course.created"
+  | "course.updated"
+  | "course.deleted";
 
 interface AuditFields {
   userId?: string;
   submissionId?: string;
   credentialId?: string;
   courseId?: string;
+  moduleId?: string;
   txHash?: string | null;
   amount?: number;
   score?: number;
@@ -26,6 +32,9 @@ interface AuditFields {
   ip?: string;
   userAgent?: string;
   requestId?: string;
+  contentHashMatch?: boolean;
+  onChainContentHash?: string | null;
+  storedContentHash?: string | null;
 }
 
 export async function auditLog(event: AuditEvent, fields: AuditFields): Promise<void> {

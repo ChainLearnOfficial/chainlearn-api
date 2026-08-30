@@ -39,3 +39,9 @@ export interface CourseModule {
   title: string;
   order: number;
 }
+
+export interface CourseStats {
+  totalCourses: number;
+  enrollmentsByDifficulty: Record<"beginner" | "intermediate" | "advanced", number>;
+  averageEnrollmentsPerCourse: number;
+}

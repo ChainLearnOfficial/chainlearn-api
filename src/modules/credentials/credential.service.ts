@@ -26,7 +26,13 @@ import {
   stellarTxDurationSeconds,
   credentialsMintedTotal,
 } from "../../metrics/index.js";
-import { cacheGet, cacheSet, cacheDel, cacheKey } from "../../cache/index.js";
+import {
+  cacheGet,
+  cacheSet,
+  cacheDel,
+  cacheKey,
+  cacheInvalidatePattern,
+} from "../../cache/index.js";
 
 export class CredentialService {
   /**
@@ -182,6 +188,7 @@ export class CredentialService {
 
       await cacheDel(cacheKey("user", "progress", userId));
       await cacheDel(cacheKey("credentials", "list", userId));
+      await cacheInvalidatePattern(cacheKey("user", "activity", userId, "*"));
 
       return {
         credentialId: credential.id,

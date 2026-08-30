@@ -23,6 +23,7 @@ export const users = pgTable(
       .notNull()
       .unique(),
     displayName: varchar("display_name", { length: 100 }),
+    avatarUrl: text("avatar_url"),
     background: text("background"),
     learningGoal: text("learning_goal"),
     pace: varchar("pace", { length: 20 }).default("medium"),

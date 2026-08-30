@@ -86,6 +86,26 @@ describe("Courses API", () => {
     });
   });
 
+  describe("GET /api/v1/courses/stats", () => {
+    it("should return public aggregate course stats", async () => {
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/v1/courses/stats",
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.payload);
+      expect(body.success).toBe(true);
+      expect(typeof body.data.totalCourses).toBe("number");
+      expect(typeof body.data.averageEnrollmentsPerCourse).toBe("number");
+      expect(body.data.enrollmentsByDifficulty).toMatchObject({
+        beginner: expect.any(Number),
+        intermediate: expect.any(Number),
+        advanced: expect.any(Number),
+      });
+    });
+  });
+
   describe("GET /api/v1/courses/:id", () => {
     it("should return course detail with modules", async () => {
       // First get a valid course ID from the list

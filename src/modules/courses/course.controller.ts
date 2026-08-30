@@ -5,6 +5,19 @@ import type { ListCoursesQuery, CourseIdParams } from "./course.types.js";
 
 export class CourseController {
   /**
+   * GET /api/courses/stats
+   * Return aggregate active course statistics.
+   */
+  async stats(
+    _request: FastifyRequest,
+    reply: FastifyReply
+  ): Promise<void> {
+    const stats = await courseService.getStats();
+
+    reply.send({ success: true, data: stats });
+  }
+
+  /**
    * GET /api/courses
    * List available courses with optional filters.
    */

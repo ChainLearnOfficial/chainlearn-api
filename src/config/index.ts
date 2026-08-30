@@ -9,7 +9,13 @@ const envSchema = z.object({
   HOST: z.string().default("0.0.0.0"),
 
   // Database
-  DATABASE_URL: z.string().url(),
+  DATABASE_URL: z
+    .string()
+    .url()
+    .refine(
+      (url) => url.startsWith("postgresql://") || url.startsWith("postgres://"),
+      { message: "DATABASE_URL must be a PostgreSQL connection string" }
+    ),
 
   // Redis
   REDIS_URL: z.string().default("redis://localhost:6379"),

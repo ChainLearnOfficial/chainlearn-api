@@ -2,6 +2,8 @@ import { z } from "zod";
 import { config } from "../../config/index.js";
 import { logger } from "../../utils/logger.js";
 import { createTransientRetryPolicy, createCircuitBreaker } from "../../utils/resilience.js";
+import { context, propagation } from "@opentelemetry/api";
+import { getRequestId } from "../../utils/request-context.js";
 
 const aiQuizQuestionSchema = z.object({
   prompt: z.string(),
@@ -36,9 +38,14 @@ async function requestQuiz(
   const timeout = setTimeout(() => controller.abort(), config.AI_TIMEOUT_MS);
 
   try {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const requestId = getRequestId();
+    if (requestId) headers["X-Request-ID"] = requestId;
+    propagation.inject(context.active(), headers);
+
     const response = await fetch(`${config.AI_SERVICE_URL}/generate-quiz`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({
         user_id: params.userId,
         course_id: params.courseId,

@@ -15,7 +15,8 @@ type AuditEvent =
   | "course.enrolled"
   | "course.created"
   | "course.updated"
-  | "course.deleted";
+  | "course.deleted"
+  | "user.account_deleted";
 
 interface AuditFields {
   userId?: string;

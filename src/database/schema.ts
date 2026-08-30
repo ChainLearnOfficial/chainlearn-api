@@ -40,6 +40,12 @@ export const users = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
+    // Set by UserService.deleteAccount (#290). Null means the account is
+    // active. Once set, authGuard treats the user as if they no longer
+    // exist, so any JWT issued before deletion stops working. Deliberately
+    // a soft delete — the row (and its enrollments/credentials, which are
+    // never touched here) is preserved for on-chain record consistency.
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
   },
   (table) => [index("idx_users_stellar_address").on(table.stellarAddress)]
 );

@@ -70,6 +70,20 @@ export class UserController {
   }
 
   /**
+   * DELETE /api/users/me
+   * Soft-delete the authenticated user's account.
+   */
+  async deleteMe(
+    request: FastifyRequest,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { authUser } = request as AuthenticatedRequest;
+    await userService.deleteAccount(authUser.id);
+
+    reply.status(204).send();
+  }
+
+  /**
    * PUT /api/users/me/avatar
    * Upload and replace the authenticated user's avatar image.
    */

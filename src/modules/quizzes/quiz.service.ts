@@ -16,6 +16,12 @@ import { sanitizeQuizFeedback } from "../../utils/sanitize.js";
 import { auditLog } from "../../audit/index.js";
 import { quizSubmissionsTotal } from "../../metrics/index.js";
 import {
+  cacheDel,
+  cacheKey,
+  cacheKeyPattern,
+  cacheInvalidatePattern,
+} from "../../cache/index.js";
+import {
   PASSING_PERCENTAGE,
   MAX_RETRIES_PER_MODULE_PER_DAY,
   type GenerateQuizBody,
@@ -119,7 +125,7 @@ export class QuizService {
     data: SubmitQuizBody
   ): Promise<QuizSubmissionResult> {
     return withLock(`quiz:${quizId}:${userId}`, async () => {
-      return db.transaction(async (tx) => {
+      const result = await db.transaction(async (tx) => {
         const [quiz] = await tx
           .select()
           .from(quizzes)
@@ -270,6 +276,18 @@ export class QuizService {
           rewardAvailable: passed,
         };
       });
+
+      // Quiz submissions change totalQuizScore and rewardsClaimed in the user's
+      // progress, and the submission itself appears in the activity timeline.
+      // Invalidate both caches so stale aggregates aren't served. Runs after
+      // the transaction commits but within the distributed lock, matching the
+      // pattern used by courseService.enroll().
+      await Promise.allSettled([
+        cacheDel(cacheKey("user", "progress", userId)),
+        cacheInvalidatePattern(cacheKeyPattern("user", "activity", userId)),
+      ]);
+
+      return result;
     });
   }
 

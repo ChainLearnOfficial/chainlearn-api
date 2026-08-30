@@ -233,5 +233,14 @@ export const auditLogs = pgTable(
     event: varchar("event", { length: 255 }).notNull(),
     fields: jsonb("fields"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  }
+  },
+  (table) => [
+    // Both indexes already exist in the database (migration 0006) but were
+    // never reflected here in the Drizzle schema — added now so the ORM
+    // schema matches reality and so admin-users' audit-log listing (#289)
+    // is backed by an index for its `event` filter and its `created_at`
+    // range/ordering.
+    index("idx_audit_logs_event").on(table.event),
+    index("idx_audit_logs_created_at").on(table.createdAt),
+  ]
 );

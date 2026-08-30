@@ -427,18 +427,25 @@ export class CourseService {
       // Redis isn't part of the Postgres transaction, so there's no way to
       // make this atomic with the commit above (issue #152). cacheDel/
       // cacheInvalidatePattern already fail soft (log a warning, never
-      // throw), and every cache touched here has a bounded TTL (<=30s), so
-      // a transient invalidation failure produces bounded staleness rather
-      // than a permanently stale cache. Run them concurrently — reduces the
-      // real-world window between commit and invalidation rather than
-      // running four sequential round-trips one after another — and log
-      // once at this call site (distinct from cacheDel's generic per-key
-      // warning) so a failure here is attributable specifically to an
-      // enrollment, not just "some cache key somewhere".
+      // throw), and every cache touched here has a bounded TTL (<=5min —
+      // courses:popular is the longest at 300s, everything else is <=120s),
+      // so a transient invalidation failure produces bounded staleness
+      // rather than a permanently stale cache. Run them concurrently —
+      // reduces the real-world window between commit and invalidation
+      // rather than running four sequential round-trips one after another —
+      // and log once at this call site (distinct from cacheDel's generic
+      // per-key warning) so a failure here is attributable specifically to
+      // an enrollment, not just "some cache key somewhere".
       const invalidations = await Promise.allSettled([
         cacheInvalidatePattern("chainlearn:courses:list:*"),
         cacheDel(cacheKey("courses", "detail", courseId)),
         cacheDel(cacheKey("courses", "stats")),
+        // #285: getPopularCourses() also caches enrolledCount per course
+        // (up to POPULAR_COURSES_TTL_SECONDS = 5min), but was never
+        // invalidated here — an enrollment could leave /courses/popular
+        // showing a stale count for up to 5 minutes even though the list/
+        // detail/stats views above already correct immediately.
+        cacheInvalidatePattern(cacheKeyPattern("courses", "popular")),
         cacheDel(cacheKey("user", "progress", userId)),
         cacheDel(cacheKey("user", "enrollments", userId)),
         cacheInvalidatePattern(cacheKeyPattern("user", "activity", userId)),

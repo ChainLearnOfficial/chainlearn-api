@@ -38,7 +38,8 @@ export const users = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
-  }
+  },
+  (table) => [index("idx_users_stellar_address").on(table.stellarAddress)]
 );
 
 // ─── Courses ────────────────────────────────────────────────────────────────

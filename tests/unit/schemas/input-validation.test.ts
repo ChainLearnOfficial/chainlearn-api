@@ -1,6 +1,17 @@
 import { describe, it, expect } from "vitest";
 import { updateProfileSchema } from "../../../src/modules/users/user.types.js";
 import { submitQuizSchema } from "../../../src/modules/quizzes/quiz.types.js";
+import { listCoursesSchema } from "../../../src/modules/courses/course.types.js";
+
+describe("listCoursesSchema", () => {
+  it("accepts an optional search term", () => {
+    expect(listCoursesSchema.parse({ search: "stellar" }).search).toBe("stellar");
+  });
+
+  it("accepts an empty search term so the service can ignore it", () => {
+    expect(listCoursesSchema.safeParse({ search: "" }).success).toBe(true);
+  });
+});
 
 describe("updateProfileSchema", () => {
   it("sanitizes HTML out of free-text fields", () => {

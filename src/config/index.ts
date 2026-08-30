@@ -32,6 +32,10 @@ const envSchema = z.object({
   STELLAR_QUIZ_CONTRACT_ID: z.string().min(1),
   STELLAR_REWARD_CONTRACT_ID: z.string().min(1),
   STELLAR_CREDENTIAL_CONTRACT_ID: z.string().min(1),
+  // Optional: enables on-chain contentHash verification on enrollment
+  // (#294). Unset by default — the check is skipped (non-blocking) until a
+  // progress-tracker contract is deployed and configured.
+  STELLAR_PROGRESS_TRACKER_CONTRACT_ID: z.string().optional(),
 
   // Rate limiting
   RATE_LIMIT_MAX: z.coerce.number().default(100),

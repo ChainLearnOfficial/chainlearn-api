@@ -12,6 +12,15 @@ export async function courseRoutes(app: FastifyInstance): Promise<void> {
       schema: {
         description: "List available courses",
         tags: ["courses"],
+        querystring: {
+          type: "object",
+          properties: {
+            difficulty: { type: "string", enum: ["beginner", "intermediate", "advanced"] },
+            search: { type: "string" },
+            page: { type: "integer", minimum: 1, default: 1 },
+            limit: { type: "integer", minimum: 1, maximum: 50, default: 20 },
+          },
+        },
       } as FastifySchema,
     },
     (request, reply) => courseController.list(request, reply)
@@ -24,6 +33,7 @@ export async function courseRoutes(app: FastifyInstance): Promise<void> {
       schema: {
         description: "Get course details by ID",
         tags: ["courses"],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
       } as FastifySchema,
     },
     (request, reply) => courseController.getById(request, reply)
@@ -36,6 +46,8 @@ export async function courseRoutes(app: FastifyInstance): Promise<void> {
       schema: {
         description: "Enroll in a course",
         tags: ["courses"],
+        security: [{ bearerAuth: [] }],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
       } as FastifySchema,
     },
     (request, reply) => courseController.enroll(request, reply)

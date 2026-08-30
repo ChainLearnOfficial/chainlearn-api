@@ -50,6 +50,29 @@ describe("generateQuizFromAI", () => {
     expect(result).toEqual(validBody.questions);
   });
 
+  it("propagates the current request ID to the AI service", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, {
+      quiz_id: "quiz-1",
+      questions: [{ prompt: "Q1", options: ["a", "b"], correct_index: 0 }],
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { generateQuizFromAI } = await loadClient();
+    const { runWithRequestContext } = await import("../../../src/utils/request-context.js");
+    await new Promise<void>((resolve, reject) => {
+      runWithRequestContext("request-123", () => {
+        generateQuizFromAI(baseParams).then(() => resolve(), reject);
+      });
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://ai.test/generate-quiz",
+      expect.objectContaining({
+        headers: expect.objectContaining({ "X-Request-ID": "request-123" }),
+      }),
+    );
+  });
+
   it("throws when the AI response shape is malformed instead of crashing (#142)", async () => {
     vi.stubGlobal(
       "fetch",

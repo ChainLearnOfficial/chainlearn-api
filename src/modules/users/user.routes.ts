@@ -13,6 +13,7 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
       schema: {
         description: "Get authenticated user profile",
         tags: ["users"],
+        security: [{ bearerAuth: [] }],
       } as FastifySchema,
     },
     (request, reply) => userController.getMe(request, reply)
@@ -25,6 +26,17 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
       schema: {
         description: "Update authenticated user profile",
         tags: ["users"],
+        security: [{ bearerAuth: [] }],
+        body: {
+          type: "object",
+          properties: {
+            displayName: { type: "string", minLength: 1, maxLength: 100 },
+            background: { type: "string", maxLength: 1000 },
+            learningGoal: { type: "string", maxLength: 500 },
+            pace: { type: "string", enum: ["slow", "medium", "fast"] },
+            language: { type: "string", maxLength: 10 },
+          },
+        },
       } as FastifySchema,
     },
     (request, reply) => userController.updateMe(request, reply)
@@ -36,6 +48,7 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
       schema: {
         description: "Get learning progress stats",
         tags: ["users"],
+        security: [{ bearerAuth: [] }],
       } as FastifySchema,
     },
     (request, reply) => userController.getProgress(request, reply)

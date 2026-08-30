@@ -5,6 +5,8 @@ import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
 import jwt from "@fastify/jwt";
 import rateLimit from "@fastify/rate-limit";
+import swagger from "@fastify/swagger";
+import swaggerUi from "@fastify/swagger-ui";
 import { sql } from "drizzle-orm";
 import { config } from "./config/index.js";
 import { logger } from "./utils/logger.js";
@@ -32,6 +34,7 @@ import {
 } from "./jobs/reconcile-pending-rewards.js";
 import { processRewardClaim } from "./modules/rewards/reward.service.js";
 import { warmCourseCache } from "./cache/warmer.js";
+import { runWithRequestContext } from "./utils/request-context.js";
 
 // Versioned route modules
 import { registerVersionedRoutes } from "./routes/versioning.js";
@@ -75,6 +78,35 @@ async function buildApp() {
     genReqId: () => crypto.randomUUID(),
   });
 
+  app.addHook("onRequest", (request, _reply, done) => {
+    runWithRequestContext(request.id, done);
+  });
+
+  await app.register(swagger, {
+    openapi: {
+      info: {
+        title: "ChainLearn API",
+        description: "API for the ChainLearn Stellar-based learning platform",
+        version: "1.0.0",
+      },
+      components: {
+        securitySchemes: {
+          bearerAuth: { type: "http", scheme: "bearer", bearerFormat: "JWT" },
+        },
+      },
+      tags: [
+        { name: "auth", description: "SEP-10 authentication" },
+        { name: "users", description: "User profile and progress" },
+        { name: "courses", description: "Course discovery and enrollment" },
+        { name: "quizzes", description: "Quiz generation and submission" },
+        { name: "rewards", description: "Learning rewards" },
+        { name: "credentials", description: "Course credentials" },
+      ],
+    },
+  });
+
+  await app.register(swaggerUi, { routePrefix: "/docs" });
+
   // ─── Plugins ────────────────────────────────────────────────────────────
 
   // #220: OWASP security headers via @fastify/helmet.
@@ -84,7 +116,9 @@ async function buildApp() {
     contentSecurityPolicy: {
       directives: {
         defaultSrc: ["'none'"],
-        scriptSrc: ["'none'"],
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", "data:"],
         objectSrc: ["'none'"],
         frameAncestors: ["'none'"],
       },

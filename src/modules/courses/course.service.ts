@@ -1,4 +1,4 @@
-import { eq, and, count, desc, inArray } from "drizzle-orm";
+import { eq, and, count, desc, inArray, ilike, or } from "drizzle-orm";
 import { db } from "../../config/database.js";
 import { courses, enrollments, quizzes } from "../../database/schema.js";
 import { NotFoundError, ConflictError } from "../../utils/errors.js";
@@ -50,10 +50,12 @@ export class CourseService {
     query: ListCoursesQuery,
   ): Promise<{ courses: CourseSummary[]; total: number }> {
     const namespace = "courses";
+    const search = query.search?.trim() || undefined;
     const cacheKeyString = cacheKey(
       namespace,
       "list",
       query.difficulty ?? "all",
+      search ? encodeURIComponent(search.toLowerCase()) : "all",
       query.page,
       query.limit,
     );
@@ -67,6 +69,14 @@ export class CourseService {
       const conditions = [eq(courses.isActive, true)];
       if (query.difficulty) {
         conditions.push(eq(courses.difficulty, query.difficulty));
+      }
+      if (search) {
+        conditions.push(
+          or(
+            ilike(courses.title, `%${search}%`),
+            ilike(courses.description, `%${search}%`),
+          )!,
+        );
       }
 
       const where = and(...conditions);

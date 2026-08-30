@@ -1,6 +1,7 @@
 import { logger } from "../utils/logger.js";
 import { db } from "../config/database.js";
 import { auditLogs } from "../database/schema.js";
+import { getRequestId } from "../utils/request-context.js";
 
 type AuditEvent =
   | "quiz.submitted"
@@ -24,13 +25,15 @@ interface AuditFields {
   queued?: boolean;
   ip?: string;
   userAgent?: string;
+  requestId?: string;
 }
 
 export async function auditLog(event: AuditEvent, fields: AuditFields): Promise<void> {
-  logger.info({ audit: true, event, ...fields }, `audit: ${event}`);
+  const auditFields = { requestId: getRequestId(), ...fields };
+  logger.info({ audit: true, event, ...auditFields }, `audit: ${event}`);
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      await db.insert(auditLogs).values({ event, fields });
+      await db.insert(auditLogs).values({ event, fields: auditFields });
       return;
     } catch (err) {
       if (attempt < 2) {
@@ -39,7 +42,7 @@ export async function auditLog(event: AuditEvent, fields: AuditFields): Promise<
       }
       logger.error({ err }, "Failed to persist audit log after 3 attempts");
       process.stdout.write(
-        JSON.stringify({ audit: true, event, ...fields, persistError: String(err) }) + "\n",
+        JSON.stringify({ audit: true, event, ...auditFields, persistError: String(err) }) + "\n",
       );
     }
   }

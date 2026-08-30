@@ -70,6 +70,10 @@ export interface CourseModule {
   order: number;
 }
 
+export interface CourseStats {
+  totalCourses: number;
+  enrollmentsByDifficulty: Record<"beginner" | "intermediate" | "advanced", number>;
+  averageEnrollmentsPerCourse: number;
 export interface AdminCourse {
   id: string;
   title: string;

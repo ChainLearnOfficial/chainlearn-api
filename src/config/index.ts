@@ -41,6 +41,13 @@ const envSchema = z.object({
   RATE_LIMIT_MAX: z.coerce.number().default(100),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().default(60_000),
 
+  // Request body limits
+  REQUEST_BODY_LIMIT_BYTES: z.coerce.number().int().positive().default(1_048_576),
+  MULTIPART_BODY_LIMIT_BYTES: z.coerce.number().int().positive().default(5_242_880),
+  AVATAR_UPLOAD_MAX_BYTES: z.coerce.number().int().positive().default(2_097_152),
+  AVATAR_UPLOAD_DIR: z.string().default("uploads/avatars"),
+  PUBLIC_BASE_URL: z.string().url().optional(),
+
   // AI service (chainlearn-ai) used for quiz generation
   AI_SERVICE_URL: z.string().url().default("http://localhost:8000"),
   AI_TIMEOUT_MS: z.coerce.number().default(30_000),
@@ -72,6 +79,11 @@ function loadConfig(): Env {
         STELLAR_QUIZ_CONTRACT_ID: process.env.STELLAR_QUIZ_CONTRACT_ID || "test",
         STELLAR_REWARD_CONTRACT_ID: process.env.STELLAR_REWARD_CONTRACT_ID || "test",
         STELLAR_CREDENTIAL_CONTRACT_ID: process.env.STELLAR_CREDENTIAL_CONTRACT_ID || "test",
+        REQUEST_BODY_LIMIT_BYTES: process.env.REQUEST_BODY_LIMIT_BYTES,
+        MULTIPART_BODY_LIMIT_BYTES: process.env.MULTIPART_BODY_LIMIT_BYTES,
+        AVATAR_UPLOAD_MAX_BYTES: process.env.AVATAR_UPLOAD_MAX_BYTES,
+        AVATAR_UPLOAD_DIR: process.env.AVATAR_UPLOAD_DIR,
+        PUBLIC_BASE_URL: process.env.PUBLIC_BASE_URL,
       });
     }
     console.error(

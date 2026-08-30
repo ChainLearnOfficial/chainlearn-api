@@ -9,6 +9,17 @@ import {
 } from "./course.types.js";
 
 export async function courseRoutes(app: FastifyInstance): Promise<void> {
+  app.get(
+    "/stats",
+    {
+      schema: {
+        description: "Get aggregate course statistics",
+        tags: ["courses"],
+      } as FastifySchema,
+    },
+    (request, reply) => courseController.stats(request, reply)
+  );
+
   app.get<{ Querystring: import("./course.types.js").ListCoursesQuery }>(
     "/",
     {

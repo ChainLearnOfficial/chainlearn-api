@@ -1,4 +1,4 @@
-import { eq, and, count, desc, inArray, ilike, or } from "drizzle-orm";
+import { eq, and, count, desc, inArray, ilike, or, sql } from "drizzle-orm";
 import { db } from "../../config/database.js";
 import { courses, enrollments, quizzes } from "../../database/schema.js";
 import { NotFoundError, ConflictError } from "../../utils/errors.js";
@@ -18,6 +18,7 @@ import type {
   ListCoursesQuery,
   CourseSummary,
   CourseDetail,
+  CourseStats,
   AdminCourse,
   CreateCourseBody,
   UpdateCourseBody,
@@ -26,6 +27,61 @@ import type {
 const POPULAR_COURSES_TTL_SECONDS = 300;
 
 export class CourseService {
+  async getStats(): Promise<CourseStats> {
+    const namespace = "courses";
+    const cacheKeyString = cacheKey(namespace, "stats");
+
+    const cachedStats = await cacheGet<CourseStats>(namespace, cacheKeyString);
+    if (cachedStats) return cachedStats;
+
+    const [[totalResult], enrollmentRows] = await Promise.all([
+      db
+        .select({ value: count() })
+        .from(courses)
+        .where(eq(courses.isActive, true)),
+      db
+        .select({
+          difficulty: courses.difficulty,
+          value: sql<number>`COUNT(${enrollments.id})`,
+        })
+        .from(courses)
+        .leftJoin(enrollments, eq(enrollments.courseId, courses.id))
+        .where(eq(courses.isActive, true))
+        .groupBy(courses.difficulty),
+    ]);
+
+    const totalCourses = totalResult?.value ?? 0;
+    const enrollmentsByDifficulty: CourseStats["enrollmentsByDifficulty"] = {
+      beginner: 0,
+      intermediate: 0,
+      advanced: 0,
+    };
+
+    let totalEnrollments = 0;
+    for (const row of enrollmentRows) {
+      if (
+        row.difficulty === "beginner" ||
+        row.difficulty === "intermediate" ||
+        row.difficulty === "advanced"
+      ) {
+        const value = Number(row.value);
+        enrollmentsByDifficulty[row.difficulty] = value;
+        totalEnrollments += value;
+      }
+    }
+
+    const stats: CourseStats = {
+      totalCourses,
+      enrollmentsByDifficulty,
+      averageEnrollmentsPerCourse:
+        totalCourses === 0 ? 0 : Number((totalEnrollments / totalCourses).toFixed(2)),
+    };
+
+    await cacheSet(cacheKeyString, stats, 300);
+
+    return stats;
+  }
+
   /**
    * The full set of course IDs a user is enrolled in, cached briefly
    * (issue #151 — listCourses/getCourseDetail previously re-queried the
@@ -297,8 +353,10 @@ export class CourseService {
       const invalidations = await Promise.allSettled([
         cacheInvalidatePattern("chainlearn:courses:list:*"),
         cacheDel(cacheKey("courses", "detail", courseId)),
+        cacheDel(cacheKey("courses", "stats")),
         cacheDel(cacheKey("user", "progress", userId)),
         cacheDel(cacheKey("user", "enrollments", userId)),
+        cacheInvalidatePattern(cacheKeyPattern("user", "activity", userId)),
       ]);
       const failed = invalidations.filter((r) => r.status === "rejected");
       if (failed.length > 0) {

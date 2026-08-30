@@ -22,6 +22,7 @@ import { logger } from "../../utils/logger.js";
 import { enqueueReward } from "../../services/retry-queue.js";
 import StellarSdk from "@stellar/stellar-sdk";
 import type { RewardClaimResult, RewardHistoryItem } from "./reward.types.js";
+import { PASSING_PERCENTAGE } from "../quizzes/quiz.types.js";
 import { auditLog } from "../../audit/index.js";
 import {
   stellarTxDurationSeconds,
@@ -223,6 +224,7 @@ export async function processRewardClaim(
       await cacheDel(cacheKey("user", "progress", userId));
       await cacheDel(cacheKey("user", "profile", userId));
       await cacheInvalidatePattern(cacheKey("rewards", "history", userId, "*"));
+      await cacheInvalidatePattern(cacheKey("user", "activity", userId, "*"));
     }
     return result;
   });
@@ -393,6 +395,7 @@ export class RewardService {
       await cacheDel(cacheKey("user", "progress", userId));
       await cacheDel(cacheKey("user", "profile", userId));
       await cacheInvalidatePattern(cacheKey("rewards", "history", userId, "*"));
+      await cacheInvalidatePattern(cacheKey("user", "activity", userId, "*"));
 
       return {
         submissionId,

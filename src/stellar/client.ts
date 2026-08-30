@@ -165,7 +165,7 @@ export class StellarClient {
   async checkSorobanHealth(): Promise<void> {
     try {
       // Use a shorter timeout for health checks (3s) to fail fast if RPC is unreachable
-      await withTimeout(this.soroban.getLatestLedger(), 3_000, "read");
+      await withTimeout(this.soroban.getLatestLedger(), 3_000);
     } catch (err: any) {
       const message = err?.message || String(err);
       logger.warn({ message }, "Soroban RPC health check failed");

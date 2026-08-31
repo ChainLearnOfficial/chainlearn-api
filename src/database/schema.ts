@@ -84,6 +84,17 @@ export const courses = pgTable(
       .notNull()
       .default([]),
     isActive: boolean("is_active").notNull().default(true),
+    // 0–100 accessibility score for the course's authored content (#326),
+    // recomputed on every create/update. Null until first written. Advisory
+    // only — a low score never blocks saving the course.
+    accessibilityScore: integer("accessibility_score"),
+    // Course IDs that should be completed before this one (#354). Purely
+    // advisory — CourseService.enroll() never enforces this, it's surfaced
+    // to the client as a warning via getCoursePrerequisites().
+    prerequisites: jsonb("prerequisites")
+      .$type<string[]>()
+      .notNull()
+      .default([]),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -323,6 +334,35 @@ export const webhookAttempts = pgTable(
     index("idx_webhook_attempts_event").on(table.event),
     index("idx_webhook_attempts_next_retry").on(table.nextRetryAt),
     index("idx_webhook_attempts_succeeded").on(table.succeededAt),
+  ]
+);
+
+// ─── Announcements ──────────────────────────────────────────────────────────
+
+// Platform-wide announcements admins broadcast to all users (#353) —
+// maintenance windows, new features, policy changes. `active` is an
+// explicit admin-controlled switch independent of `expiresAt`, so an
+// announcement can be taken down early without waiting for its expiry.
+export const announcements = pgTable(
+  "announcements",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    title: varchar("title", { length: 255 }).notNull(),
+    message: text("message").notNull(),
+    priority: varchar("priority", { length: 20 }).notNull().default("normal"),
+    active: boolean("active").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+  },
+  (table) => [
+    // Matches the public listing's access pattern (WHERE active = true AND
+    // (expires_at IS NULL OR expires_at > now()) ORDER BY created_at DESC).
+    index("idx_announcements_active_created").on(
+      table.active,
+      sql`${table.createdAt} DESC`,
+    ),
   ]
 );
 

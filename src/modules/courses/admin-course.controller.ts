@@ -1,5 +1,7 @@
 import type { FastifyRequest, FastifyReply } from "fastify";
 import { courseService } from "./course.service.js";
+import { ValidationError } from "../../utils/errors.js";
+import { importCourseSchema } from "./course.types.js";
 import type {
   CourseIdParams,
   CreateCourseBody,
@@ -22,6 +24,51 @@ export class AdminCourseController {
     const course = await courseService.createCourse(request.body);
 
     reply.status(201).send({ success: true, data: course });
+  }
+
+  /**
+   * POST /api/v1/admin/courses/import
+   * Bulk-create a course (and its modules) from an uploaded JSON file (#366).
+   */
+  async import(
+    request: FastifyRequest,
+    reply: FastifyReply
+  ): Promise<void> {
+    if (!request.isMultipart()) {
+      throw new ValidationError({
+        file: ["Request must be multipart/form-data"],
+      });
+    }
+
+    const file = await request.file();
+    if (!file) {
+      throw new ValidationError({
+        file: ["A JSON file is required"],
+      });
+    }
+
+    const buffer = await file.toBuffer();
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(buffer.toString("utf-8"));
+    } catch {
+      throw new ValidationError({
+        file: ["File must contain valid JSON"],
+      });
+    }
+
+    const result = importCourseSchema.safeParse(parsed);
+    if (!result.success) {
+      throw new ValidationError({
+        file: result.error.issues.map(
+          (issue) => `${issue.path.join(".")}: ${issue.message}`,
+        ),
+      });
+    }
+
+    const imported = await courseService.importCourse(result.data);
+
+    reply.status(201).send({ success: true, data: imported });
   }
 
   /**

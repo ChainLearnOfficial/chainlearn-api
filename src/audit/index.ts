@@ -21,6 +21,7 @@ type AuditEvent =
   | "course.published"
   | "course.duplicated"
   | "course.reviewed"
+  | "course.imported"
   | "course.archived"
   | "course.enrollment_dropped"
   | "course.waitlist.joined"
@@ -31,6 +32,9 @@ type AuditEvent =
   | "course.module.created"
   | "course.module.updated"
   | "course.module.deleted"
+  | "announcement.created"
+  | "announcement.updated"
+  | "announcement.deleted";
   | "webhook.created"
   | "webhook.updated"
   | "webhook.deleted"
@@ -62,6 +66,9 @@ interface AuditFields {
   changes?: string[];
   rating?: number;
   sourceCourseId?: string;
+  moduleCount?: number;
+  announcementId?: string;
+  priority?: string;
 }
 
 export async function auditLog(event: AuditEvent, fields: AuditFields): Promise<void> {

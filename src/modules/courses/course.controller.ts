@@ -148,6 +148,36 @@ export class CourseController {
   }
 
   /**
+   * GET /api/v1/courses/:id/prerequisites
+   * List a course's configured prerequisite courses, each annotated with
+   * whether the caller has completed it (#354).
+   */
+  async prerequisites(
+    request: FastifyRequest<{ Params: CourseIdParams }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id } = request.params;
+    const userId = (request as AuthenticatedRequest).authUser?.id ?? null;
+    const result = await courseService.getCoursePrerequisites(id, userId);
+
+    reply.send({ success: true, data: result });
+  }
+
+  /**
+   * GET /api/v1/courses/:id/leaderboard
+   * Top performers for a course, ranked by average quiz score (#324).
+   */
+  async leaderboard(
+    request: FastifyRequest<{ Params: CourseIdParams }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id } = request.params;
+    const leaderboard = await courseService.getLeaderboard(id);
+
+    reply.send({ success: true, data: leaderboard });
+  }
+
+  /**
    * GET /api/courses/popular
    * List active courses ordered by enrollment count descending.
    */

@@ -105,6 +105,20 @@ export async function courseRoutes(app: FastifyInstance): Promise<void> {
   );
 
   app.get<{ Params: { id: string } }>(
+    "/:id/prerequisites",
+    {
+      preHandler: [optionalAuth, validate({ params: courseIdParamsSchema })],
+      schema: {
+        description:
+          "List a course's configured prerequisite courses, with the caller's completion status per prerequisite (#354)",
+        tags: ["courses"],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      } as FastifySchema,
+    },
+    (request, reply) => courseController.prerequisites(request, reply)
+  );
+
+  app.get<{ Params: { id: string } }>(
     "/:id/leaderboard",
     {
       preHandler: [validate({ params: courseIdParamsSchema })],

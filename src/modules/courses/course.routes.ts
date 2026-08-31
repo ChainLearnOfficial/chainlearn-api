@@ -188,6 +188,8 @@ export async function courseRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => courseController.batchEnroll(request, reply)
+  );
+
   app.get<{ Params: { id: string }; Querystring: import("./course.types.js").ListReviewsQuery }>(
     "/:id/reviews",
     {

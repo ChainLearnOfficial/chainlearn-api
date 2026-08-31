@@ -100,6 +100,22 @@ export class CourseController {
   }
 
   /**
+   * GET /api/courses/:id/modules
+   * List a course's modules with the authenticated (enrolled) user's
+   * per-module completion status (#286).
+   */
+  async modules(
+    request: FastifyRequest<{ Params: CourseIdParams }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id } = request.params;
+    const { authUser } = request as AuthenticatedRequest;
+    const modules = await courseService.getCourseModules(authUser.id, id);
+
+    reply.send({ success: true, data: modules });
+  }
+
+  /**
    * GET /api/courses/popular
    * List active courses ordered by enrollment count descending.
    */

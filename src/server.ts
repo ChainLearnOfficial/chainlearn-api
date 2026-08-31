@@ -79,12 +79,32 @@ async function buildApp() {
           ? { target: "pino-pretty", options: { colorize: true } }
           : undefined,
     },
+    // requestIdHeader tells Fastify to reuse a client-supplied X-Request-Id
+    // as request.id instead of always minting a fresh one via genReqId —
+    // genReqId only runs when the header is absent or blank (#287).
     requestIdHeader: "x-request-id",
+    // Match the field name the shared `logger` mixin uses (see
+    // utils/logger.ts) so Fastify's own automatic "incoming request" /
+    // "request completed" log lines carry `requestId` too, not `reqId`
+    // (#287) — one consistent field to grep/filter logs by regardless of
+    // whether a line came from Fastify itself or application code.
+    requestIdLogLabel: "requestId",
     genReqId: () => crypto.randomUUID(),
   });
 
   app.addHook("onRequest", (request, _reply, done) => {
     runWithRequestContext(request.id, done);
+  });
+
+  // #287: echo the request ID on every response, including error responses,
+  // health checks, and anything outside registerVersionedRoutes — the
+  // envelope hook (response-envelope.ts) only puts it in the JSON body's
+  // `meta` for 2xx JSON responses. onSend runs for every request regardless
+  // of route or status code, so this is the one place that reliably covers
+  // all of them.
+  app.addHook("onSend", (request, reply, payload, done) => {
+    reply.header("x-request-id", request.id);
+    done(null, payload);
   });
 
   await app.register(swagger, {

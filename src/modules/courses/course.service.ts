@@ -1,6 +1,7 @@
 import { eq, and, count, desc, inArray, ilike, or, isNull } from "drizzle-orm";
 import { eq, and, count, desc, inArray, ilike, or, sql } from "drizzle-orm";
 import { db } from "../../config/database.js";
+import { courses, enrollments, quizzes, quizSubmissions } from "../../database/schema.js";
 import {
   courses,
   enrollments,
@@ -31,6 +32,7 @@ import type {
   CourseModule,
   CourseModuleMetadata,
   UpdateCourseBody,
+  CourseModuleWithProgress,
   CreateModuleBody,
   UpdateModuleBody,
 } from "./course.types.js";
@@ -300,6 +302,90 @@ export class CourseService {
   }
 
   /**
+   * List a course's modules in their original order, annotated with
+   * whether the requesting user has completed each one (#286). Restricted
+   * to users enrolled in the course. "Completed" means the user has a
+   * non-superseded quiz submission for that module — a retry (#295)
+   * supersedes the old submission and un-completes the module until the
+   * new quiz is submitted.
+   *
+   * Cached per user+course (60s, matching getProgress's TTL) and
+   * invalidated whenever a submission is recorded for this course
+   * (quiz.service.ts submitQuiz/retryQuiz).
+   */
+  async getCourseModules(
+    userId: string,
+    courseId: string,
+  ): Promise<CourseModuleWithProgress[]> {
+    // Course existence is checked before enrollment — same order as
+    // enroll() and getCourseDetail() — so a bad/non-existent course ID
+    // reliably 404s rather than 403ing (which would otherwise happen for
+    // a non-enrolled caller regardless of whether the course exists).
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+
+    if (!course || !course.isActive) {
+      throw new NotFoundError("Course");
+    }
+
+    const enrollment = await db.query.enrollments.findFirst({
+      where: and(
+        eq(enrollments.userId, userId),
+        eq(enrollments.courseId, courseId),
+      ),
+    });
+
+    if (!enrollment) {
+      throw new ForbiddenError("Must be enrolled in the course to view its modules");
+    }
+
+    const namespace = "user";
+    const cacheKeyString = cacheKey(namespace, "modules", userId, courseId);
+
+    const cached = await cacheGet<CourseModuleWithProgress[]>(
+      namespace,
+      cacheKeyString,
+    );
+    if (cached) return cached;
+
+    const moduleRows = await db
+      .select({ moduleId: quizzes.moduleId })
+      .from(quizzes)
+      .where(eq(quizzes.courseId, courseId))
+      .groupBy(quizzes.moduleId)
+      .orderBy(quizzes.moduleId);
+
+    const completedModuleIds = new Set(
+      (
+        await db
+          .select({ moduleId: quizzes.moduleId })
+          .from(quizSubmissions)
+          .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+          .where(
+            and(
+              eq(quizzes.courseId, courseId),
+              eq(quizSubmissions.userId, userId),
+              eq(quizSubmissions.superseded, false),
+            ),
+          )
+          .groupBy(quizzes.moduleId)
+      ).map((r) => r.moduleId),
+    );
+
+    const result: CourseModuleWithProgress[] = moduleRows.map((row, i) => ({
+      id: row.moduleId,
+      title: row.moduleId,
+      order: i + 1,
+      completed: completedModuleIds.has(row.moduleId),
+    }));
+
+    await cacheSet(cacheKeyString, result, 60);
+
+    return result;
+  }
+
+  /**
    * Compares the course's stored contentHash against the progress-tracker
    * contract's on-chain value (#294). Deliberately non-blocking: any
    * mismatch, or failure to read the on-chain hash at all, is logged for
@@ -387,18 +473,25 @@ export class CourseService {
       // Redis isn't part of the Postgres transaction, so there's no way to
       // make this atomic with the commit above (issue #152). cacheDel/
       // cacheInvalidatePattern already fail soft (log a warning, never
-      // throw), and every cache touched here has a bounded TTL (<=30s), so
-      // a transient invalidation failure produces bounded staleness rather
-      // than a permanently stale cache. Run them concurrently — reduces the
-      // real-world window between commit and invalidation rather than
-      // running four sequential round-trips one after another — and log
-      // once at this call site (distinct from cacheDel's generic per-key
-      // warning) so a failure here is attributable specifically to an
-      // enrollment, not just "some cache key somewhere".
+      // throw), and every cache touched here has a bounded TTL (<=5min —
+      // courses:popular is the longest at 300s, everything else is <=120s),
+      // so a transient invalidation failure produces bounded staleness
+      // rather than a permanently stale cache. Run them concurrently —
+      // reduces the real-world window between commit and invalidation
+      // rather than running four sequential round-trips one after another —
+      // and log once at this call site (distinct from cacheDel's generic
+      // per-key warning) so a failure here is attributable specifically to
+      // an enrollment, not just "some cache key somewhere".
       const invalidations = await Promise.allSettled([
         cacheInvalidatePattern("chainlearn:courses:list:*"),
         cacheDel(cacheKey("courses", "detail", courseId)),
         cacheDel(cacheKey("courses", "stats")),
+        // #285: getPopularCourses() also caches enrolledCount per course
+        // (up to POPULAR_COURSES_TTL_SECONDS = 5min), but was never
+        // invalidated here — an enrollment could leave /courses/popular
+        // showing a stale count for up to 5 minutes even though the list/
+        // detail/stats views above already correct immediately.
+        cacheInvalidatePattern(cacheKeyPattern("courses", "popular")),
         cacheDel(cacheKey("user", "progress", userId)),
         cacheDel(cacheKey("user", "enrollments", userId)),
         cacheInvalidatePattern(cacheKeyPattern("user", "activity", userId)),

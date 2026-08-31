@@ -108,6 +108,15 @@ export interface CourseModule {
   order: number;
 }
 
+/** A course module annotated with the requesting user's completion status
+ * (#286) — GET /api/v1/courses/:id/modules. "Completed" means the user has
+ * a non-superseded quiz submission for that module; superseded submissions
+ * (left behind by a retry, #295) don't count until the new quiz is
+ * resubmitted. */
+export interface CourseModuleWithProgress extends CourseModule {
+  completed: boolean;
+}
+
 export interface CourseStats {
   totalCourses: number;
   enrollmentsByDifficulty: Record<"beginner" | "intermediate" | "advanced", number>;

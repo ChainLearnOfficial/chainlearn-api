@@ -91,6 +91,24 @@ export class CourseController {
   }
 
   /**
+   * POST /api/courses/enroll/batch
+   * Batch enroll the authenticated user in multiple courses.
+   */
+  async batchEnroll(
+    request: FastifyRequest<{ Body: { courseIds: string[] } }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { authUser } = request as AuthenticatedRequest;
+    const { courseIds } = request.body;
+    const results = await courseService.batchEnroll(authUser.id, courseIds);
+
+    reply.status(201).send({
+      success: true,
+      data: results,
+    });
+  }
+
+  /**
    * POST /api/v1/courses/:id/share
    * Get (or create) the caller's referral link for a course (#325).
    */

@@ -72,6 +72,11 @@ export async function authGuard(
       throw new UnauthorizedError("User no longer exists");
     }
 
+    // A banned account (#347) cannot make authenticated requests.
+    if (user.bannedAt) {
+      throw new ForbiddenError("User account has been banned");
+    }
+
     // Validate that the stellarAddress in the JWT matches the database record
     // This provides defense-in-depth against token forgery scenarios
     if (decoded.stellarAddress !== user.stellarAddress) {

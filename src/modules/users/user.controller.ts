@@ -70,6 +70,23 @@ export class UserController {
   }
 
   /**
+   * GET /api/users/me/learning-path
+   * Get personalized learning path recommendations.
+   */
+  async getLearningPath(
+    request: FastifyRequest,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { authUser } = request as AuthenticatedRequest;
+    const recommendations = await userService.getLearningPath(authUser.id);
+
+    reply.send({
+      success: true,
+      data: recommendations,
+    });
+  }
+
+  /**
    * DELETE /api/users/me
    * Soft-delete the authenticated user's account.
    */

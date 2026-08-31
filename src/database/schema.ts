@@ -53,6 +53,11 @@ export const users = pgTable(
     // a soft delete — the row (and its enrollments/credentials, which are
     // never touched here) is preserved for on-chain record consistency.
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    // Set by AdminUsersService.banUser (#347). Null means the user is not banned.
+    // Once set, authGuard treats the user as banned and returns 403.
+    bannedAt: timestamp("banned_at", { withTimezone: true }),
+    // Reason for the ban, if any.
+    banReason: text("ban_reason"),
   },
   (table) => [index("idx_users_stellar_address").on(table.stellarAddress)]
 );

@@ -7,6 +7,7 @@ import {
   courseIdParamsSchema,
   popularCoursesQuerySchema,
   enrollCourseQuerySchema,
+  batchEnrollSchema,
   shareCodeParamsSchema,
 } from "./course.types.js";
 
@@ -162,6 +163,29 @@ export async function courseRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => courseController.enroll(request, reply)
+  );
+
+  app.post<{ Body: import("./course.types.js").BatchEnrollBody }>(
+    "/enroll/batch",
+    {
+      preHandler: [
+        authGuard,
+        validate({ body: batchEnrollSchema }),
+      ],
+      schema: {
+        description: "Batch enroll in multiple courses",
+        tags: ["courses"],
+        security: [{ bearerAuth: [] }],
+        body: {
+          type: "object",
+          properties: {
+            courseIds: { type: "array", items: { type: "string", format: "uuid" }, minItems: 1, maxItems: 100 },
+          },
+          required: ["courseIds"],
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => courseController.batchEnroll(request, reply)
   );
 
   app.post<{ Params: { id: string } }>(

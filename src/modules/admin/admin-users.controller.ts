@@ -24,6 +24,38 @@ export class AdminUsersController {
       },
     });
   }
+
+  /**
+   * POST /api/v1/admin/users/:id/ban
+   * Ban a user and invalidate sessions (admin only).
+   */
+  async ban(
+    request: FastifyRequest<{ Params: { id: string }; Body: { reason: string } }>,
+    reply: FastifyReply,
+  ): Promise<void> {
+    const { id } = request.params;
+    const { reason } = request.body;
+    await adminUsersService.banUser(id, reason);
+
+    reply.send({ success: true, message: "User banned successfully" });
+  }
+
+  /**
+   * GET /api/v1/admin/users/:id/activity
+   * Get user activity feed (admin only).
+   */
+  async getActivity(
+    request: FastifyRequest<{ Params: { id: string } }>,
+    reply: FastifyReply,
+  ): Promise<void> {
+    const { id } = request.params;
+    const activities = await adminUsersService.getUserActivity(id);
+
+    reply.send({
+      success: true,
+      data: activities,
+    });
+  }
 }
 
 export const adminUsersController = new AdminUsersController();

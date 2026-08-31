@@ -546,6 +546,44 @@ export class CourseService {
   }
 
   /**
+   * Batch enroll user in multiple courses (#345). Processes each enrollment
+   * sequentially with individual validation. Returns per-course results.
+   */
+  async batchEnroll(
+    userId: string,
+    courseIds: string[],
+  ): Promise<
+    Array<{
+      courseId: string;
+      success: boolean;
+      message: string;
+    }>
+  > {
+    const results = [];
+
+    for (const courseId of courseIds) {
+      try {
+        await this.enroll(userId, courseId);
+        results.push({
+          courseId,
+          success: true,
+          message: "Enrolled successfully",
+        });
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Enrollment failed";
+        results.push({
+          courseId,
+          success: false,
+          message,
+        });
+      }
+    }
+
+    return results;
+  }
+
+  /**
    * Active courses ordered by enrollment count descending, for discovery
    * (#293). Cached separately from listCourses() since the sort/shape
    * differs and a 5 min TTL is appropriate here (trending courses don't

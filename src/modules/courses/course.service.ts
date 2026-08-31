@@ -20,11 +20,18 @@ import {
   quizzes,
   quizSubmissions,
   courseShares,
+  courseReviews,
+  credentials,
   users,
   type CourseModuleDefinition,
 } from "../../database/schema.js";
 import { config } from "../../config/index.js";
-import { NotFoundError, ConflictError, ForbiddenError } from "../../utils/errors.js";
+import {
+  NotFoundError,
+  ConflictError,
+  ForbiddenError,
+  ValidationError,
+} from "../../utils/errors.js";
 import { withLock } from "../../utils/lock.js";
 import { logger } from "../../utils/logger.js";
 import { getOnChainContentHash } from "../../stellar/progress-tracker.js";
@@ -54,6 +61,10 @@ import type {
   CourseModuleWithProgress,
   CreateModuleBody,
   UpdateModuleBody,
+  ListReviewsQuery,
+  CreateReviewBody,
+  CourseReview,
+  CourseReviewsResult,
 } from "./course.types.js";
 
 const POPULAR_COURSES_TTL_SECONDS = 300;
@@ -266,6 +277,7 @@ export class CourseService {
         .from(enrollments)
         .where(eq(enrollments.courseId, courseId));
 
+      const reviewStats = await this.getReviewStats(courseId);
       const moduleMetadata = this.normalizeCourseModules(course.courseModules);
       let modules: CourseModule[];
 
@@ -304,6 +316,8 @@ export class CourseService {
         contentHash: course.contentHash,
         modules,
         createdAt: course.createdAt,
+        averageRating: reviewStats.averageRating,
+        reviewCount: reviewStats.reviewCount,
       };
 
       await cacheSet(cacheKeyString, cachedDetail, 120);
@@ -969,6 +983,185 @@ export class CourseService {
     await cacheSet(cacheKeyString, recommendations, 3600);
 
     return recommendations.map((course) => ({ ...course, isEnrolled: false }));
+  }
+
+  // ─── Course Reviews ─────────────────────────────────────────────────────
+
+  /**
+   * Average rating + review count for a course, cached separately from the
+   * paginated review list itself so getCourseDetail (which only needs the
+   * summary, not every review) can reuse it cheaply. Invalidated together
+   * with the course detail cache whenever a review is created/updated.
+   */
+  private async getReviewStats(
+    courseId: string,
+  ): Promise<{ averageRating: number | null; reviewCount: number }> {
+    const namespace = "courses";
+    const cacheKeyString = cacheKey(namespace, "review-stats", courseId);
+
+    const cached = await cacheGet<{
+      averageRating: number | null;
+      reviewCount: number;
+    }>(namespace, cacheKeyString);
+    if (cached) return cached;
+
+    const [row] = await db
+      .select({
+        average: sql<string | null>`AVG(${courseReviews.rating})`,
+        total: count(),
+      })
+      .from(courseReviews)
+      .where(eq(courseReviews.courseId, courseId));
+
+    const stats = {
+      averageRating:
+        row?.average != null ? Number(Number(row.average).toFixed(2)) : null,
+      reviewCount: row?.total ?? 0,
+    };
+
+    await cacheSet(cacheKeyString, stats, 300);
+
+    return stats;
+  }
+
+  private async invalidateReviewCaches(courseId: string): Promise<void> {
+    const invalidations = await Promise.allSettled([
+      cacheDel(cacheKey("courses", "review-stats", courseId)),
+      cacheDel(cacheKey("courses", "detail", courseId)),
+      cacheInvalidatePattern(cacheKeyPattern("courses", "reviews", courseId)),
+    ]);
+    const failed = invalidations.filter((r) => r.status === "rejected");
+    if (failed.length > 0) {
+      logger.warn(
+        { courseId, failedCount: failed.length },
+        "Post-review cache invalidation had failures — affected views may serve stale data until their TTL expires",
+      );
+    }
+  }
+
+  /** Paginated review list for a course, alongside its average rating. */
+  async getCourseReviews(
+    courseId: string,
+    query: ListReviewsQuery,
+  ): Promise<CourseReviewsResult> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course || !course.isActive) {
+      throw new NotFoundError("Course");
+    }
+
+    const namespace = "courses";
+    const cacheKeyString = cacheKey(
+      namespace,
+      "reviews",
+      courseId,
+      query.page,
+      query.limit,
+    );
+
+    let listData = await cacheGet<{ reviews: CourseReview[]; total: number }>(
+      namespace,
+      cacheKeyString,
+    );
+
+    if (!listData) {
+      const offset = (query.page - 1) * query.limit;
+
+      const [[totalResult], rows] = await Promise.all([
+        db
+          .select({ value: count() })
+          .from(courseReviews)
+          .where(eq(courseReviews.courseId, courseId)),
+        db
+          .select({
+            id: courseReviews.id,
+            userId: courseReviews.userId,
+            displayName: users.displayName,
+            rating: courseReviews.rating,
+            reviewText: courseReviews.reviewText,
+            createdAt: courseReviews.createdAt,
+            updatedAt: courseReviews.updatedAt,
+          })
+          .from(courseReviews)
+          .innerJoin(users, eq(courseReviews.userId, users.id))
+          .where(eq(courseReviews.courseId, courseId))
+          .orderBy(desc(courseReviews.createdAt))
+          .limit(query.limit)
+          .offset(offset),
+      ]);
+
+      listData = { reviews: rows, total: totalResult?.value ?? 0 };
+      await cacheSet(cacheKeyString, listData, 60);
+    }
+
+    const stats = await this.getReviewStats(courseId);
+
+    return {
+      reviews: listData.reviews,
+      total: listData.total,
+      averageRating: stats.averageRating,
+      totalReviews: stats.reviewCount,
+    };
+  }
+
+  /**
+   * Create or update the caller's review for a course (one review per user
+   * per course — a repeat submission overwrites the previous rating/text).
+   * Restricted to users who hold a completion credential for the course,
+   * since minting one already requires a passing quiz submission.
+   */
+  async upsertReview(
+    userId: string,
+    courseId: string,
+    data: CreateReviewBody,
+  ): Promise<CourseReview> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course || !course.isActive) {
+      throw new NotFoundError("Course");
+    }
+
+    const credential = await db.query.credentials.findFirst({
+      where: and(
+        eq(credentials.userId, userId),
+        eq(credentials.courseId, courseId),
+      ),
+    });
+    if (!credential) {
+      throw new ForbiddenError(
+        "Must complete the course before reviewing it",
+      );
+    }
+
+    const reviewText = data.reviewText ?? null;
+    const [row] = await db
+      .insert(courseReviews)
+      .values({ userId, courseId, rating: data.rating, reviewText })
+      .onConflictDoUpdate({
+        target: [courseReviews.userId, courseReviews.courseId],
+        set: { rating: data.rating, reviewText, updatedAt: new Date() },
+      })
+      .returning();
+
+    await this.invalidateReviewCaches(courseId);
+    await auditLog("course.reviewed", { userId, courseId, rating: data.rating });
+    logger.info({ userId, courseId, rating: data.rating }, "Course review saved");
+
+    const user = await db.query.users.findFirst({
+      where: eq(users.id, userId),
+    });
+
+    return {
+      id: row.id,
+      userId: row.userId,
+      displayName: user?.displayName ?? null,
+      rating: row.rating,
+      reviewText: row.reviewText,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    };
   }
 
   // ─── Admin ──────────────────────────────────────────────────────────────

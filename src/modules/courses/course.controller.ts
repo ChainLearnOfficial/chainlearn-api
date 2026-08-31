@@ -7,6 +7,8 @@ import type {
   PopularCoursesQuery,
   EnrollCourseQuery,
   ShareCodeParams,
+  ListReviewsQuery,
+  CreateReviewBody,
 } from "./course.types.js";
 
 export class CourseController {
@@ -177,6 +179,48 @@ export class CourseController {
     const recommendations = await courseService.getRecommendedCourses(authUser.id, limit);
 
     reply.send({ success: true, data: recommendations });
+  }
+
+  /**
+   * GET /api/v1/courses/:id/reviews
+   * List a course's reviews (paginated), alongside its average rating.
+   */
+  async reviews(
+    request: FastifyRequest<{ Params: CourseIdParams; Querystring: ListReviewsQuery }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id } = request.params;
+    const result = await courseService.getCourseReviews(id, request.query);
+
+    reply.send({
+      success: true,
+      data: result.reviews,
+      pagination: {
+        page: request.query.page,
+        limit: request.query.limit,
+        total: result.total,
+      },
+      summary: {
+        averageRating: result.averageRating,
+        totalReviews: result.totalReviews,
+      },
+    });
+  }
+
+  /**
+   * POST /api/v1/courses/:id/reviews
+   * Rate and review a completed course. One review per user per course —
+   * a repeat submission updates the existing review.
+   */
+  async createReview(
+    request: FastifyRequest<{ Params: CourseIdParams; Body: CreateReviewBody }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id } = request.params;
+    const { authUser } = request as AuthenticatedRequest;
+    const review = await courseService.upsertReview(authUser.id, id, request.body);
+
+    reply.status(201).send({ success: true, data: review });
   }
 }
 

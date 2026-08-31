@@ -287,6 +287,68 @@ export const idempotencyKeys = pgTable(
   (table) => [index("idx_idempotency_expires").on(table.expiresAt)]
 );
 
+// ─── Course Reviews ─────────────────────────────────────────────────────────
+
+// One rating/review per user per course (upsert on repeat submission).
+// Average rating is computed from this table and cached by CourseService.
+export const courseReviews = pgTable(
+  "course_reviews",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    courseId: uuid("course_id")
+      .notNull()
+      .references(() => courses.id, { onDelete: "cascade" }),
+    rating: integer("rating").notNull(),
+    reviewText: text("review_text"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_course_reviews_user_course").on(
+      table.userId,
+      table.courseId,
+    ),
+    index("idx_course_reviews_course_id").on(table.courseId),
+    check("chk_course_reviews_rating", sql`(rating >= 1 AND rating <= 5)`),
+  ]
+);
+
+// ─── Notifications ──────────────────────────────────────────────────────────
+
+// In-app user notifications (reward claims, credential mints, system
+// announcements). Rows older than 30 days are purged by
+// jobs/cleanup-notifications.ts.
+export const notifications = pgTable(
+  "notifications",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    type: varchar("type", { length: 50 }).notNull(),
+    title: varchar("title", { length: 255 }).notNull(),
+    message: text("message").notNull(),
+    read: boolean("read").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("idx_notifications_user_created").on(
+      table.userId,
+      sql`${table.createdAt} DESC`,
+    ),
+    index("idx_notifications_user_read").on(table.userId, table.read),
+  ]
+);
+
 // ─── Audit Logs ─────────────────────────────────────────────────────────────
 export const auditLogs = pgTable(
   "audit_logs",

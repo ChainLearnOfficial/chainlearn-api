@@ -20,11 +20,18 @@ import {
   quizzes,
   quizSubmissions,
   courseShares,
+  courseReviews,
+  credentials,
   users,
   type CourseModuleDefinition,
 } from "../../database/schema.js";
 import { config } from "../../config/index.js";
-import { NotFoundError, ConflictError, ForbiddenError } from "../../utils/errors.js";
+import {
+  NotFoundError,
+  ConflictError,
+  ForbiddenError,
+  ValidationError,
+} from "../../utils/errors.js";
 import { withLock } from "../../utils/lock.js";
 import { logger } from "../../utils/logger.js";
 import { getOnChainContentHash } from "../../stellar/progress-tracker.js";
@@ -54,6 +61,10 @@ import type {
   CourseModuleWithProgress,
   CreateModuleBody,
   UpdateModuleBody,
+  ListReviewsQuery,
+  CreateReviewBody,
+  CourseReview,
+  CourseReviewsResult,
 } from "./course.types.js";
 
 const POPULAR_COURSES_TTL_SECONDS = 300;
@@ -266,6 +277,7 @@ export class CourseService {
         .from(enrollments)
         .where(eq(enrollments.courseId, courseId));
 
+      const reviewStats = await this.getReviewStats(courseId);
       const moduleMetadata = this.normalizeCourseModules(course.courseModules);
       let modules: CourseModule[];
 
@@ -304,6 +316,8 @@ export class CourseService {
         contentHash: course.contentHash,
         modules,
         createdAt: course.createdAt,
+        averageRating: reviewStats.averageRating,
+        reviewCount: reviewStats.reviewCount,
       };
 
       await cacheSet(cacheKeyString, cachedDetail, 120);
@@ -1009,6 +1023,185 @@ export class CourseService {
     return recommendations.map((course) => ({ ...course, isEnrolled: false }));
   }
 
+  // ─── Course Reviews ─────────────────────────────────────────────────────
+
+  /**
+   * Average rating + review count for a course, cached separately from the
+   * paginated review list itself so getCourseDetail (which only needs the
+   * summary, not every review) can reuse it cheaply. Invalidated together
+   * with the course detail cache whenever a review is created/updated.
+   */
+  private async getReviewStats(
+    courseId: string,
+  ): Promise<{ averageRating: number | null; reviewCount: number }> {
+    const namespace = "courses";
+    const cacheKeyString = cacheKey(namespace, "review-stats", courseId);
+
+    const cached = await cacheGet<{
+      averageRating: number | null;
+      reviewCount: number;
+    }>(namespace, cacheKeyString);
+    if (cached) return cached;
+
+    const [row] = await db
+      .select({
+        average: sql<string | null>`AVG(${courseReviews.rating})`,
+        total: count(),
+      })
+      .from(courseReviews)
+      .where(eq(courseReviews.courseId, courseId));
+
+    const stats = {
+      averageRating:
+        row?.average != null ? Number(Number(row.average).toFixed(2)) : null,
+      reviewCount: row?.total ?? 0,
+    };
+
+    await cacheSet(cacheKeyString, stats, 300);
+
+    return stats;
+  }
+
+  private async invalidateReviewCaches(courseId: string): Promise<void> {
+    const invalidations = await Promise.allSettled([
+      cacheDel(cacheKey("courses", "review-stats", courseId)),
+      cacheDel(cacheKey("courses", "detail", courseId)),
+      cacheInvalidatePattern(cacheKeyPattern("courses", "reviews", courseId)),
+    ]);
+    const failed = invalidations.filter((r) => r.status === "rejected");
+    if (failed.length > 0) {
+      logger.warn(
+        { courseId, failedCount: failed.length },
+        "Post-review cache invalidation had failures — affected views may serve stale data until their TTL expires",
+      );
+    }
+  }
+
+  /** Paginated review list for a course, alongside its average rating. */
+  async getCourseReviews(
+    courseId: string,
+    query: ListReviewsQuery,
+  ): Promise<CourseReviewsResult> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course || !course.isActive) {
+      throw new NotFoundError("Course");
+    }
+
+    const namespace = "courses";
+    const cacheKeyString = cacheKey(
+      namespace,
+      "reviews",
+      courseId,
+      query.page,
+      query.limit,
+    );
+
+    let listData = await cacheGet<{ reviews: CourseReview[]; total: number }>(
+      namespace,
+      cacheKeyString,
+    );
+
+    if (!listData) {
+      const offset = (query.page - 1) * query.limit;
+
+      const [[totalResult], rows] = await Promise.all([
+        db
+          .select({ value: count() })
+          .from(courseReviews)
+          .where(eq(courseReviews.courseId, courseId)),
+        db
+          .select({
+            id: courseReviews.id,
+            userId: courseReviews.userId,
+            displayName: users.displayName,
+            rating: courseReviews.rating,
+            reviewText: courseReviews.reviewText,
+            createdAt: courseReviews.createdAt,
+            updatedAt: courseReviews.updatedAt,
+          })
+          .from(courseReviews)
+          .innerJoin(users, eq(courseReviews.userId, users.id))
+          .where(eq(courseReviews.courseId, courseId))
+          .orderBy(desc(courseReviews.createdAt))
+          .limit(query.limit)
+          .offset(offset),
+      ]);
+
+      listData = { reviews: rows, total: totalResult?.value ?? 0 };
+      await cacheSet(cacheKeyString, listData, 60);
+    }
+
+    const stats = await this.getReviewStats(courseId);
+
+    return {
+      reviews: listData.reviews,
+      total: listData.total,
+      averageRating: stats.averageRating,
+      totalReviews: stats.reviewCount,
+    };
+  }
+
+  /**
+   * Create or update the caller's review for a course (one review per user
+   * per course — a repeat submission overwrites the previous rating/text).
+   * Restricted to users who hold a completion credential for the course,
+   * since minting one already requires a passing quiz submission.
+   */
+  async upsertReview(
+    userId: string,
+    courseId: string,
+    data: CreateReviewBody,
+  ): Promise<CourseReview> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course || !course.isActive) {
+      throw new NotFoundError("Course");
+    }
+
+    const credential = await db.query.credentials.findFirst({
+      where: and(
+        eq(credentials.userId, userId),
+        eq(credentials.courseId, courseId),
+      ),
+    });
+    if (!credential) {
+      throw new ForbiddenError(
+        "Must complete the course before reviewing it",
+      );
+    }
+
+    const reviewText = data.reviewText ?? null;
+    const [row] = await db
+      .insert(courseReviews)
+      .values({ userId, courseId, rating: data.rating, reviewText })
+      .onConflictDoUpdate({
+        target: [courseReviews.userId, courseReviews.courseId],
+        set: { rating: data.rating, reviewText, updatedAt: new Date() },
+      })
+      .returning();
+
+    await this.invalidateReviewCaches(courseId);
+    await auditLog("course.reviewed", { userId, courseId, rating: data.rating });
+    logger.info({ userId, courseId, rating: data.rating }, "Course review saved");
+
+    const user = await db.query.users.findFirst({
+      where: eq(users.id, userId),
+    });
+
+    return {
+      id: row.id,
+      userId: row.userId,
+      displayName: user?.displayName ?? null,
+      rating: row.rating,
+      reviewText: row.reviewText,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    };
+  }
+
   // ─── Admin ──────────────────────────────────────────────────────────────
 
   private async invalidateCourseCaches(courseId?: string): Promise<void> {
@@ -1153,6 +1346,136 @@ export class CourseService {
     await this.invalidateCourseCaches(courseId);
     await auditLog("course.deleted", { courseId });
     logger.info({ courseId }, "Course soft-deleted");
+  }
+
+  /**
+   * Publish a course (set isActive = true) after validating it has the
+   * content required to go live: a title, description, difficulty, at
+   * least one module, and at least one quiz per module. Validation checks
+   * the admin-defined `modules` structure (#304) against quizzes.moduleId,
+   * since that's what a learner actually walks through.
+   */
+  async publishCourse(courseId: string): Promise<AdminCourseWithAccessibility> {
+    const [course] = await db
+      .select()
+      .from(courses)
+      .where(eq(courses.id, courseId));
+
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    const missing: string[] = [];
+    if (!course.title?.trim()) missing.push("title");
+    if (!course.description?.trim()) missing.push("description");
+    if (!course.difficulty?.trim()) missing.push("difficulty");
+
+    const modules = (course.modules ?? []) as CourseModuleDefinition[];
+    if (modules.length === 0) {
+      missing.push("at least one module");
+    } else {
+      const quizModuleRows = await db
+        .select({ moduleId: quizzes.moduleId })
+        .from(quizzes)
+        .where(eq(quizzes.courseId, courseId))
+        .groupBy(quizzes.moduleId);
+      const moduleIdsWithQuizzes = new Set(
+        quizModuleRows.map((row) => row.moduleId),
+      );
+
+      for (const module of modules) {
+        if (!moduleIdsWithQuizzes.has(module.id)) {
+          missing.push(`at least one quiz for module "${module.title}"`);
+        }
+      }
+    }
+
+    if (missing.length > 0) {
+      throw new ValidationError({ requirements: missing });
+    }
+
+    const [published] = await db
+      .update(courses)
+      .set({ isActive: true })
+      .where(eq(courses.id, courseId))
+      .returning();
+
+    await this.invalidateCourseCaches(courseId);
+    await auditLog("course.published", { courseId });
+    logger.info({ courseId }, "Course published");
+
+    const accessibility = checkAccessibility(
+      this.courseContentFields(published),
+    );
+
+    return { ...this.toAdminCourse(published), accessibility };
+  }
+
+  /**
+   * Duplicate a course — metadata, modules, and quizzes — into a new draft
+   * course (isActive = false) titled "<original> (Copy)". Module IDs are
+   * copied as-is rather than regenerated so the duplicated quizzes (which
+   * reference them via moduleId) still resolve against the new course's
+   * module list.
+   */
+  async duplicateCourse(courseId: string): Promise<AdminCourseWithAccessibility> {
+    const original = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!original) {
+      throw new NotFoundError("Course");
+    }
+
+    const originalQuizzes = await db
+      .select()
+      .from(quizzes)
+      .where(eq(quizzes.courseId, courseId));
+
+    const duplicate = await db.transaction(async (tx) => {
+      const [newCourse] = await tx
+        .insert(courses)
+        .values({
+          title: `${original.title} (Copy)`,
+          description: original.description,
+          difficulty: original.difficulty,
+          tags: original.tags ?? [],
+          courseModules: original.courseModules,
+          modules: (original.modules ?? []) as CourseModuleDefinition[],
+          // A fresh course has no on-chain content commitment of its own yet.
+          contentHash: null,
+          isActive: false,
+          accessibilityScore: original.accessibilityScore,
+        })
+        .returning();
+
+      if (originalQuizzes.length > 0) {
+        await tx.insert(quizzes).values(
+          originalQuizzes.map((quiz) => ({
+            courseId: newCourse.id,
+            moduleId: quiz.moduleId,
+            questions: quiz.questions,
+          })),
+        );
+      }
+
+      return newCourse;
+    });
+
+    await this.invalidateCourseCaches();
+    await auditLog("course.duplicated", {
+      courseId: duplicate.id,
+      sourceCourseId: courseId,
+    });
+    logger.info(
+      { sourceCourseId: courseId, courseId: duplicate.id },
+      "Course duplicated",
+    );
+
+    const accessibility = checkAccessibility(
+      this.courseContentFields(duplicate),
+    );
+
+    return { ...this.toAdminCourse(duplicate), accessibility };
   }
 
   private normalizeCourseModules(

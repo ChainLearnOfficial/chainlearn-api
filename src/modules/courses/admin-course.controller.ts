@@ -52,6 +52,34 @@ export class AdminCourseController {
   }
 
   /**
+   * POST /api/admin/courses/:id/publish
+   * Validate required content is present, then publish (isActive = true).
+   */
+  async publish(
+    request: FastifyRequest<{ Params: CourseIdParams }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id } = request.params;
+    const course = await courseService.publishCourse(id);
+
+    reply.send({ success: true, data: course });
+  }
+
+  /**
+   * POST /api/admin/courses/:id/duplicate
+   * Duplicate a course (metadata, modules, quizzes) into a new draft course.
+   */
+  async duplicate(
+    request: FastifyRequest<{ Params: CourseIdParams }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id } = request.params;
+    const course = await courseService.duplicateCourse(id);
+
+    reply.status(201).send({ success: true, data: course });
+  }
+
+  /**
    * POST /api/admin/courses/:id/modules
    * Create a module definition for a course.
    */

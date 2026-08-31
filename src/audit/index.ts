@@ -18,6 +18,9 @@ type AuditEvent =
   | "course.created"
   | "course.updated"
   | "course.deleted"
+  | "course.published"
+  | "course.duplicated"
+  | "course.reviewed"
   | "user.account_deleted"
   | "course.module.created"
   | "course.module.updated"
@@ -41,6 +44,8 @@ interface AuditFields {
   contentHashMatch?: boolean;
   onChainContentHash?: string | null;
   storedContentHash?: string | null;
+  rating?: number;
+  sourceCourseId?: string;
 }
 
 export async function auditLog(event: AuditEvent, fields: AuditFields): Promise<void> {

@@ -4,6 +4,11 @@ import { authGuard } from "../../middleware/auth.js";
 import { validate } from "../../middleware/validation.js";
 import { activityQuerySchema, updateProfileSchema } from "./user.types.js";
 import { config } from "../../config/index.js";
+import { notificationController } from "../notifications/notification.controller.js";
+import {
+  listNotificationsQuerySchema,
+  notificationIdParamsSchema,
+} from "../notifications/notification.types.js";
 
 export async function userRoutes(app: FastifyInstance): Promise<void> {
   app.addHook("onRequest", authGuard);
@@ -99,6 +104,38 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => userController.getLearningPath(request, reply)
+  app.get<{ Querystring: import("../notifications/notification.types.js").ListNotificationsQuery }>(
+    "/me/notifications",
+    {
+      preHandler: [validate({ querystring: listNotificationsQuerySchema })],
+      schema: {
+        description: "Get the authenticated user's notifications with unread count",
+        tags: ["users", "notifications"],
+        security: [{ bearerAuth: [] }],
+        querystring: {
+          type: "object",
+          properties: {
+            page: { type: "integer", minimum: 1, default: 1 },
+            limit: { type: "integer", minimum: 1, maximum: 50, default: 20 },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => notificationController.list(request, reply)
+  );
+
+  app.put<{ Params: { id: string } }>(
+    "/me/notifications/:id/read",
+    {
+      preHandler: [validate({ params: notificationIdParamsSchema })],
+      schema: {
+        description: "Mark a notification as read",
+        tags: ["users", "notifications"],
+        security: [{ bearerAuth: [] }],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      } as FastifySchema,
+    },
+    (request, reply) => notificationController.markRead(request, reply)
   );
 
   app.delete(

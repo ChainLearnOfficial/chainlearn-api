@@ -9,6 +9,8 @@ import {
   enrollCourseQuerySchema,
   batchEnrollSchema,
   shareCodeParamsSchema,
+  listReviewsQuerySchema,
+  createReviewSchema,
 } from "./course.types.js";
 
 export async function courseRoutes(app: FastifyInstance): Promise<void> {
@@ -186,6 +188,52 @@ export async function courseRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => courseController.batchEnroll(request, reply)
+  app.get<{ Params: { id: string }; Querystring: import("./course.types.js").ListReviewsQuery }>(
+    "/:id/reviews",
+    {
+      preHandler: [
+        validate({ params: courseIdParamsSchema, querystring: listReviewsQuerySchema }),
+      ],
+      schema: {
+        description: "List a course's reviews (paginated), with average rating",
+        tags: ["courses"],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+        querystring: {
+          type: "object",
+          properties: {
+            page: { type: "integer", minimum: 1, default: 1 },
+            limit: { type: "integer", minimum: 1, maximum: 50, default: 20 },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => courseController.reviews(request, reply)
+  );
+
+  app.post<{ Params: { id: string }; Body: import("./course.types.js").CreateReviewBody }>(
+    "/:id/reviews",
+    {
+      preHandler: [
+        authGuard,
+        validate({ params: courseIdParamsSchema, body: createReviewSchema }),
+      ],
+      schema: {
+        description:
+          "Rate and review a completed course (one review per user per course, updatable)",
+        tags: ["courses"],
+        security: [{ bearerAuth: [] }],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+        body: {
+          type: "object",
+          required: ["rating"],
+          properties: {
+            rating: { type: "integer", minimum: 1, maximum: 5 },
+            reviewText: { type: "string", maxLength: 2000 },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => courseController.createReview(request, reply)
   );
 
   app.post<{ Params: { id: string } }>(

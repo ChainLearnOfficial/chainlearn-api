@@ -6,7 +6,6 @@ import { courseRoutes } from "../../modules/courses/course.routes.js";
 import { adminCourseRoutes } from "../../modules/courses/admin-course.routes.js";
 import { adminUsersRoutes } from "../../modules/admin/admin-users.routes.js";
 import { auditRoutes } from "../../modules/admin/audit.routes.js";
-import { quizRoutes } from "../../modules/quizzes/quiz.routes.js";
 import { quizRoutes, quizPublicRoutes } from "../../modules/quizzes/quiz.routes.js";
 import { rewardRoutes } from "../../modules/rewards/reward.routes.js";
 import { credentialRoutes } from "../../modules/credentials/credential.routes.js";

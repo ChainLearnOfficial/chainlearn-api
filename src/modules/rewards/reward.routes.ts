@@ -29,6 +29,19 @@ export async function rewardRoutes(app: FastifyInstance): Promise<void> {
     (request, reply) => rewardController.claim(request, reply)
   );
 
+  app.get(
+    "/pending",
+    {
+      schema: {
+        description:
+          "List the caller's pending reward claims (queued or awaiting confirmation)",
+        tags: ["rewards"],
+        security: [{ bearerAuth: [] }],
+      } as FastifySchema,
+    },
+    (request, reply) => rewardController.pending(request, reply)
+  );
+
   app.get<{ Querystring: import("./reward.types.js").GetHistoryQuery }>(
     "/history",
     {

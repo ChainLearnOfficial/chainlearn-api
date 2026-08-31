@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { CourseModuleDefinition } from "../../database/schema.js";
+import type { AccessibilityReport } from "./accessibility.js";
 
 // ─── Request Schemas ────────────────────────────────────────────────────────
 
@@ -16,6 +17,20 @@ export const courseIdParamsSchema = z.object({
 
 export const popularCoursesQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(50).default(10),
+});
+
+// Referral codes are 10-char base62 tokens; accept a small range so a
+// hand-edited link still validates before we look it up.
+const referralCodeSchema = z
+  .string()
+  .regex(/^[0-9A-Za-z]{6,16}$/, "Invalid referral code");
+
+export const enrollCourseQuerySchema = z.object({
+  ref: referralCodeSchema.optional(),
+});
+
+export const shareCodeParamsSchema = z.object({
+  code: referralCodeSchema,
 });
 
 // ─── Admin Request Schemas ──────────────────────────────────────────────────
@@ -78,6 +93,8 @@ export const moduleParamsSchema = z.object({
 export type ListCoursesQuery = z.infer<typeof listCoursesSchema>;
 export type CourseIdParams = z.infer<typeof courseIdParamsSchema>;
 export type PopularCoursesQuery = z.infer<typeof popularCoursesQuerySchema>;
+export type EnrollCourseQuery = z.infer<typeof enrollCourseQuerySchema>;
+export type ShareCodeParams = z.infer<typeof shareCodeParamsSchema>;
 export type CreateCourseBody = z.infer<typeof createCourseSchema>;
 export type UpdateCourseBody = z.infer<typeof updateCourseSchema>;
 export type CreateModuleBody = z.infer<typeof createModuleSchema>;
@@ -117,6 +134,40 @@ export interface CourseModuleWithProgress extends CourseModule {
   completed: boolean;
 }
 
+/** One row of GET /api/v1/courses/:id/leaderboard (#324). `averageScore` is
+ * the mean of the user's per-quiz percentages (each submission's raw
+ * correct-answer count normalized against its own quiz's question count, the
+ * same normalization getQuizStats uses), rounded to a whole percent.
+ * Superseded submissions (#295) and ungraded ones are excluded. */
+export interface CourseLeaderboardEntry {
+  rank: number;
+  userId: string;
+  displayName: string | null;
+  averageScore: number;
+  quizzesTaken: number;
+}
+
+/** Response of POST /api/v1/courses/:id/share (#325). */
+export interface CourseShareLink {
+  courseId: string;
+  referralCode: string;
+  /** Absolute share URL when PUBLIC_BASE_URL is configured, otherwise a
+   * root-relative path. Carries the referral code as `?ref=`. */
+  url: string;
+  /** PNG data URI (`data:image/png;base64,...`) encoding `url`. */
+  qrCode: string;
+  clickCount: number;
+  enrollmentCount: number;
+}
+
+/** Response of GET /api/v1/courses/shared/:code (#325) — resolves a referral
+ * link, counting the click. */
+export interface ResolvedShareLink {
+  referralCode: string;
+  sharedByUserId: string;
+  course: CourseDetail;
+}
+
 export interface CourseStats {
   totalCourses: number;
   enrollmentsByDifficulty: Record<"beginner" | "intermediate" | "advanced", number>;
@@ -133,7 +184,16 @@ export interface AdminCourse {
   contentHash: string | null;
   isActive: boolean;
   modules: CourseModuleDefinition[];
+  /** 0–100 accessibility score for the authored content (#326). */
+  accessibilityScore: number | null;
   createdAt: Date;
+}
+
+/** createCourse / updateCourse responses carry the freshly computed
+ * accessibility report (#326) alongside the course so the admin UI can
+ * surface warnings without a second request. */
+export interface AdminCourseWithAccessibility extends AdminCourse {
+  accessibility: AccessibilityReport;
 }
 
 export type CourseModuleMetadata = z.infer<typeof courseModuleSchema>;

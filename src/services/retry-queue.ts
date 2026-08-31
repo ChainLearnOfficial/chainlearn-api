@@ -218,6 +218,49 @@ export async function recoverLostJobs(): Promise<void> {
   }
 }
 
+export interface QueuedRewardJob extends RetryJob {
+  /** Zero-based position in the queue, ordered by scheduled ready time. */
+  position: number;
+  /** Epoch ms at which the retry processor will next consider this job. */
+  readyAt: number;
+}
+
+/**
+ * Snapshot of the reward retry queue (#327), ordered by scheduled ready
+ * time. Used to show users where a queued reward claim sits and roughly
+ * when it will be processed. Malformed entries are skipped rather than
+ * throwing — this is a read-only introspection path.
+ */
+export async function getQueuedRewardJobs(): Promise<QueuedRewardJob[]> {
+  const raw = await redis.zrange(QUEUE_KEY, 0, -1, "WITHSCORES");
+  const jobs: QueuedRewardJob[] = [];
+  for (let i = 0; i < raw.length; i += 2) {
+    try {
+      const job = JSON.parse(raw[i]) as RetryJob;
+      jobs.push({
+        ...job,
+        position: i / 2,
+        readyAt: Number(raw[i + 1]),
+      });
+    } catch {
+      // Malformed entry — dequeueReadyBatch handles moving it to the DLQ.
+    }
+  }
+  return jobs;
+}
+
+/** Rough seconds until the retry processor reaches a job at `position` whose
+ * earliest ready time is `readyAt`. Combines the job's own backoff delay with
+ * how many full batches sit ahead of it. */
+export function estimateProcessingSeconds(
+  position: number,
+  readyAt: number,
+): number {
+  const waitForReady = Math.max(0, readyAt - Date.now());
+  const batchesAhead = Math.floor(position / BATCH_SIZE);
+  return Math.ceil((waitForReady + batchesAhead * POLL_INTERVAL_MS) / 1_000);
+}
+
 /**
  * Get the count and first few entries from the dead-letter queue.
  * Used for monitoring and alerting on malformed jobs.

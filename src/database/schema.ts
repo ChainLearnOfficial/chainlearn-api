@@ -89,6 +89,11 @@ export const courses = pgTable(
       .notNull()
       .default([]),
     isActive: boolean("is_active").notNull().default(true),
+    // Set by CourseService.archiveCourse (#358). Null means the course is
+    // not archived. Once set, the course is hidden from public listings
+    // (isActive is also flipped to false) but its data, modules, and
+    // enrollments are preserved — enrolled users can still access it.
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
     // 0–100 accessibility score for the course's authored content (#326),
     // recomputed on every create/update. Null until first written. Advisory
     // only — a low score never blocks saving the course.

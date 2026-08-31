@@ -76,13 +76,7 @@ async function buildApp() {
 
   const app = Fastify({
     bodyLimit: config.REQUEST_BODY_LIMIT_BYTES,
-    logger: {
-      level: config.NODE_ENV === "production" ? "info" : "debug",
-      transport:
-        config.NODE_ENV !== "production"
-          ? { target: "pino-pretty", options: { colorize: true } }
-          : undefined,
-    },
+    logger,
     // requestIdHeader tells Fastify to reuse a client-supplied X-Request-Id
     // as request.id instead of always minting a fresh one via genReqId —
     // genReqId only runs when the header is absent or blank (#287).

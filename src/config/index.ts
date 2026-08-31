@@ -34,7 +34,10 @@ const envSchema = z.object({
   STELLAR_NETWORK: z.enum(["testnet", "mainnet"]).default("testnet"),
   STELLAR_HORIZON_URL: z.string().url(),
   STELLAR_SOROBAN_RPC_URL: z.string().url(),
-  STELLAR_PLATFORM_SECRET: z.string().min(1),
+  STELLAR_PLATFORM_SECRET: z.string().regex(
+    /^S[A-Z2-7]{55}$/,
+    { message: "Invalid Stellar secret key format" }
+  ),
   STELLAR_QUIZ_CONTRACT_ID: z.string().min(1),
   STELLAR_REWARD_CONTRACT_ID: z.string().min(1),
   STELLAR_CREDENTIAL_CONTRACT_ID: z.string().min(1),

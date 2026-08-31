@@ -57,7 +57,6 @@ export class AdminUsersService {
       total: totalResult?.value ?? 0,
     };
   }
-}
 
   /**
    * Ban a user and invalidate all their sessions (#347). Once banned,

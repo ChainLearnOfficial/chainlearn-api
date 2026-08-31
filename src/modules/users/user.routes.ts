@@ -104,6 +104,8 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => userController.getLearningPath(request, reply)
+  );
+
   app.get<{ Querystring: import("../notifications/notification.types.js").ListNotificationsQuery }>(
     "/me/notifications",
     {

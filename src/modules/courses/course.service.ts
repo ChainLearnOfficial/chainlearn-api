@@ -1413,6 +1413,29 @@ export class CourseService {
   }
 
   /**
+   * Archive a course (#358): sets isActive = false and archivedAt = now().
+   * Unlike deleteCourse, this is a distinct, explicitly-tracked action —
+   * archivedAt records when and lets callers tell "archived" apart from
+   * any other reason a course might be inactive. Data, modules, and
+   * enrollments are preserved; enrolled users keep access.
+   */
+  async archiveCourse(courseId: string): Promise<void> {
+    const [course] = await db
+      .update(courses)
+      .set({ isActive: false, archivedAt: new Date() })
+      .where(eq(courses.id, courseId))
+      .returning();
+
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    await this.invalidateCourseCaches(courseId);
+    await auditLog("course.archived", { courseId });
+    logger.info({ courseId }, "Course archived");
+  }
+
+  /**
    * Publish a course (set isActive = true) after validating it has the
    * content required to go live: a title, description, difficulty, at
    * least one module, and at least one quiz per module. Validation checks

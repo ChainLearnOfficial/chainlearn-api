@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifySchema } from "fastify";
 import { courseController } from "./course.controller.js";
+import { waitlistController } from "./waitlist.controller.js";
 import { authGuard, optionalAuth } from "../../middleware/auth.js";
 import { validate } from "../../middleware/validation.js";
 import {
@@ -12,6 +13,7 @@ import {
   listReviewsQuerySchema,
   createReviewSchema,
 } from "./course.types.js";
+import { joinWaitlistSchema, leaveWaitlistSchema } from "./waitlist.types.js";
 
 export async function courseRoutes(app: FastifyInstance): Promise<void> {
   app.get(
@@ -265,5 +267,63 @@ export async function courseRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => courseController.share(request, reply)
+  );
+
+  // ─── Waitlist Endpoints ──────────────────────────────────────────────────
+
+  app.post<{ Params: { id: string }; Body: import("./waitlist.types.js").JoinWaitlistBody }>(
+    "/:id/waitlist",
+    {
+      preHandler: [authGuard, validate({ params: courseIdParamsSchema, body: joinWaitlistSchema })],
+      schema: {
+        description: "Join a course waitlist",
+        tags: ["courses"],
+        security: [{ bearerAuth: [] }],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+        body: {
+          type: "object",
+          required: ["courseId"],
+          properties: {
+            courseId: { type: "string", format: "uuid" },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => waitlistController.joinWaitlist(request, reply)
+  );
+
+  app.delete<{ Params: { id: string }; Body: import("./waitlist.types.js").LeaveWaitlistBody }>(
+    "/:id/waitlist",
+    {
+      preHandler: [authGuard, validate({ params: courseIdParamsSchema, body: leaveWaitlistSchema })],
+      schema: {
+        description: "Leave a course waitlist",
+        tags: ["courses"],
+        security: [{ bearerAuth: [] }],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+        body: {
+          type: "object",
+          required: ["courseId"],
+          properties: {
+            courseId: { type: "string", format: "uuid" },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => waitlistController.leaveWaitlist(request, reply)
+  );
+
+  app.get<{ Params: { id: string } }>(
+    "/:id/waitlist/status",
+    {
+      preHandler: [authGuard, validate({ params: courseIdParamsSchema })],
+      schema: {
+        description: "Get user's waitlist status for a course",
+        tags: ["courses"],
+        security: [{ bearerAuth: [] }],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      } as FastifySchema,
+    },
+    (request, reply) => waitlistController.getStatus(request, reply)
   );
 }

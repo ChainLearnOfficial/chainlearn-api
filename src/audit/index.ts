@@ -13,18 +13,19 @@ type AuditEvent =
   | "auth.login"
   | "auth.login_failed"
   | "course.enrolled"
-  | "course.shared"
-  | "course.referral_enrolled"
   | "course.created"
   | "course.updated"
   | "course.deleted"
-  | "course.published"
-  | "course.duplicated"
-  | "course.reviewed"
   | "user.account_deleted"
   | "course.module.created"
   | "course.module.updated"
-  | "course.module.deleted";
+  | "course.module.deleted"
+  | "course.waitlist.joined"
+  | "course.waitlist.left"
+  | "webhook.created"
+  | "webhook.updated"
+  | "webhook.deleted"
+  | "webhook.secret_rotated";
 
 interface AuditFields {
   userId?: string;
@@ -44,8 +45,12 @@ interface AuditFields {
   contentHashMatch?: boolean;
   onChainContentHash?: string | null;
   storedContentHash?: string | null;
-  rating?: number;
-  sourceCourseId?: string;
+  webhookId?: string;
+  position?: number;
+  previousPosition?: number;
+  url?: string;
+  events?: string[];
+  changes?: string[];
 }
 
 export async function auditLog(event: AuditEvent, fields: AuditFields): Promise<void> {

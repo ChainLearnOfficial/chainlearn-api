@@ -1,7 +1,7 @@
-import type { FastifyInstance } from "fastify";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildApp } from "../../src/server.js";
+
 describe("Webhook System API (Issue #320)", () => {
   let app: FastifyInstance;
 

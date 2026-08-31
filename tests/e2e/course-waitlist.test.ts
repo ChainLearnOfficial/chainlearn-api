@@ -1,15 +1,14 @@
 /// <reference types="vitest" />
+/// <reference types="vitest" />
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildApp } from "../../src/server.js";
-import { describe, beforeAll, afterAll, it, expect } from "vitest";
 
 describe("Course Enrollment Waitlist API (Issue #323)", () => {
   let app: FastifyInstance;
 
   beforeAll(async () => {
     app = await buildApp();
-    await app.ready();
   });
 
   afterAll(async () => {

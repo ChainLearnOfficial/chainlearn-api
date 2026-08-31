@@ -13,9 +13,14 @@ type AuditEvent =
   | "auth.login"
   | "auth.login_failed"
   | "course.enrolled"
+  | "course.shared"
+  | "course.referral_enrolled"
   | "course.created"
   | "course.updated"
   | "course.deleted"
+  | "course.published"
+  | "course.duplicated"
+  | "course.reviewed"
   | "user.account_deleted"
   | "course.module.created"
   | "course.module.updated"
@@ -51,6 +56,8 @@ interface AuditFields {
   url?: string;
   events?: string[];
   changes?: string[];
+  rating?: number;
+  sourceCourseId?: string;
 }
 
 export async function auditLog(event: AuditEvent, fields: AuditFields): Promise<void> {

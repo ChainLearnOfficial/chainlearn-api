@@ -36,6 +36,7 @@ import type {
   CourseModuleMetadata,
   UpdateCourseBody,
   CourseModuleWithProgress,
+  CourseLeaderboardEntry,
   CreateModuleBody,
   UpdateModuleBody,
   ListReviewsQuery,
@@ -47,6 +48,8 @@ import type {
 } from "./course.types.js";
 
 const POPULAR_COURSES_TTL_SECONDS = 300;
+const LEADERBOARD_TTL_SECONDS = 300;
+const LEADERBOARD_SIZE = 20;
 
 export class CourseService {
   async getStats(): Promise<CourseStats> {
@@ -545,6 +548,88 @@ export class CourseService {
     );
 
     return { contentHashMismatch };
+  }
+
+  /**
+   * Drop the caller's enrollment in a course (#310) — the companion action
+   * to enroll() that this codebase didn't previously have, needed to give
+   * "a spot opens up" any concrete meaning. The row is hard-deleted
+   * (matching the "drop a course" language already used in enroll()'s cap
+   * error) rather than soft-cancelled, since nothing in this codebase reads
+   * a cancelled-but-not-deleted enrollment.
+   */
+  async dropEnrollment(userId: string, courseId: string): Promise<void> {
+    await withLock(`enroll:${userId}:${courseId}`, async () => {
+      const [deleted] = await db
+        .delete(enrollments)
+        .where(
+          and(eq(enrollments.userId, userId), eq(enrollments.courseId, courseId)),
+        )
+        .returning();
+
+      if (!deleted) {
+        throw new NotFoundError("Enrollment");
+      }
+
+      const invalidations = await Promise.allSettled([
+        cacheDel(cacheKey("courses", "detail", courseId)),
+        cacheDel(cacheKey("courses", "stats")),
+        cacheDel(cacheKey("user", "progress", userId)),
+        cacheDel(cacheKey("user", "enrollments", userId)),
+        cacheInvalidatePattern(cacheKeyPattern("user", "activity", userId)),
+      ]);
+      const failed = invalidations.filter((r) => r.status === "rejected");
+      if (failed.length > 0) {
+        logger.warn(
+          { userId, courseId, failedCount: failed.length },
+          "Post-drop cache invalidation had failures — affected views may serve stale data until their TTL expires",
+        );
+      }
+    });
+
+    await auditLog("course.enrollment_dropped", { userId, courseId });
+    logger.info({ userId, courseId }, "Enrollment dropped");
+
+    // Runs after the enroll lock releases — notifying a waitlisted user
+    // should never extend how long the enrollment lock for this drop is
+    // held.
+    await this.notifyNextWaitlisted(courseId);
+  }
+
+  /**
+   * Identify the user at the head of a course's waitlist so they can be
+   * told a spot opened up (#310) — called after dropEnrollment(). Uses the
+   * existing waitlistService (added for #320/#323) rather than reading the
+   * table directly; that service already owns join/leave/position
+   * bookkeeping. The identified user stays on the waitlist (not removed)
+   * until they actually enroll, at which point enroll()'s existing call to
+   * waitlistService.removeFromWaitlist takes them off.
+   *
+   * There's currently no user-facing notifications table to write to (it
+   * was dropped from schema.ts by an unrelated upstream change) — this
+   * records the event via the audit log instead, so the signal isn't lost
+   * and can be wired into a real notification channel once one exists
+   * again. Best-effort: a failure here never fails the caller's drop.
+   */
+  private async notifyNextWaitlisted(courseId: string): Promise<void> {
+    try {
+      const next = await waitlistService.getNextOnWaitlist(courseId);
+      if (!next) return;
+
+      await auditLog("course.waitlist.notified", {
+        userId: next.userId,
+        courseId,
+      });
+      logger.info(
+        { userId: next.userId, courseId },
+        "Identified next waitlisted user for an open spot",
+      );
+    } catch (err) {
+      logger.warn(
+        { err, courseId },
+        "Failed to identify next waitlisted user — the enrollment drop itself still succeeded",
+      );
+    }
   }
 
   /**

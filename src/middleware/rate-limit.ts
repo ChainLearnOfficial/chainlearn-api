@@ -70,3 +70,21 @@ export const batchMintRateLimit: RateLimitOptions = {
   },
   errorResponseBuilder,
 };
+
+/**
+ * Batch quiz generation (#308) can fan out into up to MAX_BATCH_GENERATE_MODULES
+ * sequential AI service calls per request — each module's own per-module/hour
+ * counter (assertGenerationAllowed) already caps the underlying AI load, but
+ * this route-level limit additionally caps how often the batch endpoint
+ * itself can be hit, mirroring batchMintRateLimit's rationale for other
+ * multi-step endpoints.
+ */
+export const quizBatchGenerationRateLimit: RateLimitOptions = {
+  max: 5,
+  timeWindow: "1 minute",
+  keyGenerator: (request: FastifyRequest) => {
+    const authReq = request as any;
+    return authReq.authUser?.id ?? request.ip;
+  },
+  errorResponseBuilder,
+};

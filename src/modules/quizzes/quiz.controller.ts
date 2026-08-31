@@ -3,6 +3,7 @@ import { quizService } from "./quiz.service.js";
 import type { AuthenticatedRequest } from "../../middleware/auth.js";
 import type {
   GenerateQuizBody,
+  GenerateQuizBatchBody,
   SubmitQuizBody,
   QuizIdParams,
   QuizStatsQuery,
@@ -22,6 +23,21 @@ export class QuizController {
     const quiz = await quizService.generateQuiz(authUser.id, data);
 
     reply.status(201).send({ success: true, data: quiz });
+  }
+
+  /**
+   * POST /api/v1/quizzes/generate-batch
+   * Generate quizzes for multiple modules of a course in one request (#308).
+   */
+  async generateBatch(
+    request: FastifyRequest<{ Body: GenerateQuizBatchBody }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { authUser } = request as AuthenticatedRequest;
+    const data = request.body;
+    const results = await quizService.generateQuizBatch(authUser.id, data);
+
+    reply.status(201).send({ success: true, data: results });
   }
 
   /**

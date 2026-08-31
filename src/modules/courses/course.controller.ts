@@ -100,6 +100,38 @@ export class CourseController {
   }
 
   /**
+   * GET /api/v1/courses/:id/leaderboard
+   * Top performers for a course, ranked by average quiz score (#324, #311).
+   * Restored here — course.service.ts's getLeaderboard was left intact but
+   * this passthrough was collateral damage of an unrelated upstream merge
+   * (#440) that stripped several CourseController methods.
+   */
+  async leaderboard(
+    request: FastifyRequest<{ Params: CourseIdParams }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id } = request.params;
+    const leaderboard = await courseService.getLeaderboard(id);
+
+    reply.send({ success: true, data: leaderboard });
+  }
+
+  /**
+   * DELETE /api/v1/courses/:id/enroll
+   * Drop the caller's enrollment in a course (#310).
+   */
+  async dropEnrollment(
+    request: FastifyRequest<{ Params: CourseIdParams }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id } = request.params;
+    const { authUser } = request as AuthenticatedRequest;
+    await courseService.dropEnrollment(authUser.id, id);
+
+    reply.send({ success: true, message: "Enrollment dropped" });
+  }
+
+  /**
    * GET /api/courses/:id/modules
    * List a course's modules with the authenticated (enrolled) user's
    * per-module completion status (#286).

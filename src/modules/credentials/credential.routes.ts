@@ -14,6 +14,15 @@ export async function credentialRoutes(app: FastifyInstance): Promise<void> {
       schema: {
         description: "Mint a course completion credential (NFT)",
         tags: ["credentials"],
+        security: [{ bearerAuth: [] }],
+        body: {
+          type: "object", required: ["courseId", "submissionId", "idempotencyKey"],
+          properties: {
+            courseId: { type: "string", format: "uuid" },
+            submissionId: { type: "string", format: "uuid" },
+            idempotencyKey: { type: "string", minLength: 16, maxLength: 64 },
+          },
+        },
       } as FastifySchema,
     },
     (request, reply) => credentialController.mint(request, reply)
@@ -25,6 +34,7 @@ export async function credentialRoutes(app: FastifyInstance): Promise<void> {
       schema: {
         description: "List user credentials",
         tags: ["credentials"],
+        security: [{ bearerAuth: [] }],
       } as FastifySchema,
     },
     (request, reply) => credentialController.list(request, reply)

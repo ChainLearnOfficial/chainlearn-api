@@ -1,10 +1,16 @@
 import { initTracing, shutdownTracing } from "./tracing.js";
 
+import { createReadStream } from "node:fs";
+import { access } from "node:fs/promises";
+import path from "node:path";
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
 import jwt from "@fastify/jwt";
+import multipart from "@fastify/multipart";
 import rateLimit from "@fastify/rate-limit";
+import swagger from "@fastify/swagger";
+import swaggerUi from "@fastify/swagger-ui";
 import { sql } from "drizzle-orm";
 import { config } from "./config/index.js";
 import { logger } from "./utils/logger.js";
@@ -32,6 +38,7 @@ import {
 } from "./jobs/reconcile-pending-rewards.js";
 import { processRewardClaim } from "./modules/rewards/reward.service.js";
 import { warmCourseCache } from "./cache/warmer.js";
+import { runWithRequestContext } from "./utils/request-context.js";
 
 // Versioned route modules
 import { registerVersionedRoutes } from "./routes/versioning.js";
@@ -63,7 +70,7 @@ async function buildApp() {
   initTracing();
 
   const app = Fastify({
-    bodyLimit: 1024 * 100, // 100KB
+    bodyLimit: config.REQUEST_BODY_LIMIT_BYTES,
     logger: {
       level: config.NODE_ENV === "production" ? "info" : "debug",
       transport:
@@ -75,6 +82,35 @@ async function buildApp() {
     genReqId: () => crypto.randomUUID(),
   });
 
+  app.addHook("onRequest", (request, _reply, done) => {
+    runWithRequestContext(request.id, done);
+  });
+
+  await app.register(swagger, {
+    openapi: {
+      info: {
+        title: "ChainLearn API",
+        description: "API for the ChainLearn Stellar-based learning platform",
+        version: "1.0.0",
+      },
+      components: {
+        securitySchemes: {
+          bearerAuth: { type: "http", scheme: "bearer", bearerFormat: "JWT" },
+        },
+      },
+      tags: [
+        { name: "auth", description: "SEP-10 authentication" },
+        { name: "users", description: "User profile and progress" },
+        { name: "courses", description: "Course discovery and enrollment" },
+        { name: "quizzes", description: "Quiz generation and submission" },
+        { name: "rewards", description: "Learning rewards" },
+        { name: "credentials", description: "Course credentials" },
+      ],
+    },
+  });
+
+  await app.register(swaggerUi, { routePrefix: "/docs" });
+
   // ─── Plugins ────────────────────────────────────────────────────────────
 
   // #220: OWASP security headers via @fastify/helmet.
@@ -84,7 +120,9 @@ async function buildApp() {
     contentSecurityPolicy: {
       directives: {
         defaultSrc: ["'none'"],
-        scriptSrc: ["'none'"],
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", "data:"],
         objectSrc: ["'none'"],
         frameAncestors: ["'none'"],
       },
@@ -125,6 +163,13 @@ async function buildApp() {
   });
 
   await app.register(rateLimit, rateLimitOptions());
+
+  await app.register(multipart, {
+    limits: {
+      fileSize: config.MULTIPART_BODY_LIMIT_BYTES,
+      files: 1,
+    },
+  });
 
   // ─── Observability ──────────────────────────────────────────────────────
   setupInfraMetrics(pool, redis);
@@ -168,6 +213,40 @@ async function buildApp() {
   });
 
   app.get("/health/live", async () => ({ status: "ok" }));
+
+  app.get<{ Params: { filename: string } }>(
+    "/uploads/avatars/:filename",
+    async (request, reply) => {
+      const { filename } = request.params;
+      if (!/^[A-Za-z0-9_-]+\\.(jpg|png|webp)$/.test(filename)) {
+        return reply.status(404).send({
+          statusCode: 404,
+          error: "NOT_FOUND",
+          message: "Route not found",
+        });
+      }
+
+      const filePath = path.join(path.resolve(config.AVATAR_UPLOAD_DIR), filename);
+      try {
+        await access(filePath);
+      } catch {
+        return reply.status(404).send({
+          statusCode: 404,
+          error: "NOT_FOUND",
+          message: "Route not found",
+        });
+      }
+
+      const contentType = filename.endsWith(".png")
+        ? "image/png"
+        : filename.endsWith(".webp")
+          ? "image/webp"
+          : "image/jpeg";
+
+      reply.header("Content-Type", contentType);
+      return reply.send(createReadStream(filePath));
+    },
+  );
 
   app.get("/health/ready", async (_request, reply) => {
     const [dbCheck, redisCheck, horizonCheck, sorobanCheck] =

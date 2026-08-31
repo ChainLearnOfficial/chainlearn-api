@@ -11,6 +11,7 @@ import {
   circuitBreakerExecute,
   withTimeout,
 } from "./resilience.js";
+import { getRequestId } from "../utils/request-context.js";
 
 const READ_TIMEOUT_MS = 10_000;
 const WRITE_TIMEOUT_MS = 30_000;
@@ -34,6 +35,7 @@ export class StellarClient {
   async getAccount(
     publicKey: string,
   ): Promise<StellarSdk.Horizon.AccountResponse> {
+    logger.debug({ requestId: getRequestId(), publicKey }, "Loading Stellar account");
     try {
       return await circuitBreakerExecute(
         () =>
@@ -52,6 +54,8 @@ export class StellarClient {
   async submitTransaction(
     txEnvelope: StellarSdk.Transaction | StellarSdk.FeeBumpTransaction,
   ): Promise<StellarSdk.Horizon.HorizonApi.SubmitTransactionResponse> {
+    const requestId = getRequestId();
+    logger.debug({ requestId }, "Submitting Stellar transaction");
     try {
       const result = await circuitBreakerExecute(() =>
         stellarRetry.execute(() =>
@@ -61,7 +65,7 @@ export class StellarClient {
           ),
         ),
       );
-      logger.info({ hash: result.hash }, "Transaction submitted successfully");
+      logger.info({ requestId, hash: result.hash }, "Transaction submitted successfully");
       return result;
     } catch (err: any) {
       const extras = err.response?.data?.extras;
@@ -86,6 +90,7 @@ export class StellarClient {
   async callContract(
     tx: StellarSdk.Transaction,
   ): Promise<StellarSdk.rpc.Api.SimulateTransactionResponse> {
+    logger.debug({ requestId: getRequestId() }, "Simulating Stellar contract call");
     try {
       return await circuitBreakerExecute(() =>
         stellarRetry.execute(() =>
@@ -105,6 +110,7 @@ export class StellarClient {
    * silently misled into treating an unreachable network as a missing account.
    */
   async accountExists(publicKey: string): Promise<boolean> {
+    logger.debug({ requestId: getRequestId(), publicKey }, "Checking Stellar account");
     try {
       await circuitBreakerExecute(
         () =>
@@ -137,6 +143,7 @@ export class StellarClient {
    * Used by the pending-reward reconciliation job (#207).
    */
   async getTransaction(txHash: string): Promise<{ status: "SUCCESS" | "FAILED" | "NOT_FOUND" }> {
+    logger.debug({ requestId: getRequestId(), txHash }, "Fetching Stellar transaction");
     try {
       const result = await withTimeout(
         this.soroban.getTransaction(txHash),
@@ -158,7 +165,7 @@ export class StellarClient {
   async checkSorobanHealth(): Promise<void> {
     try {
       // Use a shorter timeout for health checks (3s) to fail fast if RPC is unreachable
-      await withTimeout(this.soroban.getLatestLedger(), 3_000, "read");
+      await withTimeout(this.soroban.getLatestLedger(), 3_000);
     } catch (err: any) {
       const message = err?.message || String(err);
       logger.warn({ message }, "Soroban RPC health check failed");

@@ -209,7 +209,6 @@ export async function recoverLostJobs(): Promise<void> {
       await enqueueReward({
         submissionId: row.id,
         userId: row.userId,
-        score: row.score,
       });
     }
 

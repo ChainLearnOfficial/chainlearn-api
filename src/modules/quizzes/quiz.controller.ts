@@ -34,6 +34,21 @@ export class QuizController {
 
     reply.send({ success: true, data: result });
   }
+
+  /**
+   * POST /api/quizzes/:id/retry
+   * Retake a previously submitted quiz with freshly generated questions.
+   */
+  async retry(
+    request: FastifyRequest<{ Params: QuizIdParams }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { authUser } = request as AuthenticatedRequest;
+    const { id } = request.params;
+    const quiz = await quizService.retryQuiz(authUser.id, id);
+
+    reply.status(201).send({ success: true, data: quiz });
+  }
 }
 
 export const quizController = new QuizController();

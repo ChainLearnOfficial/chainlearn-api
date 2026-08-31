@@ -1,22 +1,31 @@
 import { eq, and } from "drizzle-orm";
 import { db } from "../../config/database.js";
 import { quizzes, quizSubmissions, enrollments } from "../../database/schema.js";
-import { NotFoundError, ForbiddenError, ConflictError } from "../../utils/errors.js";
+import {
+  NotFoundError,
+  ForbiddenError,
+  ConflictError,
+  RateLimitError,
+} from "../../utils/errors.js";
 import { withLock } from "../../utils/lock.js";
 import { createQuizProof } from "../../stellar/signatures.js";
 import { logger } from "../../utils/logger.js";
+import { redis } from "../../config/redis.js";
 import { generateQuizFromAI } from "./ai-client.js";
 import { sanitizeQuizFeedback } from "../../utils/sanitize.js";
 import { auditLog } from "../../audit/index.js";
 import { quizSubmissionsTotal } from "../../metrics/index.js";
 import {
   PASSING_PERCENTAGE,
+  MAX_RETRIES_PER_MODULE_PER_DAY,
   type GenerateQuizBody,
   type SubmitQuizBody,
   type QuizWithQuestions,
   type QuizSubmissionResult,
   type QuizQuestion,
 } from "./quiz.types.js";
+
+type GeneratedQuestion = QuizQuestion & { correctIndex: number };
 
 export class QuizService {
   /**
@@ -68,59 +77,12 @@ export class QuizService {
       };
     }
 
-    // Generate new quiz via the chainlearn-ai service. Fall back to the
-    // hardcoded placeholder set if the AI service is unreachable so the
-    // dashboard never breaks on a transient outage.
-    let generatedQuestions;
-    try {
-      const aiQuestions = await generateQuizFromAI({
-        userId,
-        courseId: data.courseId,
-        moduleId: data.moduleId,
-        difficulty: data.difficulty ?? "beginner",
-        numQuestions: data.numQuestions ?? 5,
-      });
-      if (!Array.isArray(aiQuestions)) {
-        throw new Error("AI service returned non-array questions");
-      }
-
-      const validQuestions = aiQuestions.filter((q) => {
-        const hasPrompt =
-          typeof q?.prompt === "string" && q.prompt.trim().length > 0;
-        const hasOptions = Array.isArray(q?.options) && q.options.length > 0;
-        const hasValidIndex =
-          typeof q?.correct_index === "number" &&
-          Number.isInteger(q.correct_index) &&
-          q.correct_index >= 0 &&
-          q.correct_index < (q.options?.length ?? 0);
-
-        const isValid = hasPrompt && hasOptions && hasValidIndex;
-        if (!isValid) {
-          logger.warn({ question: q }, "Invalid AI-generated question skipped");
-        }
-        return isValid;
-      });
-
-      if (validQuestions.length === 0) {
-        throw new Error("AI service returned no valid questions");
-      }
-
-      generatedQuestions = validQuestions.map((q, i) => ({
-        id: `q${i + 1}`,
-        text: q.prompt,
-        options: q.options,
-        correctIndex: q.correct_index,
-      }));
-    } catch (err) {
-      logger.warn(
-        { err },
-        "AI service unavailable, falling back to placeholder questions"
-      );
-      generatedQuestions = this.createPlaceholderQuestions(
-        data.courseId,
-        data.moduleId
-      );
-    }
+    const generatedQuestions = await this.generateQuestions(userId, {
+      courseId: data.courseId,
+      moduleId: data.moduleId,
+      difficulty: data.difficulty ?? "beginner",
+      numQuestions: data.numQuestions ?? 5,
+    });
 
     const [quiz] = await db
       .insert(quizzes)
@@ -309,6 +271,197 @@ export class QuizService {
         };
       });
     });
+  }
+
+  /**
+   * Retake a quiz the user has already submitted (#295). The previous
+   * submission is kept but marked `superseded` (never deleted) and a brand
+   * new quiz row with fresh AI-generated questions is created for the same
+   * course/module. Limited to MAX_RETRIES_PER_MODULE_PER_DAY per user per
+   * module per calendar day.
+   */
+  async retryQuiz(userId: string, quizId: string): Promise<QuizWithQuestions> {
+    return withLock(`quiz-retry:${quizId}:${userId}`, async () => {
+      const [quiz] = await db
+        .select()
+        .from(quizzes)
+        .where(eq(quizzes.id, quizId));
+
+      if (!quiz) {
+        throw new NotFoundError("Quiz");
+      }
+
+      const enrollment = await db.query.enrollments.findFirst({
+        where: and(
+          eq(enrollments.userId, userId),
+          eq(enrollments.courseId, quiz.courseId)
+        ),
+      });
+
+      if (!enrollment) {
+        throw new ForbiddenError("Must be enrolled in the course to retry a quiz");
+      }
+
+      const [submission] = await db
+        .select()
+        .from(quizSubmissions)
+        .where(
+          and(
+            eq(quizSubmissions.quizId, quizId),
+            eq(quizSubmissions.userId, userId)
+          )
+        );
+
+      if (!submission) {
+        throw new ForbiddenError("Quiz must be submitted before it can be retried");
+      }
+
+      await this.assertRetryAllowed(userId, quiz.courseId, quiz.moduleId);
+
+      const generatedQuestions = await this.generateQuestions(userId, {
+        courseId: quiz.courseId,
+        moduleId: quiz.moduleId,
+      });
+
+      const [newQuiz] = await db
+        .insert(quizzes)
+        .values({
+          courseId: quiz.courseId,
+          moduleId: quiz.moduleId,
+          questions: generatedQuestions,
+          generatedFor: userId,
+        })
+        .returning();
+
+      if (!submission.superseded) {
+        await db
+          .update(quizSubmissions)
+          .set({ superseded: true })
+          .where(eq(quizSubmissions.id, submission.id));
+      }
+
+      auditLog("quiz.retried", {
+        userId,
+        courseId: quiz.courseId,
+        moduleId: quiz.moduleId,
+        submissionId: submission.id,
+      });
+      logger.info(
+        {
+          previousQuizId: quizId,
+          newQuizId: newQuiz.id,
+          courseId: quiz.courseId,
+          moduleId: quiz.moduleId,
+        },
+        "Quiz retried"
+      );
+
+      return {
+        id: newQuiz.id,
+        courseId: newQuiz.courseId,
+        moduleId: newQuiz.moduleId,
+        questions: generatedQuestions.map(({ correctIndex: _, ...q }) => q),
+        createdAt: newQuiz.createdAt,
+      };
+    });
+  }
+
+  /**
+   * Enforces MAX_RETRIES_PER_MODULE_PER_DAY using a Redis counter keyed per
+   * user/course/module/day. A dedicated counter (rather than counting rows
+   * in `quizzes`) means the limit reflects retry *calls* specifically,
+   * independent of when the original quiz happened to be generated.
+   */
+  private async assertRetryAllowed(
+    userId: string,
+    courseId: string,
+    moduleId: string
+  ): Promise<void> {
+    const today = new Date().toISOString().slice(0, 10);
+    const key = `chainlearn:quiz:retry-count:${userId}:${courseId}:${moduleId}:${today}`;
+
+    let count: number;
+    try {
+      count = await redis.incr(key);
+      if (count === 1) {
+        // First retry of the day for this module — expire at day's end.
+        await redis.expire(key, 60 * 60 * 24);
+      }
+    } catch (err) {
+      // Redis unavailable: fail open rather than blocking retries entirely,
+      // consistent with withLock's degrade-on-Redis-outage behavior.
+      logger.error({ err, userId, courseId, moduleId }, "Retry-count check failed, proceeding without rate limit");
+      return;
+    }
+
+    if (count > MAX_RETRIES_PER_MODULE_PER_DAY) {
+      throw new RateLimitError(
+        `Maximum ${MAX_RETRIES_PER_MODULE_PER_DAY} quiz retries per module per day reached`
+      );
+    }
+  }
+
+  /**
+   * Shared AI-generation path used by both generateQuiz and retryQuiz.
+   * Falls back to the fixed placeholder set if the AI service is
+   * unreachable or returns no valid questions, so quiz creation never
+   * hard-fails on a transient AI outage.
+   */
+  private async generateQuestions(
+    userId: string,
+    params: {
+      courseId: string;
+      moduleId: string;
+      difficulty?: "beginner" | "intermediate" | "advanced";
+      numQuestions?: number;
+    }
+  ): Promise<GeneratedQuestion[]> {
+    try {
+      const aiQuestions = await generateQuizFromAI({
+        userId,
+        courseId: params.courseId,
+        moduleId: params.moduleId,
+        difficulty: params.difficulty ?? "beginner",
+        numQuestions: params.numQuestions ?? 5,
+      });
+      if (!Array.isArray(aiQuestions)) {
+        throw new Error("AI service returned non-array questions");
+      }
+
+      const validQuestions = aiQuestions.filter((q) => {
+        const hasPrompt =
+          typeof q?.prompt === "string" && q.prompt.trim().length > 0;
+        const hasOptions = Array.isArray(q?.options) && q.options.length > 0;
+        const hasValidIndex =
+          typeof q?.correct_index === "number" &&
+          Number.isInteger(q.correct_index) &&
+          q.correct_index >= 0 &&
+          q.correct_index < (q.options?.length ?? 0);
+
+        const isValid = hasPrompt && hasOptions && hasValidIndex;
+        if (!isValid) {
+          logger.warn({ question: q }, "Invalid AI-generated question skipped");
+        }
+        return isValid;
+      });
+
+      if (validQuestions.length === 0) {
+        throw new Error("AI service returned no valid questions");
+      }
+
+      return validQuestions.map((q, i) => ({
+        id: `q${i + 1}`,
+        text: q.prompt,
+        options: q.options,
+        correctIndex: q.correct_index,
+      }));
+    } catch (err) {
+      logger.warn(
+        { err },
+        "AI service unavailable, falling back to placeholder questions"
+      );
+      return this.createPlaceholderQuestions(params.courseId, params.moduleId);
+    }
   }
 
   private createPlaceholderQuestions(

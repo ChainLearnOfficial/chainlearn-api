@@ -12,6 +12,33 @@ import { ZodError } from "zod";
 export function registerErrorHandler(app: FastifyInstance): void {
   app.setErrorHandler(
     (error: FastifyError | AppError | Error, request: FastifyRequest, reply: FastifyReply) => {
+      const fastifyError = error as FastifyError;
+      if (
+        fastifyError.code === "FST_ERR_CTP_BODY_TOO_LARGE" ||
+        fastifyError.code === "FST_REQ_FILE_TOO_LARGE"
+      ) {
+        const isMultipart = fastifyError.code === "FST_REQ_FILE_TOO_LARGE";
+        const routeConfig = request.routeOptions.config as {
+          fileSizeLimit?: number;
+        };
+        const expectedSize = isMultipart
+          ? routeConfig.fileSizeLimit ?? config.MULTIPART_BODY_LIMIT_BYTES
+          : request.routeOptions.bodyLimit;
+        const actualSize = Number(request.headers["content-length"]) || null;
+
+        return reply.status(413).send({
+          statusCode: 413,
+          error: "PAYLOAD_TOO_LARGE",
+          message: isMultipart
+            ? "Uploaded file is too large"
+            : "Request body is too large",
+          details: {
+            expectedSize,
+            actualSize,
+          },
+        });
+      }
+
       // Handle Zod errors that weren't caught by validation middleware
       if (error instanceof ZodError) {
         return reply.status(400).send({

@@ -1,9 +1,26 @@
 import type { FastifyRequest, FastifyReply } from "fastify";
 import { courseService } from "./course.service.js";
 import type { AuthenticatedRequest } from "../../middleware/auth.js";
-import type { ListCoursesQuery, CourseIdParams } from "./course.types.js";
+import type {
+  ListCoursesQuery,
+  CourseIdParams,
+  PopularCoursesQuery,
+} from "./course.types.js";
 
 export class CourseController {
+  /**
+   * GET /api/courses/stats
+   * Return aggregate active course statistics.
+   */
+  async stats(
+    _request: FastifyRequest,
+    reply: FastifyReply
+  ): Promise<void> {
+    const stats = await courseService.getStats();
+
+    reply.send({ success: true, data: stats });
+  }
+
   /**
    * GET /api/courses
    * List available courses with optional filters.
@@ -52,12 +69,33 @@ export class CourseController {
   ): Promise<void> {
     const { id } = request.params;
     const { authUser } = request as AuthenticatedRequest;
-    await courseService.enroll(authUser.id, id);
+    const { contentHashMismatch } = await courseService.enroll(authUser.id, id);
+
+    if (contentHashMismatch) {
+      reply.header(
+        "X-Content-Warning",
+        "Course content hash does not match the on-chain version",
+      );
+    }
 
     reply.status(201).send({
       success: true,
       message: "Enrolled successfully",
     });
+  }
+
+  /**
+   * GET /api/courses/popular
+   * List active courses ordered by enrollment count descending.
+   */
+  async popular(
+    request: FastifyRequest<{ Querystring: PopularCoursesQuery }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { limit } = request.query;
+    const courses = await courseService.getPopularCourses(limit);
+
+    reply.send({ success: true, data: courses });
   }
 }
 

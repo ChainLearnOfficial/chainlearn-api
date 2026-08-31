@@ -15,6 +15,7 @@ import { generateQuizFromAI } from "./ai-client.js";
 import { sanitizeQuizFeedback } from "../../utils/sanitize.js";
 import { auditLog } from "../../audit/index.js";
 import { quizSubmissionsTotal } from "../../metrics/index.js";
+import { cacheGet, cacheSet, cacheKey } from "../../cache/index.js";
 import {
   PASSING_PERCENTAGE,
   MAX_RETRIES_PER_MODULE_PER_DAY,
@@ -23,7 +24,10 @@ import {
   type QuizWithQuestions,
   type QuizSubmissionResult,
   type QuizQuestion,
+  type QuizStats,
 } from "./quiz.types.js";
+
+const QUIZ_STATS_TTL_SECONDS = 300;
 
 type GeneratedQuestion = QuizQuestion & { correctIndex: number };
 
@@ -462,6 +466,73 @@ export class QuizService {
       );
       return this.createPlaceholderQuestions(params.courseId, params.moduleId);
     }
+  }
+
+  /**
+   * Aggregate quiz statistics (#307): average score, pass rate, total
+   * submissions, and a per-course submission breakdown. Superseded
+   * submissions (from #295 retries) are excluded so a retried quiz's stale
+   * attempt doesn't double-count. `score` is stored as a raw correct-answer
+   * count, not a percentage, so each row is normalized against its own
+   * quiz's question count before averaging — quizzes can have different
+   * numbers of questions (numQuestions: 1-20).
+   */
+  async getQuizStats(courseId?: string): Promise<QuizStats> {
+    const namespace = "quizzes";
+    const cacheKeyString = cacheKey(namespace, "stats", courseId ?? "all");
+
+    const cached = await cacheGet<QuizStats>(namespace, cacheKeyString);
+    if (cached) return cached;
+
+    const conditions = [eq(quizSubmissions.superseded, false)];
+    if (courseId) {
+      conditions.push(eq(quizzes.courseId, courseId));
+    }
+
+    const rows = await db
+      .select({
+        score: quizSubmissions.score,
+        courseId: quizzes.courseId,
+        questions: quizzes.questions,
+      })
+      .from(quizSubmissions)
+      .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+      .where(and(...conditions));
+
+    let percentageSum = 0;
+    let passCount = 0;
+    const submissionsPerCourse: Record<string, number> = {};
+
+    for (const row of rows) {
+      const totalQuestions = Array.isArray(row.questions)
+        ? row.questions.length
+        : 0;
+      const percentage =
+        totalQuestions > 0 && row.score != null
+          ? Math.round((row.score / totalQuestions) * 100)
+          : 0;
+
+      percentageSum += percentage;
+      if (percentage >= PASSING_PERCENTAGE) passCount++;
+      submissionsPerCourse[row.courseId] =
+        (submissionsPerCourse[row.courseId] ?? 0) + 1;
+    }
+
+    const totalSubmissions = rows.length;
+    const stats: QuizStats = {
+      averageScore:
+        totalSubmissions > 0 ? Math.round(percentageSum / totalSubmissions) : 0,
+      passRate:
+        totalSubmissions > 0
+          ? Math.round((passCount / totalSubmissions) * 100)
+          : 0,
+      totalSubmissions,
+      submissionsPerCourse,
+    };
+
+    await cacheSet(cacheKeyString, stats, QUIZ_STATS_TTL_SECONDS);
+
+    return stats;
   }
 
   private createPlaceholderQuestions(

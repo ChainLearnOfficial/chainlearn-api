@@ -2,7 +2,39 @@ import type { FastifyInstance, FastifySchema } from "fastify";
 import { quizController } from "./quiz.controller.js";
 import { authGuard } from "../../middleware/auth.js";
 import { validate } from "../../middleware/validation.js";
-import { generateQuizSchema, submitQuizSchema, quizIdParamsSchema } from "./quiz.types.js";
+import { config } from "../../config/index.js";
+import {
+  generateQuizSchema,
+  submitQuizSchema,
+  quizIdParamsSchema,
+  quizStatsQuerySchema,
+} from "./quiz.types.js";
+
+/**
+ * Public quiz routes — registered separately from quizRoutes (below) since
+ * that plugin applies an onRequest authGuard hook to every route in its
+ * encapsulation context. /stats has no auth requirement (#307), so it lives
+ * in its own plugin under the same "/quizzes" prefix instead.
+ */
+export async function quizPublicRoutes(app: FastifyInstance): Promise<void> {
+  app.get<{ Querystring: import("./quiz.types.js").QuizStatsQuery }>(
+    "/stats",
+    {
+      preHandler: [validate({ querystring: quizStatsQuerySchema })],
+      schema: {
+        description: "Aggregate quiz statistics (average score, pass rate, total submissions)",
+        tags: ["quizzes"],
+        querystring: {
+          type: "object",
+          properties: {
+            courseId: { type: "string", format: "uuid" },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => quizController.stats(request, reply)
+  );
+}
 
 export async function quizRoutes(app: FastifyInstance): Promise<void> {
   app.addHook("onRequest", authGuard);
@@ -10,6 +42,9 @@ export async function quizRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Body: import("./quiz.types.js").GenerateQuizBody }>(
     "/generate",
     {
+      // Longer request timeout (#305) — this calls the AI service, which
+      // can itself take up to AI_TIMEOUT_MS plus retries.
+      config: { timeoutMs: config.QUIZ_GENERATION_TIMEOUT_MS },
       preHandler: [validate({ body: generateQuizSchema })],
       schema: {
         description: "Generate a quiz for a course module",
@@ -65,6 +100,8 @@ export async function quizRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Params: { id: string } }>(
     "/:id/retry",
     {
+      // Also generates via the AI service — same rationale as /generate.
+      config: { timeoutMs: config.QUIZ_GENERATION_TIMEOUT_MS },
       preHandler: [validate({ params: quizIdParamsSchema })],
       schema: {
         description: "Retry a previously submitted quiz with fresh questions",

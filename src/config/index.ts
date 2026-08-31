@@ -41,6 +41,13 @@ const envSchema = z.object({
   RATE_LIMIT_MAX: z.coerce.number().default(100),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().default(60_000),
 
+  // Max number of courses a user can be actively enrolled in at once (#306).
+  // Completed enrollments (completedAt set) don't count toward this.
+  MAX_ENROLLMENTS: z.coerce.number().int().positive().default(10),
+
+  // Request timeout middleware (#305)
+  REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
+  QUIZ_GENERATION_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
   // Request body limits
   REQUEST_BODY_LIMIT_BYTES: z.coerce.number().int().positive().default(1_048_576),
   MULTIPART_BODY_LIMIT_BYTES: z.coerce.number().int().positive().default(5_242_880),

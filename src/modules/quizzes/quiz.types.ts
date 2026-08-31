@@ -38,11 +38,16 @@ export const quizIdParamsSchema = z.object({
   id: z.string().uuid("Invalid quiz ID"),
 });
 
+export const quizStatsQuerySchema = z.object({
+  courseId: z.string().uuid("Invalid course ID").optional(),
+});
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 export type GenerateQuizBody = z.infer<typeof generateQuizSchema>;
 export type SubmitQuizBody = z.infer<typeof submitQuizSchema>;
 export type QuizIdParams = z.infer<typeof quizIdParamsSchema>;
+export type QuizStatsQuery = z.infer<typeof quizStatsQuerySchema>;
 
 export interface QuizQuestion {
   id: string;
@@ -67,4 +72,11 @@ export interface QuizSubmissionResult {
   passed: boolean;
   feedback: string;
   rewardAvailable: boolean;
+}
+
+export interface QuizStats {
+  averageScore: number;
+  passRate: number;
+  totalSubmissions: number;
+  submissionsPerCourse: Record<string, number>;
 }

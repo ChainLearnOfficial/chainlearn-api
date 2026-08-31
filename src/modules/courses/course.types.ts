@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { CourseModuleDefinition } from "../../database/schema.js";
 
 // ─── Request Schemas ────────────────────────────────────────────────────────
 
@@ -40,6 +41,29 @@ export const updateCourseSchema = z
     message: "At least one field must be provided",
   });
 
+// ─── Admin Module Request Schemas (#304) ────────────────────────────────────
+
+export const createModuleSchema = z.object({
+  title: z.string().min(1).max(255),
+  description: z.string().min(1).max(2000).default(""),
+  order: z.coerce.number().int().min(0).optional(),
+});
+
+export const updateModuleSchema = z
+  .object({
+    title: z.string().min(1).max(255).optional(),
+    description: z.string().min(1).max(2000).optional(),
+    order: z.coerce.number().int().min(0).optional(),
+  })
+  .refine((data) => Object.keys(data).length > 0, {
+    message: "At least one field must be provided",
+  });
+
+export const moduleParamsSchema = z.object({
+  id: z.string().uuid("Invalid course ID"),
+  moduleId: z.string().min(1).max(100),
+});
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 export type ListCoursesQuery = z.infer<typeof listCoursesSchema>;
@@ -47,6 +71,9 @@ export type CourseIdParams = z.infer<typeof courseIdParamsSchema>;
 export type PopularCoursesQuery = z.infer<typeof popularCoursesQuerySchema>;
 export type CreateCourseBody = z.infer<typeof createCourseSchema>;
 export type UpdateCourseBody = z.infer<typeof updateCourseSchema>;
+export type CreateModuleBody = z.infer<typeof createModuleSchema>;
+export type UpdateModuleBody = z.infer<typeof updateModuleSchema>;
+export type ModuleParams = z.infer<typeof moduleParamsSchema>;
 
 export interface CourseSummary {
   id: string;
@@ -82,5 +109,6 @@ export interface AdminCourse {
   tags: string[];
   contentHash: string | null;
   isActive: boolean;
+  modules: CourseModuleDefinition[];
   createdAt: Date;
 }

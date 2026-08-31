@@ -21,6 +21,7 @@ type AuditEvent =
   | "course.published"
   | "course.duplicated"
   | "course.reviewed"
+  | "course.archived"
   | "user.account_deleted"
   | "user.data_exported"
   | "course.module.created"

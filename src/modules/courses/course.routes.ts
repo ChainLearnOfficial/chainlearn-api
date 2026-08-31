@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifySchema } from "fastify";
 import { courseController } from "./course.controller.js";
-import { authGuard, optionalAuth } from "../../middleware/auth.js";
+import { authGuard, adminGuard, optionalAuth } from "../../middleware/auth.js";
 import { validate } from "../../middleware/validation.js";
 import {
   listCoursesSchema,
@@ -11,6 +11,7 @@ import {
   shareCodeParamsSchema,
   listReviewsQuerySchema,
   createReviewSchema,
+  listEnrolledUsersQuerySchema,
 } from "./course.types.js";
 
 export async function courseRoutes(app: FastifyInstance): Promise<void> {
@@ -188,6 +189,35 @@ export async function courseRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => courseController.batchEnroll(request, reply)
+  );
+
+  app.get<{ Params: { id: string }; Querystring: import("./course.types.js").ListEnrolledUsersQuery }>(
+    "/:id/enrolled-users",
+    {
+      preHandler: [
+        authGuard,
+        adminGuard,
+        validate({
+          params: courseIdParamsSchema,
+          querystring: listEnrolledUsersQuerySchema,
+        }),
+      ],
+      schema: {
+        description:
+          "List users enrolled in a course with their progress, paginated (admin only, #355)",
+        tags: ["admin", "courses"],
+        security: [{ bearerAuth: [] }],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+        querystring: {
+          type: "object",
+          properties: {
+            page: { type: "integer", minimum: 1, default: 1 },
+            limit: { type: "integer", minimum: 1, maximum: 50, default: 20 },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => courseController.enrolledUsers(request, reply)
   );
 
   app.get<{ Params: { id: string } }>(

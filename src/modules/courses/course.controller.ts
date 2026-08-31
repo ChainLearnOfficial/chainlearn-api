@@ -9,6 +9,7 @@ import type {
   ShareCodeParams,
   ListReviewsQuery,
   CreateReviewBody,
+  ListEnrolledUsersQuery,
 } from "./course.types.js";
 
 export class CourseController {
@@ -237,6 +238,32 @@ export class CourseController {
       summary: {
         averageRating: result.averageRating,
         totalReviews: result.totalReviews,
+      },
+    });
+  }
+
+  /**
+   * GET /api/v1/courses/:id/enrolled-users
+   * Admin-only: paginated list of users enrolled in a course with their
+   * progress (quiz count, average score, completion status) (#355).
+   */
+  async enrolledUsers(
+    request: FastifyRequest<{
+      Params: CourseIdParams;
+      Querystring: ListEnrolledUsersQuery;
+    }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id } = request.params;
+    const result = await courseService.getEnrolledUsers(id, request.query);
+
+    reply.send({
+      success: true,
+      data: result.users,
+      pagination: {
+        page: request.query.page,
+        limit: request.query.limit,
+        total: result.total,
       },
     });
   }

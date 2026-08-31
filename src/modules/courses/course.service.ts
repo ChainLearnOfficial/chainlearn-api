@@ -66,6 +66,8 @@ import type {
   CreateReviewBody,
   CourseReview,
   CourseReviewsResult,
+  ListEnrolledUsersQuery,
+  EnrolledUsersResult,
 } from "./course.types.js";
 
 const POPULAR_COURSES_TTL_SECONDS = 300;
@@ -1139,6 +1141,105 @@ export class CourseService {
         "Post-review cache invalidation had failures — affected views may serve stale data until their TTL expires",
       );
     }
+  }
+
+  /**
+   * Paginated list of users enrolled in a course, with progress data, for
+   * course-creator admins (#355). Cached for 30s per (courseId, page, limit).
+   */
+  async getEnrolledUsers(
+    courseId: string,
+    query: ListEnrolledUsersQuery,
+  ): Promise<EnrolledUsersResult> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    const namespace = "courses";
+    const cacheKeyString = cacheKey(
+      namespace,
+      "enrolled-users",
+      courseId,
+      query.page,
+      query.limit,
+    );
+
+    const cached = await cacheGet<EnrolledUsersResult>(namespace, cacheKeyString);
+    if (cached) return cached;
+
+    const offset = (query.page - 1) * query.limit;
+
+    const [[totalResult], rows] = await Promise.all([
+      db
+        .select({ value: count() })
+        .from(enrollments)
+        .where(eq(enrollments.courseId, courseId)),
+      db
+        .select({
+          userId: enrollments.userId,
+          displayName: users.displayName,
+          stellarAddress: users.stellarAddress,
+          enrolledAt: enrollments.enrolledAt,
+          completedAt: enrollments.completedAt,
+        })
+        .from(enrollments)
+        .innerJoin(users, eq(enrollments.userId, users.id))
+        .where(eq(enrollments.courseId, courseId))
+        .orderBy(desc(enrollments.enrolledAt))
+        .limit(query.limit)
+        .offset(offset),
+    ]);
+
+    const userIds = rows.map((r) => r.userId);
+    const progressByUser = new Map<string, { quizCount: number; averageScore: number | null }>();
+
+    if (userIds.length > 0) {
+      const progressRows = await db
+        .select({
+          userId: quizSubmissions.userId,
+          quizCount: count(quizSubmissions.id),
+          averageScore: sql<number | null>`AVG(${quizSubmissions.score})`,
+        })
+        .from(quizSubmissions)
+        .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+        .where(
+          and(
+            eq(quizzes.courseId, courseId),
+            inArray(quizSubmissions.userId, userIds),
+          ),
+        )
+        .groupBy(quizSubmissions.userId);
+
+      for (const row of progressRows) {
+        progressByUser.set(row.userId, {
+          quizCount: row.quizCount,
+          averageScore:
+            row.averageScore === null ? null : Number(row.averageScore),
+        });
+      }
+    }
+
+    const result: EnrolledUsersResult = {
+      users: rows.map((r) => {
+        const progress = progressByUser.get(r.userId);
+        return {
+          userId: r.userId,
+          displayName: r.displayName,
+          stellarAddress: r.stellarAddress,
+          enrolledAt: r.enrolledAt,
+          completedAt: r.completedAt,
+          quizCount: progress?.quizCount ?? 0,
+          averageScore: progress?.averageScore ?? null,
+        };
+      }),
+      total: totalResult?.value ?? 0,
+    };
+
+    await cacheSet(cacheKeyString, result, 30);
+    return result;
   }
 
   /** Paginated review list for a course, alongside its average rating. */

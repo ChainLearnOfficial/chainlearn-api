@@ -100,6 +100,13 @@ export const listReviewsQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(50).default(20),
 });
 
+// ─── Enrolled Users (admin, #355) ───────────────────────────────────────────
+
+export const listEnrolledUsersQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(50).default(20),
+});
+
 export const createReviewSchema = z.object({
   rating: z.coerce.number().int().min(1).max(5),
   reviewText: z
@@ -124,6 +131,7 @@ export type UpdateModuleBody = z.infer<typeof updateModuleSchema>;
 export type ModuleParams = z.infer<typeof moduleParamsSchema>;
 export type ListReviewsQuery = z.infer<typeof listReviewsQuerySchema>;
 export type CreateReviewBody = z.infer<typeof createReviewSchema>;
+export type ListEnrolledUsersQuery = z.infer<typeof listEnrolledUsersQuerySchema>;
 
 export interface CourseSummary {
   id: string;
@@ -221,6 +229,21 @@ export interface CourseReviewsResult {
   total: number;
   averageRating: number | null;
   totalReviews: number;
+}
+
+export interface EnrolledUserEntry {
+  userId: string;
+  displayName: string | null;
+  stellarAddress: string;
+  enrolledAt: Date;
+  completedAt: Date | null;
+  quizCount: number;
+  averageScore: number | null;
+}
+
+export interface EnrolledUsersResult {
+  users: EnrolledUserEntry[];
+  total: number;
 }
 
 export interface CourseStats {

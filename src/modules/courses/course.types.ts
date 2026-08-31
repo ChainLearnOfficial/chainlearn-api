@@ -47,6 +47,10 @@ export const courseModuleSchema = z.object({
   estimatedDurationMinutes: z.coerce.number().int().positive().max(1440).optional(),
 });
 
+// Course IDs required before this one (#354) — admin-configurable via
+// create/update, self-references filtered out in the service layer.
+const prerequisitesSchema = z.array(z.string().uuid()).max(20).default([]);
+
 export const createCourseSchema = z.object({
   title: z.string().min(1).max(255),
   description: z.string().min(1),
@@ -54,6 +58,7 @@ export const createCourseSchema = z.object({
   tags: z.array(z.string().min(1).max(50)).max(20).default([]),
   courseModules: z.array(courseModuleSchema).max(100).optional(),
   contentHash: z.string().max(64).optional(),
+  prerequisites: prerequisitesSchema.optional(),
 });
 
 export const updateCourseSchema = z
@@ -65,6 +70,7 @@ export const updateCourseSchema = z
     courseModules: z.array(courseModuleSchema).max(100).optional(),
     contentHash: z.string().max(64).optional(),
     isActive: z.boolean().optional(),
+    prerequisites: prerequisitesSchema.optional(),
   })
   .refine((data) => Object.keys(data).length > 0, {
     message: "At least one field must be provided",
@@ -92,6 +98,39 @@ export const moduleParamsSchema = z.object({
   id: z.string().uuid("Invalid course ID"),
   moduleId: z.string().min(1).max(100),
 });
+
+// ─── Import Request Schema (#366) ───────────────────────────────────────────
+
+// Bulk course creation from an uploaded JSON file — same core shape as
+// createCourseSchema, plus an optional `modules` array (admin-defined
+// module definitions, distinct from `courseModules`' quiz-linked metadata)
+// created alongside the course in one call.
+export const importCourseSchema = z.object({
+  title: z.string().min(1).max(255),
+  description: z.string().min(1),
+  difficulty: z.enum(["beginner", "intermediate", "advanced"]).default("beginner"),
+  tags: z.array(z.string().min(1).max(50)).max(20).default([]),
+  courseModules: z.array(courseModuleSchema).max(100).optional(),
+  contentHash: z.string().max(64).optional(),
+  prerequisites: prerequisitesSchema.optional(),
+  modules: z
+    .array(
+      z.object({
+        title: z.string().min(1).max(255),
+        description: z.string().max(2000).default(""),
+        order: z.coerce.number().int().min(0).optional(),
+      }),
+    )
+    .max(100)
+    .default([]),
+});
+
+export type ImportCourseBody = z.infer<typeof importCourseSchema>;
+
+export interface ImportCourseResult {
+  courseId: string;
+  modulesCreated: number;
+}
 
 // ─── Review Request Schemas ─────────────────────────────────────────────────
 
@@ -231,7 +270,26 @@ export interface AdminCourse {
   modules: CourseModuleDefinition[];
   /** 0–100 accessibility score for the authored content (#326). */
   accessibilityScore: number | null;
+  /** Course IDs that should be completed before this one (#354). */
+  prerequisites: string[];
   createdAt: Date;
+}
+
+/** One row of GET /api/v1/courses/:id/prerequisites (#354). */
+export interface CoursePrerequisiteEntry {
+  id: string;
+  title: string;
+  difficulty: string;
+  /** True once the requesting user has completed this prerequisite
+   *  (a non-null `enrollments.completedAt`). Always false for an anonymous
+   *  caller. */
+  completed: boolean;
+}
+
+export interface CoursePrerequisitesResult {
+  prerequisites: CoursePrerequisiteEntry[];
+  /** True iff every prerequisite is completed (or there are none). */
+  met: boolean;
 }
 
 /** createCourse / updateCourse responses carry the freshly computed

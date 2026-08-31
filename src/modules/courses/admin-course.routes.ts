@@ -65,6 +65,20 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
     (request, reply) => adminCourseController.create(request, reply)
   );
 
+  app.post(
+    "/import",
+    {
+      schema: {
+        description:
+          "Bulk-create a course (and its modules) from an uploaded JSON file — multipart/form-data with a single file part (admin only) (#366)",
+        tags: ["admin", "courses"],
+        security: [{ bearerAuth: [] }],
+        consumes: ["multipart/form-data"],
+      } as FastifySchema,
+    },
+    (request, reply) => adminCourseController.import(request, reply)
+  );
+
   app.put<{
     Params: { id: string };
     Body: import("./course.types.js").UpdateCourseBody;

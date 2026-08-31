@@ -21,10 +21,14 @@ type AuditEvent =
   | "course.published"
   | "course.duplicated"
   | "course.reviewed"
+  | "course.imported"
   | "user.account_deleted"
   | "course.module.created"
   | "course.module.updated"
-  | "course.module.deleted";
+  | "course.module.deleted"
+  | "announcement.created"
+  | "announcement.updated"
+  | "announcement.deleted";
 
 interface AuditFields {
   userId?: string;
@@ -46,6 +50,9 @@ interface AuditFields {
   storedContentHash?: string | null;
   rating?: number;
   sourceCourseId?: string;
+  moduleCount?: number;
+  announcementId?: string;
+  priority?: string;
 }
 
 export async function auditLog(event: AuditEvent, fields: AuditFields): Promise<void> {

@@ -3,7 +3,12 @@ import { authController } from "./auth.controller.js";
 import { validate } from "../../middleware/validation.js";
 import { authGuard } from "../../middleware/auth.js";
 import { authRateLimit } from "../../middleware/rate-limit.js";
-import { challengeSchema, verifySchema } from "./auth.types.js";
+import {
+  challengeSchema,
+  verifySchema,
+  refreshSchema,
+  logoutSchema,
+} from "./auth.types.js";
 
 export async function authRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Body: import("./auth.types.js").ChallengeBody }>(
@@ -48,14 +53,55 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     (request, reply) => authController.verify(request, reply)
   );
 
-  app.post(
+  app.post<{ Body: import("./auth.types.js").RefreshBody }>(
+    "/refresh",
+    {
+      config: { rateLimit: authRateLimit },
+      preHandler: [validate({ body: refreshSchema })],
+      schema: {
+        description:
+          "Exchange a refresh token for a new access token. The refresh token is single-use and is rotated — a new one is returned in the response.",
+        tags: ["auth"],
+        body: {
+          type: "object",
+          required: ["refreshToken"],
+          properties: {
+            refreshToken: { type: "string", maxLength: 512 },
+          },
+        },
+        response: {
+          200: {
+            type: "object",
+            properties: {
+              success: { type: "boolean" },
+              data: {
+                type: "object",
+                properties: {
+                  token: { type: "string" },
+                  refreshToken: { type: "string" },
+                },
+              },
+            },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => authController.refresh(request, reply)
+  );
+
+  app.post<{ Body: import("./auth.types.js").LogoutBody }>(
     "/logout",
     {
-      preHandler: [authGuard],
+      preHandler: [authGuard, validate({ body: logoutSchema })],
       schema: {
-        description: "Revoke the caller's JWT — the token is immediately invalidated server-side",
+        description: "Revoke the caller's JWT — the token is immediately invalidated server-side. Optionally pass the refresh token to also revoke this session's refresh-token family.",
         tags: ["auth"],
         security: [{ bearerAuth: [] }],
+        // No `body` JSON schema here on purpose: a bare `{ type: "object" }`
+        // makes Fastify 400 a bodyless logout ("body must be object"), which
+        // would break the header-only logout contract. The optional
+        // `logoutSchema` in the validate() preHandler covers the body when
+        // one is sent.
         response: {
           200: {
             type: "object",

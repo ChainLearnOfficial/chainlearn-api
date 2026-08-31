@@ -12,7 +12,7 @@ import rateLimit from "@fastify/rate-limit";
 import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
 import { sql } from "drizzle-orm";
-import { config } from "./config/index.js";
+import { config, corsOrigins } from "./config/index.js";
 import { logger } from "./utils/logger.js";
 import { registry, setupInfraMetrics } from "./metrics/index.js";
 import { registerMetricsHook } from "./metrics/fastify-hook.js";
@@ -172,11 +172,12 @@ async function buildApp() {
   // CSRF-safe (cross-site requests can't set custom headers). `credentials:
   // true` only matters if auth ever moves to cookies — if it does, add a CSRF
   // token (e.g. @fastify/csrf-protection) and restrict the origin list.
+  //
+  // `corsOrigins` comes from config: CORS_ORIGINS (comma-separated) when set,
+  // otherwise the per-environment default (chainlearn.io in production,
+  // localhost:3000 elsewhere) — see src/config/index.ts.
   await app.register(cors, {
-    origin:
-      config.NODE_ENV === "production"
-        ? ["https://chainlearn.io"]
-        : ["http://localhost:3000"],
+    origin: corsOrigins,
     credentials: true,
   });
 

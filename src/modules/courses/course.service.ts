@@ -1310,6 +1310,69 @@ export class CourseService {
     logger.info({ courseId }, "Course soft-deleted");
   }
 
+  /**
+   * Publish a course (set isActive = true) after validating it has the
+   * content required to go live: a title, description, difficulty, at
+   * least one module, and at least one quiz per module. Validation checks
+   * the admin-defined `modules` structure (#304) against quizzes.moduleId,
+   * since that's what a learner actually walks through.
+   */
+  async publishCourse(courseId: string): Promise<AdminCourseWithAccessibility> {
+    const [course] = await db
+      .select()
+      .from(courses)
+      .where(eq(courses.id, courseId));
+
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    const missing: string[] = [];
+    if (!course.title?.trim()) missing.push("title");
+    if (!course.description?.trim()) missing.push("description");
+    if (!course.difficulty?.trim()) missing.push("difficulty");
+
+    const modules = (course.modules ?? []) as CourseModuleDefinition[];
+    if (modules.length === 0) {
+      missing.push("at least one module");
+    } else {
+      const quizModuleRows = await db
+        .select({ moduleId: quizzes.moduleId })
+        .from(quizzes)
+        .where(eq(quizzes.courseId, courseId))
+        .groupBy(quizzes.moduleId);
+      const moduleIdsWithQuizzes = new Set(
+        quizModuleRows.map((row) => row.moduleId),
+      );
+
+      for (const module of modules) {
+        if (!moduleIdsWithQuizzes.has(module.id)) {
+          missing.push(`at least one quiz for module "${module.title}"`);
+        }
+      }
+    }
+
+    if (missing.length > 0) {
+      throw new ValidationError({ requirements: missing });
+    }
+
+    const [published] = await db
+      .update(courses)
+      .set({ isActive: true })
+      .where(eq(courses.id, courseId))
+      .returning();
+
+    await this.invalidateCourseCaches(courseId);
+    await auditLog("course.published", { courseId });
+    logger.info({ courseId }, "Course published");
+
+    const accessibility = checkAccessibility(
+      this.courseContentFields(published),
+    );
+
+    return { ...this.toAdminCourse(published), accessibility };
+  }
+
   private normalizeCourseModules(
     modules: CourseModuleMetadata[] | null,
   ): CourseModuleMetadata[] {

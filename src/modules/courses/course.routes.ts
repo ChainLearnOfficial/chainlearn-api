@@ -192,6 +192,20 @@ export async function courseRoutes(app: FastifyInstance): Promise<void> {
     (request, reply) => courseController.batchEnroll(request, reply)
   );
 
+  app.delete<{ Params: { id: string } }>(
+    "/:id/enroll",
+    {
+      preHandler: [authGuard, validate({ params: courseIdParamsSchema })],
+      schema: {
+        description: "Drop the caller's enrollment in a course (#310)",
+        tags: ["courses"],
+        security: [{ bearerAuth: [] }],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      } as FastifySchema,
+    },
+    (request, reply) => courseController.dropEnrollment(request, reply)
+  );
+
   app.get<{ Params: { id: string } }>(
     "/:id/prerequisites",
     {

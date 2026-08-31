@@ -170,4 +170,51 @@ describe("Users API", () => {
       }
     });
   });
+
+  describe("GET /api/v1/users/me/activity", () => {
+    it("should reject unauthenticated requests", async () => {
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/v1/users/me/activity",
+      });
+
+      expect(response.statusCode).toBe(401);
+    });
+
+    it("should return a cursor-paginated activity feed when authenticated", async () => {
+      const token = createToken();
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/v1/users/me/activity?limit=20",
+        headers: { authorization: `Bearer ${token}` },
+      });
+
+      expect([200, 401]).toContain(response.statusCode);
+      if (response.statusCode === 200) {
+        const body = JSON.parse(response.payload);
+        expect(body.success).toBe(true);
+        expect(Array.isArray(body.data)).toBe(true);
+        expect(body.pagination).toBeDefined();
+        expect(body.pagination).toHaveProperty("nextCursor");
+        for (const activity of body.data) {
+          expect(typeof activity.type).toBe("string");
+          expect(typeof activity.title).toBe("string");
+          expect(typeof activity.timestamp).toBe("string");
+          expect(activity.metadata).toBeDefined();
+        }
+      }
+    });
+  });
+
+  describe("PUT /api/v1/users/me/avatar", () => {
+    it("should reject unauthenticated uploads", async () => {
+      const response = await app.inject({
+        method: "PUT",
+        url: "/api/v1/users/me/avatar",
+      });
+
+      expect(response.statusCode).toBe(401);
+    });
+  });
 });

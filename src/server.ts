@@ -1,9 +1,13 @@
 import { initTracing, shutdownTracing } from "./tracing.js";
 
+import { createReadStream } from "node:fs";
+import { access } from "node:fs/promises";
+import path from "node:path";
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
 import jwt from "@fastify/jwt";
+import multipart from "@fastify/multipart";
 import rateLimit from "@fastify/rate-limit";
 import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
@@ -67,7 +71,7 @@ async function buildApp() {
   initTracing();
 
   const app = Fastify({
-    bodyLimit: 1024 * 100, // 100KB
+    bodyLimit: config.REQUEST_BODY_LIMIT_BYTES,
     logger: {
       level: config.NODE_ENV === "production" ? "info" : "debug",
       transport:
@@ -161,6 +165,13 @@ async function buildApp() {
 
   await app.register(rateLimit, rateLimitOptions());
 
+  await app.register(multipart, {
+    limits: {
+      fileSize: config.MULTIPART_BODY_LIMIT_BYTES,
+      files: 1,
+    },
+  });
+
   // ─── Observability ──────────────────────────────────────────────────────
   setupInfraMetrics(pool, redis);
   registerMetricsHook(app);
@@ -206,6 +217,40 @@ async function buildApp() {
   });
 
   app.get("/health/live", async () => ({ status: "ok" }));
+
+  app.get<{ Params: { filename: string } }>(
+    "/uploads/avatars/:filename",
+    async (request, reply) => {
+      const { filename } = request.params;
+      if (!/^[A-Za-z0-9_-]+\\.(jpg|png|webp)$/.test(filename)) {
+        return reply.status(404).send({
+          statusCode: 404,
+          error: "NOT_FOUND",
+          message: "Route not found",
+        });
+      }
+
+      const filePath = path.join(path.resolve(config.AVATAR_UPLOAD_DIR), filename);
+      try {
+        await access(filePath);
+      } catch {
+        return reply.status(404).send({
+          statusCode: 404,
+          error: "NOT_FOUND",
+          message: "Route not found",
+        });
+      }
+
+      const contentType = filename.endsWith(".png")
+        ? "image/png"
+        : filename.endsWith(".webp")
+          ? "image/webp"
+          : "image/jpeg";
+
+      reply.header("Content-Type", contentType);
+      return reply.send(createReadStream(filePath));
+    },
+  );
 
   app.get("/health/ready", async (_request, reply) => {
     const [dbCheck, redisCheck, horizonCheck, sorobanCheck] =

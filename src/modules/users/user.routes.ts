@@ -2,7 +2,8 @@ import type { FastifyInstance, FastifySchema } from "fastify";
 import { userController } from "./user.controller.js";
 import { authGuard } from "../../middleware/auth.js";
 import { validate } from "../../middleware/validation.js";
-import { updateProfileSchema } from "./user.types.js";
+import { activityQuerySchema, updateProfileSchema } from "./user.types.js";
+import { config } from "../../config/index.js";
 
 export async function userRoutes(app: FastifyInstance): Promise<void> {
   app.addHook("onRequest", authGuard);
@@ -40,6 +41,40 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => userController.updateMe(request, reply)
+  );
+
+  app.get<{ Querystring: import("./user.types.js").ActivityQuery }>(
+    "/me/activity",
+    {
+      preHandler: [validate({ querystring: activityQuerySchema })],
+      schema: {
+        description: "Get recent authenticated user activity",
+        tags: ["users"],
+        security: [{ bearerAuth: [] }],
+        querystring: {
+          type: "object",
+          properties: {
+            cursor: { type: "string", format: "date-time" },
+            limit: { type: "integer", minimum: 1, maximum: 50, default: 20 },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => userController.getActivity(request, reply)
+  );
+
+  app.put(
+    "/me/avatar",
+    {
+      config: { fileSizeLimit: config.AVATAR_UPLOAD_MAX_BYTES },
+      schema: {
+        description: "Upload authenticated user avatar",
+        tags: ["users"],
+        security: [{ bearerAuth: [] }],
+        consumes: ["multipart/form-data"],
+      } as FastifySchema,
+    },
+    (request, reply) => userController.updateAvatar(request, reply)
   );
 
   app.get(

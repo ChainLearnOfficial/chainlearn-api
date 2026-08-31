@@ -1,6 +1,5 @@
 import { logger } from "../utils/logger.js";
 import { courseService } from "../modules/courses/course.service.js";
-import { cacheKey, cacheSet } from "./index.js";
 
 /**
  * Warms the course listing cache by calling listCourses() itself, the same
@@ -29,7 +28,7 @@ export async function warmCourseCache(): Promise<void> {
     const initialData = await courseService.listCourses(null, landingPageQuery);
 
     let page = 1;
-    let totalPages = Math.max(
+    const totalPages = Math.max(
       1,
       Math.ceil(initialData.total / WARM_PAGE_LIMIT),
     );

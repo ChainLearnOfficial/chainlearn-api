@@ -7,6 +7,7 @@ import { adminCourseRoutes } from "../../modules/courses/admin-course.routes.js"
 import { adminUsersRoutes } from "../../modules/admin/admin-users.routes.js";
 import { auditRoutes } from "../../modules/admin/audit.routes.js";
 import { dashboardRoutes } from "../../modules/admin/dashboard.routes.js";
+import { webhookRoutes } from "../../modules/admin/webhook.routes.js";
 import { quizRoutes, quizPublicRoutes } from "../../modules/quizzes/quiz.routes.js";
 import { rewardRoutes } from "../../modules/rewards/reward.routes.js";
 import { credentialRoutes } from "../../modules/credentials/credential.routes.js";
@@ -21,6 +22,7 @@ export async function registerV1Routes(app: FastifyInstance) {
   await app.register(adminUsersRoutes, { prefix: "/admin/users" });
   await app.register(auditRoutes, { prefix: "/admin/audit-logs" });
   await app.register(dashboardRoutes, { prefix: "/admin/dashboard" });
+  await app.register(webhookRoutes, { prefix: "/admin/webhooks" });
   await app.register(quizPublicRoutes, { prefix: "/quizzes" });
   await app.register(quizRoutes, { prefix: "/quizzes" });
   await app.register(rewardRoutes, { prefix: "/rewards" });

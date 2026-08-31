@@ -9,6 +9,7 @@ import {
   createModuleSchema,
   updateModuleSchema,
   moduleParamsSchema,
+  listEnrolledUsersQuerySchema,
 } from "./course.types.js";
 
 /** Admin-only course management (#292). Every route requires an admin user. */
@@ -149,6 +150,21 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
   );
 
   app.post<{ Params: { id: string } }>(
+    "/:id/archive",
+    {
+      preHandler: [validate({ params: courseIdParamsSchema })],
+      schema: {
+        description:
+          "Archive a course: hides it from public listings while preserving data and enrolled users' access (admin only)",
+        tags: ["admin", "courses"],
+        security: [{ bearerAuth: [] }],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      } as FastifySchema,
+    },
+    (request, reply) => adminCourseController.archive(request, reply)
+  );
+
+  app.post<{ Params: { id: string } }>(
     "/:id/publish",
     {
       preHandler: [validate({ params: courseIdParamsSchema })],
@@ -259,5 +275,35 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => adminCourseController.removeModule(request, reply)
+  );
+
+  app.get<{
+    Params: { id: string };
+    Querystring: import("./course.types.js").ListEnrolledUsersQuery;
+  }>(
+    "/:id/enrolled-users",
+    {
+      preHandler: [
+        validate({
+          params: courseIdParamsSchema,
+          querystring: listEnrolledUsersQuerySchema,
+        }),
+      ],
+      schema: {
+        description:
+          "List a course's enrolled users (paginated) with their quiz progress (admin only)",
+        tags: ["admin", "courses"],
+        security: [{ bearerAuth: [] }],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+        querystring: {
+          type: "object",
+          properties: {
+            page: { type: "integer", minimum: 1, default: 1 },
+            limit: { type: "integer", minimum: 1, maximum: 50, default: 20 },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => adminCourseController.listEnrolledUsers(request, reply)
   );
 }

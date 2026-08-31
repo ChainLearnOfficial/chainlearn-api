@@ -22,13 +22,23 @@ type AuditEvent =
   | "course.duplicated"
   | "course.reviewed"
   | "course.imported"
+  | "course.archived"
+  | "course.enrollment_dropped"
+  | "course.waitlist.joined"
+  | "course.waitlist.left"
+  | "course.waitlist.notified"
   | "user.account_deleted"
+  | "user.data_exported"
   | "course.module.created"
   | "course.module.updated"
   | "course.module.deleted"
   | "announcement.created"
   | "announcement.updated"
   | "announcement.deleted";
+  | "webhook.created"
+  | "webhook.updated"
+  | "webhook.deleted"
+  | "webhook.secret_rotated";
 
 interface AuditFields {
   userId?: string;
@@ -48,6 +58,12 @@ interface AuditFields {
   contentHashMatch?: boolean;
   onChainContentHash?: string | null;
   storedContentHash?: string | null;
+  webhookId?: string;
+  position?: number;
+  previousPosition?: number;
+  url?: string;
+  events?: string[];
+  changes?: string[];
   rating?: number;
   sourceCourseId?: string;
   moduleCount?: number;

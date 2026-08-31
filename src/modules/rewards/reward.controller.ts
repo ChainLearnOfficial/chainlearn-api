@@ -103,6 +103,26 @@ export class RewardController {
       pagination: { page, limit, total },
     });
   }
+
+  /**
+   * GET /api/rewards/leaderboard
+   * Get the top earners by total credits. No authentication required.
+   */
+  async leaderboard(
+    request: FastifyRequest<{ Querystring: import("./reward.types.js").GetLeaderboardQuery }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { limit } = request.query;
+    const entries = await rewardService.getLeaderboard(limit);
+
+    reply.send({
+      success: true,
+      data: {
+        entries,
+        generatedAt: new Date(),
+      },
+    });
+  }
 }
 
 export const rewardController = new RewardController();

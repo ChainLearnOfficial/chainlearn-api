@@ -2,12 +2,15 @@ import type { FastifyInstance, FastifySchema } from "fastify";
 import { quizController } from "./quiz.controller.js";
 import { authGuard } from "../../middleware/auth.js";
 import { validate } from "../../middleware/validation.js";
+import { quizBatchGenerationRateLimit } from "../../middleware/rate-limit.js";
 import { config } from "../../config/index.js";
 import {
   generateQuizSchema,
+  generateQuizBatchSchema,
   submitQuizSchema,
   quizIdParamsSchema,
   quizStatsQuerySchema,
+  MAX_BATCH_GENERATE_MODULES,
 } from "./quiz.types.js";
 
 /**
@@ -63,6 +66,40 @@ export async function quizRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => quizController.generate(request, reply)
+  );
+
+  app.post<{ Body: import("./quiz.types.js").GenerateQuizBatchBody }>(
+    "/generate-batch",
+    {
+      // Modules are generated sequentially (#308), so the worst case is
+      // roughly MAX_BATCH_GENERATE_MODULES times a single generation.
+      config: {
+        timeoutMs: config.QUIZ_GENERATION_TIMEOUT_MS * MAX_BATCH_GENERATE_MODULES,
+        rateLimit: quizBatchGenerationRateLimit,
+      },
+      preHandler: [validate({ body: generateQuizBatchSchema })],
+      schema: {
+        description: "Generate quizzes for multiple modules of a course in one request",
+        tags: ["quizzes"],
+        security: [{ bearerAuth: [] }],
+        body: {
+          type: "object",
+          required: ["courseId", "moduleIds"],
+          properties: {
+            courseId: { type: "string", format: "uuid" },
+            moduleIds: {
+              type: "array",
+              items: { type: "string", minLength: 1 },
+              minItems: 1,
+              maxItems: MAX_BATCH_GENERATE_MODULES,
+            },
+            difficulty: { type: "string", enum: ["beginner", "intermediate", "advanced"] },
+            numQuestions: { type: "integer", minimum: 1, maximum: 20 },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => quizController.generateBatch(request, reply)
   );
 
   app.post<{ Params: { id: string }, Body: import("./quiz.types.js").SubmitQuizBody }>(

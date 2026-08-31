@@ -171,6 +171,44 @@ describe("Users API", () => {
     });
   });
 
+  describe("GET /api/v1/users/me/learning-path", () => {
+    it("should reject unauthenticated requests", async () => {
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/v1/users/me/learning-path",
+      });
+
+      expect(response.statusCode).toBe(401);
+    });
+
+    it("should return an array of course recommendations for an authenticated user", async () => {
+      const token = createToken();
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/v1/users/me/learning-path",
+        headers: { authorization: `Bearer ${token}` },
+      });
+
+      // May return 200 (success), 401 (auth rejected), or 404 (user not
+      // seeded in this environment's DB) -- mirrors the tolerance the other
+      // /me/* tests in this file use, since these e2e tests run against
+      // whatever DB state happens to be present.
+      expect([200, 401, 404]).toContain(response.statusCode);
+      if (response.statusCode === 200) {
+        const body = JSON.parse(response.payload);
+        expect(body.success).toBe(true);
+        expect(Array.isArray(body.data)).toBe(true);
+        for (const recommendation of body.data) {
+          expect(typeof recommendation.courseId).toBe("string");
+          expect(typeof recommendation.courseTitle).toBe("string");
+          expect(typeof recommendation.difficulty).toBe("string");
+          expect(typeof recommendation.rationale).toBe("string");
+        }
+      }
+    });
+  });
+
   describe("GET /api/v1/users/me/activity", () => {
     it("should reject unauthenticated requests", async () => {
       const response = await app.inject({

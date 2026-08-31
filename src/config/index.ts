@@ -20,6 +20,22 @@ const envSchema = z.object({
   // Redis
   REDIS_URL: z.string().default("redis://localhost:6379"),
 
+  // CORS — comma-separated allow-list of browser origins, e.g.
+  // "https://chainlearn.io,https://app.chainlearn.io". Optional: when unset,
+  // a per-environment default is used (see `corsOrigins` below). Parsed into
+  // an array of trimmed, non-empty origin strings.
+  CORS_ORIGINS: z
+    .string()
+    .optional()
+    .transform((val) =>
+      val
+        ? val
+            .split(",")
+            .map((origin) => origin.trim())
+            .filter(Boolean)
+        : undefined,
+    ),
+
   // JWT — OWASP recommends 256 bits (>= 64 chars) and a non-placeholder value.
   JWT_SECRET: z
     .string()
@@ -87,6 +103,7 @@ function loadConfig(): Env {
       return envSchema.parse({
         DATABASE_URL: process.env.DATABASE_URL || "postgresql://chainlearn_test:test_password@localhost:5432/chainlearn_test",
         REDIS_URL: process.env.REDIS_URL || "redis://localhost:6379",
+        CORS_ORIGINS: process.env.CORS_ORIGINS,
         JWT_SECRET:
           process.env.JWT_SECRET || "test-secret-key-that-is-at-least-sixty-four-characters-long-for-tests",
         STELLAR_HORIZON_URL: process.env.STELLAR_HORIZON_URL || "https://horizon-testnet.stellar.org",
@@ -121,3 +138,18 @@ function ensureConfig(): Env {
 // Eagerly load config at module import time to preserve type safety
 // (test-mode fallback is handled in loadConfig())
 export const config: Env = ensureConfig();
+
+/**
+ * Resolved CORS allow-list passed to @fastify/cors.
+ *
+ * When CORS_ORIGINS is set it wins outright. Otherwise this falls back to the
+ * exact per-environment defaults the server used before CORS_ORIGINS existed —
+ * chainlearn.io in production, localhost:3000 everywhere else — so an unset
+ * CORS_ORIGINS is a no-op change in behavior.
+ */
+export const corsOrigins: string[] =
+  config.CORS_ORIGINS && config.CORS_ORIGINS.length > 0
+    ? config.CORS_ORIGINS
+    : config.NODE_ENV === "production"
+      ? ["https://chainlearn.io"]
+      : ["http://localhost:3000"];

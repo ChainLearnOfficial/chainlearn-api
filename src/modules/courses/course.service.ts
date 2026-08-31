@@ -829,6 +829,148 @@ export class CourseService {
     }
   }
 
+  /**
+   * Generate personalized course recommendations for a user (#328).
+   * Heuristic: recommend courses one difficulty level above completed courses,
+   * filtered by similar tags. Falls back to popular courses for new users.
+   * Cached per user for 1 hour — recommendation quality doesn't need to be
+   * real-time, and the query aggregates enrollment/completion data.
+   */
+  async getRecommendedCourses(
+    userId: string,
+    limit: number = 10,
+  ): Promise<CourseSummary[]> {
+    const namespace = "courses";
+    const cacheKeyString = cacheKey(namespace, "recommended", userId, limit);
+
+    const cached = await cacheGet<Omit<CourseSummary, "isEnrolled">[]>(
+      namespace,
+      cacheKeyString,
+    );
+    if (cached) {
+      return cached.map((course) => ({ ...course, isEnrolled: false }));
+    }
+
+    // Get user's enrolled courses with their completions
+    const enrolledRows = await db
+      .select({
+        courseId: enrollments.courseId,
+        difficulty: courses.difficulty,
+        tags: courses.tags,
+        completed: enrollments.completedAt,
+      })
+      .from(enrollments)
+      .innerJoin(courses, eq(enrollments.courseId, courses.id))
+      .where(eq(enrollments.userId, userId));
+
+    // If user is new (no enrollments), return popular courses
+    if (enrolledRows.length === 0) {
+      const popular = await this.getPopularCourses(limit);
+      await cacheSet(cacheKeyString, popular, 3600);
+      return popular;
+    }
+
+    // Analyze completed courses to determine recommendation criteria
+    const completedCourses = enrolledRows.filter((r) => r.completed !== null);
+    const enrolledCourseIds = new Set(enrolledRows.map((r) => r.courseId));
+
+    // Collect tags from enrolled courses
+    const userTags = new Set<string>();
+    for (const row of enrolledRows) {
+      const tags = row.tags as string[] | null;
+      if (tags) {
+        for (const tag of tags) userTags.add(tag);
+      }
+    }
+
+    // Determine target difficulty: one level above highest completed
+    let targetDifficulty: string | null = null;
+    if (completedCourses.length > 0) {
+      const difficulties = completedCourses.map((c) => c.difficulty);
+      if (difficulties.includes("beginner")) {
+        targetDifficulty = "intermediate";
+      } else if (difficulties.includes("intermediate")) {
+        targetDifficulty = "advanced";
+      }
+      // If all completed are advanced, keep targetDifficulty null (will show all difficulties)
+    }
+
+    // Build recommendation query
+    const conditions = [
+      eq(courses.isActive, true),
+      sql`${courses.id} NOT IN ${enrolledCourseIds.size > 0 ? sql`(${sql.join(Array.from(enrolledCourseIds).map((id) => sql`${id}`), sql`, `)})` : sql`('')`}`,
+    ];
+
+    if (targetDifficulty) {
+      conditions.push(eq(courses.difficulty, targetDifficulty));
+    }
+
+    const candidateRows = await db
+      .select({
+        id: courses.id,
+        title: courses.title,
+        description: courses.description,
+        difficulty: courses.difficulty,
+        tags: courses.tags,
+        isActive: courses.isActive,
+      })
+      .from(courses)
+      .where(and(...conditions))
+      .limit(limit * 3); // Get more candidates to allow tag-based sorting
+
+    // Score courses by tag overlap
+    const scored = candidateRows.map((course) => {
+      const courseTags = (course.tags as string[] | null) ?? [];
+      const tagOverlap = courseTags.filter((tag) => userTags.has(tag)).length;
+      return { course, tagOverlap };
+    });
+
+    // Sort by tag overlap (descending), then take the limit
+    scored.sort((a, b) => b.tagOverlap - a.tagOverlap);
+    const topCourses = scored.slice(0, limit).map((s) => s.course);
+
+    // Get enrollment counts for the recommended courses
+    const courseIds = topCourses.map((c) => c.id);
+    const enrollmentCounts = new Map<string, number>();
+
+    if (courseIds.length > 0) {
+      const counts = await db
+        .select({
+          courseId: enrollments.courseId,
+          value: count(),
+        })
+        .from(enrollments)
+        .where(inArray(enrollments.courseId, courseIds))
+        .groupBy(enrollments.courseId);
+
+      for (const c of counts) {
+        enrollmentCounts.set(c.courseId, c.value);
+      }
+    }
+
+    const recommendations = topCourses.map((course) => ({
+      id: course.id,
+      title: course.title,
+      description: course.description,
+      difficulty: course.difficulty,
+      isActive: course.isActive,
+      enrolledCount: enrollmentCounts.get(course.id) ?? 0,
+    }));
+
+    // If we got fewer than requested, pad with popular courses
+    if (recommendations.length < limit) {
+      const popular = await this.getPopularCourses(limit - recommendations.length);
+      const popularFiltered = popular.filter(
+        (p) => !enrolledCourseIds.has(p.id) && !recommendations.find((r) => r.id === p.id),
+      );
+      recommendations.push(...popularFiltered);
+    }
+
+    await cacheSet(cacheKeyString, recommendations, 3600);
+
+    return recommendations.map((course) => ({ ...course, isEnrolled: false }));
+  }
+
   // ─── Admin ──────────────────────────────────────────────────────────────
 
   private async invalidateCourseCaches(courseId?: string): Promise<void> {

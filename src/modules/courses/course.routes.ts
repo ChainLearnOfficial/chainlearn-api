@@ -61,6 +61,26 @@ export async function courseRoutes(app: FastifyInstance): Promise<void> {
     (request, reply) => courseController.popular(request, reply)
   );
 
+  app.get<{ Querystring: import("./course.types.js").PopularCoursesQuery }>(
+    "/recommended",
+    {
+      preHandler: [authGuard, validate({ querystring: popularCoursesQuerySchema })],
+      schema: {
+        description:
+          "Get personalized course recommendations based on enrollment history and interests (#328)",
+        tags: ["courses"],
+        security: [{ bearerAuth: [] }],
+        querystring: {
+          type: "object",
+          properties: {
+            limit: { type: "integer", minimum: 1, maximum: 50, default: 10 },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => courseController.recommended(request, reply)
+  );
+
   app.get<{ Params: { code: string } }>(
     "/shared/:code",
     {

@@ -27,14 +27,21 @@ export const updateProfileSchema = z.object({
   language: z.string().max(10).optional(),
 });
 
+export const activityQuerySchema = z.object({
+  cursor: z.string().datetime().optional(),
+  limit: z.coerce.number().int().min(1).max(50).default(20),
+});
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 export type UpdateProfileBody = z.infer<typeof updateProfileSchema>;
+export type ActivityQuery = z.infer<typeof activityQuerySchema>;
 
 export interface UserProfile {
   id: string;
   stellarAddress: string;
   displayName: string | null;
+  avatarUrl: string | null;
   background: string | null;
   learningGoal: string | null;
   pace: string;
@@ -49,4 +56,29 @@ export interface UserProgress {
   totalQuizScore: number;
   credentialsEarned: number;
   rewardsClaimed: number;
+}
+
+export type UserActivityType =
+  | "enrollment"
+  | "quiz_submission"
+  | "credential_mint"
+  | "reward_claim";
+
+export interface UserActivity {
+  type: UserActivityType;
+  title: string;
+  timestamp: Date;
+  metadata: Record<string, unknown>;
+}
+
+export interface UserActivityPage {
+  activities: UserActivity[];
+  nextCursor: string | null;
+}
+
+export interface AvatarUpload {
+  buffer: Buffer;
+  filename: string;
+  mimetype: string;
+  size: number;
 }

@@ -16,6 +16,14 @@ export async function rewardRoutes(app: FastifyInstance): Promise<void> {
       schema: {
         description: "Claim a reward for a passed quiz",
         tags: ["rewards"],
+        security: [{ bearerAuth: [] }],
+        body: {
+          type: "object", required: ["submissionId", "idempotencyKey"],
+          properties: {
+            submissionId: { type: "string", format: "uuid" },
+            idempotencyKey: { type: "string", minLength: 16, maxLength: 64 },
+          },
+        },
       } as FastifySchema,
     },
     (request, reply) => rewardController.claim(request, reply)
@@ -28,6 +36,14 @@ export async function rewardRoutes(app: FastifyInstance): Promise<void> {
       schema: {
         description: "Get reward claim history",
         tags: ["rewards"],
+        security: [{ bearerAuth: [] }],
+        querystring: {
+          type: "object",
+          properties: {
+            page: { type: "integer", minimum: 1, default: 1 },
+            limit: { type: "integer", minimum: 1, maximum: 50, default: 20 },
+          },
+        },
       } as FastifySchema,
     },
     (request, reply) => rewardController.history(request, reply)

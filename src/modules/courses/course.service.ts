@@ -1,9 +1,11 @@
-import { eq, and, count, desc, inArray } from "drizzle-orm";
+import { eq, and, count, desc, inArray, ilike, or, sql } from "drizzle-orm";
 import { db } from "../../config/database.js";
 import { courses, enrollments, quizzes } from "../../database/schema.js";
 import { NotFoundError, ConflictError } from "../../utils/errors.js";
 import { withLock } from "../../utils/lock.js";
 import { logger } from "../../utils/logger.js";
+import { getOnChainContentHash } from "../../stellar/progress-tracker.js";
+import { auditLog } from "../../audit/index.js";
 import {
   cacheGet,
   cacheSet,
@@ -16,9 +18,70 @@ import type {
   ListCoursesQuery,
   CourseSummary,
   CourseDetail,
+  CourseStats,
+  AdminCourse,
+  CreateCourseBody,
+  UpdateCourseBody,
 } from "./course.types.js";
 
+const POPULAR_COURSES_TTL_SECONDS = 300;
+
 export class CourseService {
+  async getStats(): Promise<CourseStats> {
+    const namespace = "courses";
+    const cacheKeyString = cacheKey(namespace, "stats");
+
+    const cachedStats = await cacheGet<CourseStats>(namespace, cacheKeyString);
+    if (cachedStats) return cachedStats;
+
+    const [[totalResult], enrollmentRows] = await Promise.all([
+      db
+        .select({ value: count() })
+        .from(courses)
+        .where(eq(courses.isActive, true)),
+      db
+        .select({
+          difficulty: courses.difficulty,
+          value: sql<number>`COUNT(${enrollments.id})`,
+        })
+        .from(courses)
+        .leftJoin(enrollments, eq(enrollments.courseId, courses.id))
+        .where(eq(courses.isActive, true))
+        .groupBy(courses.difficulty),
+    ]);
+
+    const totalCourses = totalResult?.value ?? 0;
+    const enrollmentsByDifficulty: CourseStats["enrollmentsByDifficulty"] = {
+      beginner: 0,
+      intermediate: 0,
+      advanced: 0,
+    };
+
+    let totalEnrollments = 0;
+    for (const row of enrollmentRows) {
+      if (
+        row.difficulty === "beginner" ||
+        row.difficulty === "intermediate" ||
+        row.difficulty === "advanced"
+      ) {
+        const value = Number(row.value);
+        enrollmentsByDifficulty[row.difficulty] = value;
+        totalEnrollments += value;
+      }
+    }
+
+    const stats: CourseStats = {
+      totalCourses,
+      enrollmentsByDifficulty,
+      averageEnrollmentsPerCourse:
+        totalCourses === 0 ? 0 : Number((totalEnrollments / totalCourses).toFixed(2)),
+    };
+
+    await cacheSet(cacheKeyString, stats, 300);
+
+    return stats;
+  }
+
   /**
    * The full set of course IDs a user is enrolled in, cached briefly
    * (issue #151 — listCourses/getCourseDetail previously re-queried the
@@ -50,10 +113,12 @@ export class CourseService {
     query: ListCoursesQuery,
   ): Promise<{ courses: CourseSummary[]; total: number }> {
     const namespace = "courses";
+    const search = query.search?.trim() || undefined;
     const cacheKeyString = cacheKey(
       namespace,
       "list",
       query.difficulty ?? "all",
+      search ? encodeURIComponent(search.toLowerCase()) : "all",
       query.page,
       query.limit,
     );
@@ -67,6 +132,14 @@ export class CourseService {
       const conditions = [eq(courses.isActive, true)];
       if (query.difficulty) {
         conditions.push(eq(courses.difficulty, query.difficulty));
+      }
+      if (search) {
+        conditions.push(
+          or(
+            ilike(courses.title, `%${search}%`),
+            ilike(courses.description, `%${search}%`),
+          )!,
+        );
       }
 
       const where = and(...conditions);
@@ -198,8 +271,44 @@ export class CourseService {
     };
   }
 
-  async enroll(userId: string, courseId: string): Promise<void> {
-    return withLock(`enroll:${userId}:${courseId}`, async () => {
+  /**
+   * Compares the course's stored contentHash against the progress-tracker
+   * contract's on-chain value (#294). Deliberately non-blocking: any
+   * mismatch, or failure to read the on-chain hash at all, is logged for
+   * audit but never prevents enrollment — the caller decides whether to
+   * surface a warning to the client.
+   */
+  private async checkContentHash(
+    courseId: string,
+    storedContentHash: string | null,
+  ): Promise<boolean> {
+    if (!storedContentHash) return false;
+
+    const onChainContentHash = await getOnChainContentHash(courseId);
+    if (!onChainContentHash) return false;
+
+    const mismatch = onChainContentHash !== storedContentHash;
+    logger.info(
+      { courseId, storedContentHash, onChainContentHash, mismatch },
+      "Enrollment contentHash comparison",
+    );
+    await auditLog("course.enrolled", {
+      courseId,
+      contentHashMatch: !mismatch,
+      onChainContentHash,
+      storedContentHash,
+    });
+
+    return mismatch;
+  }
+
+  async enroll(
+    userId: string,
+    courseId: string,
+  ): Promise<{ contentHashMismatch: boolean }> {
+    let storedContentHash: string | null = null;
+
+    await withLock(`enroll:${userId}:${courseId}`, async () => {
       await db.transaction(async (tx) => {
         const [course] = await tx
           .select()
@@ -209,6 +318,7 @@ export class CourseService {
         if (!course || !course.isActive) {
           throw new NotFoundError("Course");
         }
+        storedContentHash = course.contentHash;
 
         const [existing] = await tx
           .select()
@@ -243,8 +353,10 @@ export class CourseService {
       const invalidations = await Promise.allSettled([
         cacheInvalidatePattern("chainlearn:courses:list:*"),
         cacheDel(cacheKey("courses", "detail", courseId)),
+        cacheDel(cacheKey("courses", "stats")),
         cacheDel(cacheKey("user", "progress", userId)),
         cacheDel(cacheKey("user", "enrollments", userId)),
+        cacheInvalidatePattern(cacheKeyPattern("user", "activity", userId)),
       ]);
       const failed = invalidations.filter((r) => r.status === "rejected");
       if (failed.length > 0) {
@@ -254,6 +366,141 @@ export class CourseService {
         );
       }
     });
+
+    // Run after the lock releases — a slow/unreachable contract read must
+    // never extend how long the enrollment lock is held.
+    const contentHashMismatch = await this.checkContentHash(
+      courseId,
+      storedContentHash,
+    );
+
+    return { contentHashMismatch };
+  }
+
+  /**
+   * Active courses ordered by enrollment count descending, for discovery
+   * (#293). Cached separately from listCourses() since the sort/shape
+   * differs and a 5 min TTL is appropriate here (trending courses don't
+   * need to be as fresh as a course-detail page).
+   */
+  async getPopularCourses(limit: number): Promise<CourseSummary[]> {
+    const namespace = "courses";
+    const cacheKeyString = cacheKey(namespace, "popular", limit);
+
+    const cached = await cacheGet<Omit<CourseSummary, "isEnrolled">[]>(
+      namespace,
+      cacheKeyString,
+    );
+    if (cached) {
+      return cached.map((course) => ({ ...course, isEnrolled: false }));
+    }
+
+    const rows = await db
+      .select({
+        id: courses.id,
+        title: courses.title,
+        description: courses.description,
+        difficulty: courses.difficulty,
+        isActive: courses.isActive,
+        enrolledCount: count(enrollments.courseId),
+      })
+      .from(courses)
+      .leftJoin(enrollments, eq(enrollments.courseId, courses.id))
+      .where(eq(courses.isActive, true))
+      .groupBy(courses.id)
+      .orderBy(desc(count(enrollments.courseId)))
+      .limit(limit);
+
+    await cacheSet(cacheKeyString, rows, POPULAR_COURSES_TTL_SECONDS);
+
+    return rows.map((course) => ({ ...course, isEnrolled: false }));
+  }
+
+  // ─── Admin ──────────────────────────────────────────────────────────────
+
+  private async invalidateCourseCaches(courseId?: string): Promise<void> {
+    const invalidations = await Promise.allSettled([
+      cacheInvalidatePattern(cacheKeyPattern("courses", "list")),
+      cacheInvalidatePattern(cacheKeyPattern("courses", "popular")),
+      ...(courseId ? [cacheDel(cacheKey("courses", "detail", courseId))] : []),
+    ]);
+    const failed = invalidations.filter((r) => r.status === "rejected");
+    if (failed.length > 0) {
+      logger.warn(
+        { courseId, failedCount: failed.length },
+        "Post-admin-write course cache invalidation had failures — affected views may serve stale data until their TTL expires",
+      );
+    }
+  }
+
+  private toAdminCourse(row: typeof courses.$inferSelect): AdminCourse {
+    return {
+      id: row.id,
+      title: row.title,
+      description: row.description,
+      difficulty: row.difficulty,
+      tags: row.tags ?? [],
+      contentHash: row.contentHash,
+      isActive: row.isActive,
+      createdAt: row.createdAt,
+    };
+  }
+
+  async createCourse(data: CreateCourseBody): Promise<AdminCourse> {
+    const [course] = await db
+      .insert(courses)
+      .values({
+        title: data.title,
+        description: data.description,
+        difficulty: data.difficulty,
+        tags: data.tags,
+        contentHash: data.contentHash,
+      })
+      .returning();
+
+    await this.invalidateCourseCaches();
+    await auditLog("course.created", { courseId: course.id });
+    logger.info({ courseId: course.id }, "Course created");
+
+    return this.toAdminCourse(course);
+  }
+
+  async updateCourse(
+    courseId: string,
+    data: UpdateCourseBody,
+  ): Promise<AdminCourse> {
+    const [course] = await db
+      .update(courses)
+      .set(data)
+      .where(eq(courses.id, courseId))
+      .returning();
+
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    await this.invalidateCourseCaches(courseId);
+    await auditLog("course.updated", { courseId });
+    logger.info({ courseId }, "Course updated");
+
+    return this.toAdminCourse(course);
+  }
+
+  /** Soft-deletes a course by setting isActive = false (#292). */
+  async deleteCourse(courseId: string): Promise<void> {
+    const [course] = await db
+      .update(courses)
+      .set({ isActive: false })
+      .where(eq(courses.id, courseId))
+      .returning();
+
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    await this.invalidateCourseCaches(courseId);
+    await auditLog("course.deleted", { courseId });
+    logger.info({ courseId }, "Course soft-deleted");
   }
 }
 

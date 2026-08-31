@@ -29,7 +29,6 @@ logs
 eslint.config.*
 tsconfig*.json
 # drizzle.config.*  # uncomment to exclude in dev builds
-fix-routes.js
 Makefile
 
 # Docker files (not needed inside the image)

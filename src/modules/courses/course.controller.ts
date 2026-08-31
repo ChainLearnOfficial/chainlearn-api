@@ -160,6 +160,22 @@ export class CourseController {
    * GET /api/v1/courses/:id/leaderboard
    * Top performers for a course, ranked by average quiz score (#324).
    */
+  /**
+   * GET /api/v1/courses/:id/prerequisites
+   * Prerequisite courses for a course, with the caller's completion status
+   * per prerequisite (#369).
+   */
+  async prerequisites(
+    request: FastifyRequest<{ Params: CourseIdParams }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id } = request.params;
+    const userId = (request as AuthenticatedRequest).authUser?.id ?? null;
+    const prerequisites = await courseService.getPrerequisites(id, userId);
+
+    reply.send({ success: true, data: prerequisites });
+  }
+
   async leaderboard(
     request: FastifyRequest<{ Params: CourseIdParams }>,
     reply: FastifyReply

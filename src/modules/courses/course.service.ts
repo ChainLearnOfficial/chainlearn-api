@@ -59,6 +59,7 @@ import type {
   CourseModuleMetadata,
   UpdateCourseBody,
   CourseModuleWithProgress,
+  PrerequisiteCourse,
   CreateModuleBody,
   UpdateModuleBody,
   ListReviewsQuery,
@@ -420,6 +421,69 @@ export class CourseService {
     await cacheSet(cacheKeyString, result, 60);
 
     return result;
+  }
+
+  /**
+   * Returns a course's prerequisite courses, each annotated with the
+   * caller's completion status (#369). Prerequisites are admin-configured
+   * on the courses.prerequisites column — this is a read-only, informational
+   * view; enrolling in the course never checks whether they're met.
+   *
+   * `userId` is null for an anonymous caller: completion is then null for
+   * every entry rather than false, so the client can distinguish "not
+   * logged in" from "logged in but hasn't completed it".
+   */
+  async getPrerequisites(
+    courseId: string,
+    userId: string | null,
+  ): Promise<PrerequisiteCourse[]> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+
+    if (!course || !course.isActive) {
+      throw new NotFoundError("Course");
+    }
+
+    if (course.prerequisites.length === 0) {
+      return [];
+    }
+
+    const prereqCourses = await db
+      .select({
+        id: courses.id,
+        title: courses.title,
+        difficulty: courses.difficulty,
+      })
+      .from(courses)
+      .where(inArray(courses.id, course.prerequisites));
+
+    let completedIds = new Set<string>();
+    if (userId) {
+      const completedRows = await db
+        .select({ courseId: enrollments.courseId })
+        .from(enrollments)
+        .where(
+          and(
+            eq(enrollments.userId, userId),
+            inArray(enrollments.courseId, course.prerequisites),
+            sql`${enrollments.completedAt} IS NOT NULL`,
+          ),
+        );
+      completedIds = new Set(completedRows.map((r) => r.courseId));
+    }
+
+    // Preserve the order prerequisites were configured in, not DB row order.
+    const byId = new Map(prereqCourses.map((c) => [c.id, c]));
+    return course.prerequisites
+      .map((id) => byId.get(id))
+      .filter((c): c is (typeof prereqCourses)[number] => c !== undefined)
+      .map((c) => ({
+        id: c.id,
+        title: c.title,
+        difficulty: c.difficulty,
+        completed: userId ? completedIds.has(c.id) : null,
+      }));
   }
 
   /**

@@ -98,6 +98,10 @@ export const courses = pgTable(
     // recomputed on every create/update. Null until first written. Advisory
     // only — a low score never blocks saving the course.
     accessibilityScore: integer("accessibility_score"),
+    // Course IDs the learner should complete before this one (#369).
+    // Admin-configurable, informational only — enrolling never checks this
+    // list, GET /:id/prerequisites just surfaces it with completion status.
+    prerequisites: jsonb("prerequisites").$type<string[]>().notNull().default([]),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

@@ -1,18 +1,18 @@
 import { test, describe, expect, beforeEach, afterEach, vi } from "vitest";
-import { db } from "../config/database.js";
-import { redis } from "../config/redis.js";
-import { quizService } from "../modules/quizzes/quiz.service.js";
-import { PASSING_PERCENTAGE } from "../modules/quizzes/quiz.types.js";
-import { cacheKey } from "../cache/index.js";
-import { warmCourseCache } from "../cache/warmer.js";
-import { logger } from "../utils/logger.js";
+import { db } from "../../src/config/database.js";
+import { redis } from "../../src/config/redis.js";
+import { quizService } from "../../src/modules/quizzes/quiz.service.js";
+import { PASSING_PERCENTAGE } from "../../src/modules/quizzes/quiz.types.js";
+import { cacheKey } from "../../src/cache/index.js";
+import { warmCourseCache } from "../../src/cache/warmer.js";
+import { logger } from "../../src/utils/logger.js";
 import {
   courses,
   enrollments,
   users,
   quizSubmissions,
   quizzes,
-} from "../database/schema.js";
+} from "../../src/database/schema.js";
 import { eq } from "drizzle-orm";
 
 describe("Quiz grading edge cases & cache warming (#143, #144, #145, #147)", () => {

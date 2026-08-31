@@ -82,3 +82,40 @@ export interface AvatarUpload {
   mimetype: string;
   size: number;
 }
+
+// ─── GDPR Data Export (#350) ────────────────────────────────────────────────
+
+export interface UserDataExport {
+  exportVersion: 1;
+  exportedAt: string;
+  profile: UserProfile;
+  enrollments: {
+    courseId: string;
+    courseTitle: string;
+    enrolledAt: Date;
+    completedAt: Date | null;
+  }[];
+  quizSubmissions: {
+    id: string;
+    quizId: string;
+    score: number | null;
+    submittedAt: Date;
+  }[];
+  credentials: {
+    id: string;
+    courseId: string;
+    courseTitle: string;
+    score: number;
+    nftAssetCode: string | null;
+    nftIssuer: string | null;
+    mintTxHash: string | null;
+    revoked: boolean;
+    mintedAt: Date;
+  }[];
+  rewardClaims: {
+    submissionId: string;
+    amount: number | null;
+    txHash: string | null;
+    claimedAt: Date;
+  }[];
+}

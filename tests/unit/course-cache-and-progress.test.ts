@@ -1,13 +1,13 @@
 import { test, describe, expect, beforeEach, afterEach, vi } from "vitest";
-import { db } from "../config/database.js";
-import { redis } from "../config/redis.js";
-import { courseService } from "../modules/courses/course.service.js";
-import { userService } from "../modules/users/user.service.js";
-import { quizService } from "../modules/quizzes/quiz.service.js";
-import { cacheKey, cacheKeyPattern } from "../cache/index.js";
-import { warmCourseCache } from "../cache/warmer.js";
-import { logger } from "../utils/logger.js";
-import { courses, enrollments, users } from "../database/schema.js";
+import { db } from "../../src/config/database.js";
+import { redis } from "../../src/config/redis.js";
+import { courseService } from "../../src/modules/courses/course.service.js";
+import { userService } from "../../src/modules/users/user.service.js";
+import { quizService } from "../../src/modules/quizzes/quiz.service.js";
+import { cacheKey, cacheKeyPattern } from "../../src/cache/index.js";
+import { warmCourseCache } from "../../src/cache/warmer.js";
+import { logger } from "../../src/utils/logger.js";
+import { courses, enrollments, users } from "../../src/database/schema.js";
 import { eq } from "drizzle-orm";
 
 describe("Course cache, progress TTL, and placeholder fallback (#146, #148, #149, #150)", () => {

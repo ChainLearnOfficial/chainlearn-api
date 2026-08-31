@@ -140,6 +140,19 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
     (request, reply) => notificationController.markRead(request, reply)
   );
 
+  app.get(
+    "/me/export",
+    {
+      schema: {
+        description:
+          "Export all of the authenticated user's data (profile, enrollments, quiz submissions, credentials, reward claims) as a downloadable JSON file — GDPR data portability.",
+        tags: ["users"],
+        security: [{ bearerAuth: [] }],
+      } as FastifySchema,
+    },
+    (request, reply) => userController.exportData(request, reply)
+  );
+
   app.delete(
     "/me",
     {

@@ -31,6 +31,21 @@ export const generateQuizSchema = z.object({
   numQuestions: z.coerce.number().int().min(1).max(20).optional(),
 });
 
+// Capped at 10 modules per batch request (#308) — generation runs
+// sequentially against the AI service, so this also bounds the route's
+// worst-case timeout (see QUIZ_BATCH_GENERATION_TIMEOUT_MS).
+export const MAX_BATCH_GENERATE_MODULES = 10;
+
+export const generateQuizBatchSchema = z.object({
+  courseId: z.string().uuid("Invalid course ID"),
+  moduleIds: z
+    .array(z.string().min(1))
+    .min(1, "At least one module ID is required")
+    .max(MAX_BATCH_GENERATE_MODULES, `Too many modules (max ${MAX_BATCH_GENERATE_MODULES})`),
+  difficulty: z.enum(["beginner", "intermediate", "advanced"]).optional(),
+  numQuestions: z.coerce.number().int().min(1).max(20).optional(),
+});
+
 export const submitQuizSchema = z.object({
   answers: z
     .array(
@@ -55,6 +70,7 @@ export const quizStatsQuerySchema = z.object({
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 export type GenerateQuizBody = z.infer<typeof generateQuizSchema>;
+export type GenerateQuizBatchBody = z.infer<typeof generateQuizBatchSchema>;
 export type SubmitQuizBody = z.infer<typeof submitQuizSchema>;
 export type QuizIdParams = z.infer<typeof quizIdParamsSchema>;
 export type QuizStatsQuery = z.infer<typeof quizStatsQuerySchema>;
@@ -63,6 +79,8 @@ export interface QuizQuestion {
   id: string;
   text: string;
   options: string[];
+  correctFeedback?: string; // Custom feedback for correct answer
+  incorrectFeedback?: string; // Custom feedback for incorrect answer
   // correctIndex is NOT sent to client
 }
 
@@ -73,6 +91,13 @@ export interface QuizWithQuestions {
   questions: QuizQuestion[];
   createdAt: Date;
 }
+
+/** One entry of POST /api/v1/quizzes/generate-batch's response (#308). Each
+ * module is generated independently, so one module's failure (e.g. hitting
+ * its own per-module rate limit) doesn't block the others in the batch. */
+export type QuizBatchGenerateEntry =
+  | { moduleId: string; success: true; quiz: QuizWithQuestions }
+  | { moduleId: string; success: false; error: string };
 
 export interface QuizSubmissionResult {
   id: string;

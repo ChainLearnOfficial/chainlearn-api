@@ -6,7 +6,7 @@ import { logger } from "./logger.js";
 export async function withLock<T>(
   key: string,
   fn: () => Promise<T>,
-  ttlMs: number = 30_000
+  ttlMs: number = 60_000
 ): Promise<T> {
   const lockKey = `lock:${key}`;
   const lockValue = crypto.randomUUID();

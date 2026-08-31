@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { eq, and } from "drizzle-orm";
 import { db } from "../../config/database.js";
 import { quizzes, quizSubmissions, enrollments } from "../../database/schema.js";
@@ -30,6 +31,11 @@ import {
 const QUIZ_STATS_TTL_SECONDS = 300;
 
 type GeneratedQuestion = QuizQuestion & { correctIndex: number };
+type StoredQuestion = GeneratedQuestion & {
+  originalQuestionIndex: number;
+  originalCorrectIndex: number;
+  originalOptions: string[];
+};
 
 export class QuizService {
   /**
@@ -65,28 +71,25 @@ export class QuizService {
 
     if (existing) {
       // Return existing quiz, strip correct answers
-      const questions = existing.questions as Array<{
-        id: string;
-        text: string;
-        options: string[];
-        correctIndex: number;
-      }>;
+      const questions = existing.questions as StoredQuestion[];
 
       return {
         id: existing.id,
         courseId: existing.courseId,
         moduleId: existing.moduleId,
-        questions: questions.map(({ correctIndex: _, ...q }) => q),
+        questions: this.toClientQuestions(questions),
         createdAt: existing.createdAt,
       };
     }
 
-    const generatedQuestions = await this.generateQuestions(userId, {
-      courseId: data.courseId,
-      moduleId: data.moduleId,
-      difficulty: data.difficulty ?? "beginner",
-      numQuestions: data.numQuestions ?? 5,
-    });
+    const generatedQuestions = this.shuffleQuestions(
+      await this.generateQuestions(userId, {
+        courseId: data.courseId,
+        moduleId: data.moduleId,
+        difficulty: data.difficulty ?? "beginner",
+        numQuestions: data.numQuestions ?? 5,
+      }),
+    );
 
     const [quiz] = await db
       .insert(quizzes)
@@ -107,7 +110,7 @@ export class QuizService {
       id: quiz.id,
       courseId: quiz.courseId,
       moduleId: quiz.moduleId,
-      questions: generatedQuestions.map(({ correctIndex: _, ...q }) => q),
+      questions: this.toClientQuestions(generatedQuestions),
       createdAt: quiz.createdAt,
     };
   }
@@ -160,12 +163,7 @@ export class QuizService {
         }
 
         // Grade the quiz
-        const questions = (quiz.questions ?? []) as Array<{
-          id: string;
-          text: string;
-          options: string[];
-          correctIndex: number;
-        }>;
+        const questions = (quiz.questions ?? []) as StoredQuestion[];
 
         if (!questions || questions.length === 0) {
           throw new ForbiddenError("Quiz has no questions");
@@ -322,10 +320,12 @@ export class QuizService {
 
       await this.assertRetryAllowed(userId, quiz.courseId, quiz.moduleId);
 
-      const generatedQuestions = await this.generateQuestions(userId, {
-        courseId: quiz.courseId,
-        moduleId: quiz.moduleId,
-      });
+      const generatedQuestions = this.shuffleQuestions(
+        await this.generateQuestions(userId, {
+          courseId: quiz.courseId,
+          moduleId: quiz.moduleId,
+        }),
+      );
 
       const [newQuiz] = await db
         .insert(quizzes)
@@ -364,7 +364,7 @@ export class QuizService {
         id: newQuiz.id,
         courseId: newQuiz.courseId,
         moduleId: newQuiz.moduleId,
-        questions: generatedQuestions.map(({ correctIndex: _, ...q }) => q),
+        questions: this.toClientQuestions(generatedQuestions),
         createdAt: newQuiz.createdAt,
       };
     });
@@ -580,6 +580,44 @@ export class QuizService {
         correctIndex: 1,
       },
     ];
+  }
+
+  private shuffleQuestions(questions: GeneratedQuestion[]): StoredQuestion[] {
+    const storedQuestions = questions.map((question, originalQuestionIndex) => {
+      const shuffledOptions = this.shuffleArray(
+        question.options.map((option, originalOptionIndex) => ({
+          option,
+          originalOptionIndex,
+        })),
+      );
+      const correctIndex = shuffledOptions.findIndex(
+        (option) => option.originalOptionIndex === question.correctIndex,
+      );
+
+      return {
+        ...question,
+        options: shuffledOptions.map((option) => option.option),
+        correctIndex,
+        originalQuestionIndex,
+        originalCorrectIndex: question.correctIndex,
+        originalOptions: question.options,
+      };
+    });
+
+    return this.shuffleArray(storedQuestions);
+  }
+
+  private shuffleArray<T>(items: T[]): T[] {
+    const shuffled = [...items];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = crypto.randomInt(i + 1);
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    return shuffled;
+  }
+
+  private toClientQuestions(questions: StoredQuestion[]): QuizQuestion[] {
+    return questions.map(({ id, text, options }) => ({ id, text, options }));
   }
 }
 

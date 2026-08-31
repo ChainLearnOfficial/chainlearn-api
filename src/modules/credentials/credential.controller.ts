@@ -1,7 +1,10 @@
 import type { FastifyRequest, FastifyReply } from "fastify";
 import { credentialService } from "./credential.service.js";
 import type { AuthenticatedRequest } from "../../middleware/auth.js";
-import type { MintCredentialBody } from "./credential.types.js";
+import type {
+  BatchMintCredentialBody,
+  MintCredentialBody,
+} from "./credential.types.js";
 import {
   checkIdempotency,
   storeIdempotentResponse,
@@ -68,6 +71,23 @@ export class CredentialController {
 
       throw err;
     }
+  }
+
+  /**
+   * POST /api/credentials/batch-mint
+   * Mint multiple course completion NFT credentials sequentially.
+   */
+  async batchMint(
+    request: FastifyRequest<{ Body: BatchMintCredentialBody }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { authUser } = request as AuthenticatedRequest;
+    const results = await credentialService.batchMint(
+      authUser.id,
+      request.body.submissions,
+    );
+
+    reply.send({ success: true, data: results });
   }
 
   /**

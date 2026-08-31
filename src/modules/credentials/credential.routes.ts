@@ -2,7 +2,11 @@ import type { FastifyInstance, FastifySchema } from "fastify";
 import { credentialController } from "./credential.controller.js";
 import { authGuard } from "../../middleware/auth.js";
 import { validate } from "../../middleware/validation.js";
-import { mintCredentialSchema } from "./credential.types.js";
+import {
+  batchMintCredentialSchema,
+  mintCredentialSchema,
+} from "./credential.types.js";
+import { batchMintRateLimit } from "../../middleware/rate-limit.js";
 
 export async function credentialRoutes(app: FastifyInstance): Promise<void> {
   app.addHook("onRequest", authGuard);
@@ -26,6 +30,39 @@ export async function credentialRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => credentialController.mint(request, reply)
+  );
+
+  app.post<{ Body: import("./credential.types.js").BatchMintCredentialBody }>(
+    "/batch-mint",
+    {
+      config: { rateLimit: batchMintRateLimit },
+      preHandler: [validate({ body: batchMintCredentialSchema })],
+      schema: {
+        description: "Mint multiple course completion credentials sequentially",
+        tags: ["credentials"],
+        security: [{ bearerAuth: [] }],
+        body: {
+          type: "object",
+          required: ["submissions"],
+          properties: {
+            submissions: {
+              type: "array",
+              minItems: 1,
+              maxItems: 20,
+              items: {
+                type: "object",
+                required: ["courseId", "submissionId"],
+                properties: {
+                  courseId: { type: "string", format: "uuid" },
+                  submissionId: { type: "string", format: "uuid" },
+                },
+              },
+            },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => credentialController.batchMint(request, reply)
   );
 
   app.get(

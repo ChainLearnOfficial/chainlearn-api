@@ -163,6 +163,21 @@ export class CourseController {
 
     reply.send({ success: true, data: courses });
   }
+
+  /**
+   * GET /api/v1/courses/recommended
+   * Get personalized course recommendations based on enrollment history (#328).
+   */
+  async recommended(
+    request: FastifyRequest<{ Querystring: PopularCoursesQuery }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { authUser } = request as AuthenticatedRequest;
+    const { limit } = request.query;
+    const recommendations = await courseService.getRecommendedCourses(authUser.id, limit);
+
+    reply.send({ success: true, data: recommendations });
+  }
 }
 
 export const courseController = new CourseController();

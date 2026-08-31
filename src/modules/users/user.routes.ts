@@ -88,4 +88,18 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
     },
     (request, reply) => userController.getProgress(request, reply)
   );
+
+  app.delete(
+    "/me",
+    {
+      schema: {
+        description:
+          "Delete (soft-delete) the authenticated user's account. Enrollments and credentials are preserved.",
+        tags: ["users"],
+        security: [{ bearerAuth: [] }],
+        response: { 204: { type: "null" } },
+      } as FastifySchema,
+    },
+    (request, reply) => userController.deleteMe(request, reply)
+  );
 }

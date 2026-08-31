@@ -14,7 +14,16 @@ import {
 } from "../../database/schema.js";
 import { config } from "../../config/index.js";
 import { NotFoundError, ValidationError } from "../../utils/errors.js";
-import { cacheGet, cacheSet, cacheDel, cacheKey } from "../../cache/index.js";
+import { logger } from "../../utils/logger.js";
+import { auditLog } from "../../audit/index.js";
+import {
+  cacheGet,
+  cacheSet,
+  cacheDel,
+  cacheInvalidatePattern,
+  cacheKey,
+  cacheKeyPattern,
+} from "../../cache/index.js";
 import type {
   ActivityQuery,
   AvatarUpload,
@@ -374,6 +383,55 @@ export class UserService {
       credits: updated.credits,
       createdAt: updated.createdAt,
     };
+  }
+
+  /**
+   * Soft-deletes the authenticated user's account (#290). Sets deletedAt
+   * (which authGuard checks so a JWT issued before deletion stops working
+   * on the very next authenticated request — no blocklist entry needed)
+   * and clears the free-text profile fields the user directly controls.
+   *
+   * Deliberately does NOT touch enrollments or credentials — those are
+   * preserved for on-chain record consistency, per the issue's explicit
+   * requirement, so a deleted account's learning history and minted
+   * credentials remain intact and queryable.
+   *
+   * updatedAt is not set manually here — the update_users_updated_at
+   * trigger (migration 0009) maintains it on every UPDATE regardless of
+   * which columns changed.
+   */
+  async deleteAccount(userId: string): Promise<void> {
+    const [deleted] = await db
+      .update(users)
+      .set({
+        deletedAt: new Date(),
+        displayName: null,
+        background: null,
+        learningGoal: null,
+      })
+      .where(eq(users.id, userId))
+      .returning();
+
+    if (!deleted) {
+      throw new NotFoundError("User");
+    }
+
+    const invalidations = await Promise.allSettled([
+      cacheDel(cacheKey("user", "profile", userId)),
+      cacheDel(cacheKey("user", "progress", userId)),
+      cacheDel(cacheKey("user", "enrollments", userId)),
+      cacheInvalidatePattern(cacheKeyPattern("user", "activity", userId)),
+    ]);
+    const failed = invalidations.filter((r) => r.status === "rejected");
+    if (failed.length > 0) {
+      logger.warn(
+        { userId, failedCount: failed.length },
+        "Post-account-deletion cache invalidation had failures — affected views may serve stale data until their TTL expires",
+      );
+    }
+
+    await auditLog("user.account_deleted", { userId });
+    logger.info({ userId }, "Account deleted");
   }
 
   private async deleteLocalAvatar(avatarUrl: string | null): Promise<void> {

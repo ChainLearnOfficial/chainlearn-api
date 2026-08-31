@@ -16,6 +16,7 @@ type AuditEvent =
   | "course.created"
   | "course.updated"
   | "course.deleted"
+  | "user.account_deleted";
   | "course.module.created"
   | "course.module.updated"
   | "course.module.deleted";

@@ -1,4 +1,4 @@
-import { eq, and, desc, sql } from "drizzle-orm";
+import { eq, and, desc, inArray, sql } from "drizzle-orm";
 import { db } from "../../config/database.js";
 import {
   quizSubmissions,
@@ -19,9 +19,17 @@ import { createQuizProof } from "../../stellar/signatures.js";
 import { isCircuitBreakerError } from "../../stellar/resilience.js";
 import { config } from "../../config/index.js";
 import { logger } from "../../utils/logger.js";
-import { enqueueReward } from "../../services/retry-queue.js";
+import {
+  enqueueReward,
+  getQueuedRewardJobs,
+  estimateProcessingSeconds,
+} from "../../services/retry-queue.js";
 import StellarSdk from "@stellar/stellar-sdk";
-import type { RewardClaimResult, RewardHistoryItem } from "./reward.types.js";
+import type {
+  RewardClaimResult,
+  RewardHistoryItem,
+  PendingRewardItem,
+} from "./reward.types.js";
 import { PASSING_PERCENTAGE } from "../quizzes/quiz.types.js";
 import { auditLog } from "../../audit/index.js";
 import {
@@ -37,6 +45,8 @@ import {
 } from "../../cache/index.js";
 
 const REWARD_AMOUNT = 10; // credits per passed quiz
+const PENDING_REWARDS_TTL_SECONDS = 10; // #327 — near-real-time
+const PENDING_CONFIRMATION_ETA_SECONDS = 300; // reconcile job runs every 5 min
 
 export async function selectSubmissionForUpdate(
   tx: Parameters<typeof db.transaction>[0] extends (arg: infer T) => any ? T : never,
@@ -223,6 +233,7 @@ export async function processRewardClaim(
     if (result) {
       await cacheDel(cacheKey("user", "progress", userId));
       await cacheDel(cacheKey("user", "profile", userId));
+      await cacheDel(cacheKey("rewards", "pending", userId));
       await cacheInvalidatePattern(cacheKey("rewards", "history", userId, "*"));
       await cacheInvalidatePattern(cacheKey("user", "activity", userId, "*"));
     }
@@ -326,6 +337,7 @@ export class RewardService {
             .set({ rewardPending: false })
             .where(eq(quizSubmissions.id, submissionId));
           await enqueueReward({ submissionId, userId });
+          await cacheDel(cacheKey("rewards", "pending", userId));
           rewardClaimsTotal.inc({ status: "queued" });
           auditLog("reward.queued", {
             userId,
@@ -368,6 +380,7 @@ export class RewardService {
 
         await cacheDel(cacheKey("user", "progress", userId));
         await cacheDel(cacheKey("user", "profile", userId));
+        await cacheDel(cacheKey("rewards", "pending", userId));
         await cacheInvalidatePattern(cacheKey("rewards", "history", userId, "*"));
 
         return {
@@ -394,6 +407,7 @@ export class RewardService {
 
       await cacheDel(cacheKey("user", "progress", userId));
       await cacheDel(cacheKey("user", "profile", userId));
+      await cacheDel(cacheKey("rewards", "pending", userId));
       await cacheInvalidatePattern(cacheKey("rewards", "history", userId, "*"));
       await cacheInvalidatePattern(cacheKey("user", "activity", userId, "*"));
 
@@ -471,6 +485,125 @@ export class RewardService {
     await cacheSet(cacheKeyString, result, 30);
 
     return result;
+  }
+
+  /**
+   * The authenticated user's reward claims that haven't landed yet (#327):
+   * claims sitting in the retry queue because Stellar was unavailable, and
+   * claims whose on-chain transaction is submitted but unconfirmed after a
+   * sequence error. Gives users visibility into a state that was previously
+   * invisible. Cached for 10s only — this is near-real-time data.
+   */
+  async getPendingRewards(userId: string): Promise<PendingRewardItem[]> {
+    const namespace = "rewards";
+    const cacheKeyString = cacheKey(namespace, "pending", userId);
+
+    const cached = await cacheGet<PendingRewardItem[]>(
+      namespace,
+      cacheKeyString,
+    );
+    if (cached) return cached;
+
+    // Queued claims — pull this user's jobs out of the Redis retry queue.
+    const queuedJobs = (await getQueuedRewardJobs()).filter(
+      (job) => job.userId === userId,
+    );
+
+    // Awaiting-confirmation claims — rewardPending rows in the database.
+    const pendingRows = await db
+      .select({
+        submissionId: quizSubmissions.id,
+        courseTitle: courses.title,
+        rewardAmount: quizSubmissions.rewardAmount,
+        txHash: quizSubmissions.txHash,
+        submittedAt: quizSubmissions.submittedAt,
+      })
+      .from(quizSubmissions)
+      .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+      .innerJoin(courses, eq(quizzes.courseId, courses.id))
+      .where(
+        and(
+          eq(quizSubmissions.userId, userId),
+          eq(quizSubmissions.rewardPending, true),
+        ),
+      );
+
+    // Course titles for queued jobs (their submissions aren't rewardPending).
+    const queuedSubmissionIds = queuedJobs.map((j) => j.submissionId);
+    const queuedMeta = new Map<
+      string,
+      { courseTitle: string; rewardAmount: number | null; submittedAt: Date }
+    >();
+    if (queuedSubmissionIds.length > 0) {
+      const rows = await db
+        .select({
+          submissionId: quizSubmissions.id,
+          courseTitle: courses.title,
+          rewardAmount: quizSubmissions.rewardAmount,
+          submittedAt: quizSubmissions.submittedAt,
+        })
+        .from(quizSubmissions)
+        .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+        .innerJoin(courses, eq(quizzes.courseId, courses.id))
+        .where(inArray(quizSubmissions.id, queuedSubmissionIds));
+      for (const row of rows) {
+        queuedMeta.set(row.submissionId, {
+          courseTitle: row.courseTitle,
+          rewardAmount: row.rewardAmount,
+          submittedAt: row.submittedAt,
+        });
+      }
+    }
+
+    const items: PendingRewardItem[] = [];
+    const seen = new Set<string>();
+
+    for (const job of queuedJobs) {
+      const meta = queuedMeta.get(job.submissionId);
+      if (!meta) continue; // submission deleted — skip a dangling queue entry
+      seen.add(job.submissionId);
+      items.push({
+        submissionId: job.submissionId,
+        courseTitle: meta.courseTitle,
+        amount: meta.rewardAmount ?? REWARD_AMOUNT,
+        status: "queued",
+        queuePosition: job.position + 1,
+        estimatedProcessingSeconds: estimateProcessingSeconds(
+          job.position,
+          job.readyAt,
+        ),
+        txHash: null,
+        submittedAt: meta.submittedAt,
+      });
+    }
+
+    for (const row of pendingRows) {
+      if (seen.has(row.submissionId)) continue;
+      seen.add(row.submissionId);
+      items.push({
+        submissionId: row.submissionId,
+        courseTitle: row.courseTitle,
+        amount: row.rewardAmount ?? REWARD_AMOUNT,
+        status: "awaiting_confirmation",
+        queuePosition: null,
+        // The reconciliation job runs every 5 minutes (#207).
+        estimatedProcessingSeconds: PENDING_CONFIRMATION_ETA_SECONDS,
+        txHash: row.txHash,
+        submittedAt: row.submittedAt,
+      });
+    }
+
+    items.sort((a, b) => {
+      if (a.status !== b.status) return a.status === "queued" ? -1 : 1;
+      if (a.status === "queued") {
+        return (a.queuePosition ?? 0) - (b.queuePosition ?? 0);
+      }
+      return a.submittedAt.getTime() - b.submittedAt.getTime();
+    });
+
+    await cacheSet(cacheKeyString, items, PENDING_REWARDS_TTL_SECONDS);
+
+    return items;
   }
 }
 

@@ -13,10 +13,12 @@ type AuditEvent =
   | "auth.login"
   | "auth.login_failed"
   | "course.enrolled"
+  | "course.shared"
+  | "course.referral_enrolled"
   | "course.created"
   | "course.updated"
   | "course.deleted"
-  | "user.account_deleted";
+  | "user.account_deleted"
   | "course.module.created"
   | "course.module.updated"
   | "course.module.deleted";

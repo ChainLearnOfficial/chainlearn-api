@@ -16,9 +16,9 @@ import { generateQuizFromAI } from "./ai-client.js";
 import { sanitizeQuizFeedback } from "../../utils/sanitize.js";
 import { auditLog } from "../../audit/index.js";
 import { quizSubmissionsTotal } from "../../metrics/index.js";
-import { cacheDel, cacheKey } from "../../cache/index.js";
-import { cacheGet, cacheSet, cacheKey } from "../../cache/index.js";
 import {
+  cacheGet,
+  cacheSet,
   cacheDel,
   cacheKey,
   cacheKeyPattern,

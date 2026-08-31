@@ -1,11 +1,26 @@
-import { eq, and, count, desc, inArray, ilike, or, isNull } from "drizzle-orm";
-import { eq, and, count, desc, inArray, ilike, or, sql } from "drizzle-orm";
+import {
+  eq,
+  ne,
+  and,
+  count,
+  desc,
+  inArray,
+  ilike,
+  or,
+  isNull,
+  sql,
+} from "drizzle-orm";
+import crypto from "node:crypto";
+import QRCode from "qrcode";
+import { checkAccessibility } from "./accessibility.js";
 import { db } from "../../config/database.js";
-import { courses, enrollments, quizzes, quizSubmissions } from "../../database/schema.js";
 import {
   courses,
   enrollments,
   quizzes,
+  quizSubmissions,
+  courseShares,
+  users,
   type CourseModuleDefinition,
 } from "../../database/schema.js";
 import { config } from "../../config/index.js";
@@ -27,7 +42,11 @@ import type {
   CourseSummary,
   CourseDetail,
   CourseStats,
+  CourseLeaderboardEntry,
+  CourseShareLink,
+  ResolvedShareLink,
   AdminCourse,
+  AdminCourseWithAccessibility,
   CreateCourseBody,
   CourseModule,
   CourseModuleMetadata,
@@ -38,6 +57,8 @@ import type {
 } from "./course.types.js";
 
 const POPULAR_COURSES_TTL_SECONDS = 300;
+const LEADERBOARD_TTL_SECONDS = 300;
+const LEADERBOARD_SIZE = 20;
 
 export class CourseService {
   async getStats(): Promise<CourseStats> {
@@ -376,6 +397,8 @@ export class CourseService {
     const result: CourseModuleWithProgress[] = moduleRows.map((row, i) => ({
       id: row.moduleId,
       title: row.moduleId,
+      description: null,
+      estimatedDurationMinutes: null,
       order: i + 1,
       completed: completedModuleIds.has(row.moduleId),
     }));
@@ -419,6 +442,7 @@ export class CourseService {
   async enroll(
     userId: string,
     courseId: string,
+    referralCode?: string,
   ): Promise<{ contentHashMismatch: boolean }> {
     let storedContentHash: string | null = null;
 
@@ -505,6 +529,12 @@ export class CourseService {
       }
     });
 
+    // Credit the referral link (#325), if the enrollment came through one.
+    // Runs outside the lock and never fails the enrollment.
+    if (referralCode) {
+      await this.trackReferralEnrollment(referralCode, courseId, userId);
+    }
+
     // Run after the lock releases — a slow/unreachable contract read must
     // never extend how long the enrollment lock is held.
     const contentHashMismatch = await this.checkContentHash(
@@ -554,6 +584,251 @@ export class CourseService {
     return rows.map((course) => ({ ...course, isEnrolled: false }));
   }
 
+  /**
+   * Per-course leaderboard (#324): the top {@link LEADERBOARD_SIZE} learners
+   * for a course ranked by their average quiz score. Each submission's raw
+   * correct-answer count is normalized against its own quiz's question count
+   * before averaging (quizzes vary from 1–20 questions), matching
+   * getQuizStats. Superseded submissions (#295) and ungraded ones don't
+   * count. Cached for 5 minutes — course-level competition doesn't need to
+   * be real-time, and this aggregates every submission for the course.
+   */
+  async getLeaderboard(courseId: string): Promise<CourseLeaderboardEntry[]> {
+    const namespace = "courses";
+    const cacheKeyString = cacheKey(namespace, "leaderboard", courseId);
+
+    const cached = await cacheGet<CourseLeaderboardEntry[]>(
+      namespace,
+      cacheKeyString,
+    );
+    if (cached) return cached;
+
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course || !course.isActive) {
+      throw new NotFoundError("Course");
+    }
+
+    const rows = await db
+      .select({
+        userId: quizSubmissions.userId,
+        displayName: users.displayName,
+        score: quizSubmissions.score,
+        questions: quizzes.questions,
+      })
+      .from(quizSubmissions)
+      .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+      .innerJoin(users, eq(quizSubmissions.userId, users.id))
+      .where(
+        and(
+          eq(quizzes.courseId, courseId),
+          eq(quizSubmissions.superseded, false),
+          isNull(users.deletedAt),
+        ),
+      );
+
+    const perUser = new Map<
+      string,
+      { displayName: string | null; percentageSum: number; quizzesTaken: number }
+    >();
+
+    for (const row of rows) {
+      const totalQuestions = Array.isArray(row.questions)
+        ? row.questions.length
+        : 0;
+      if (totalQuestions === 0 || row.score == null) continue;
+
+      const percentage = Math.round((row.score / totalQuestions) * 100);
+      const entry = perUser.get(row.userId) ?? {
+        displayName: row.displayName,
+        percentageSum: 0,
+        quizzesTaken: 0,
+      };
+      entry.percentageSum += percentage;
+      entry.quizzesTaken += 1;
+      perUser.set(row.userId, entry);
+    }
+
+    const leaderboard: CourseLeaderboardEntry[] = [...perUser.entries()]
+      .map(([userId, e]) => ({
+        userId,
+        displayName: e.displayName,
+        averageScore: Math.round(e.percentageSum / e.quizzesTaken),
+        quizzesTaken: e.quizzesTaken,
+      }))
+      .sort(
+        (a, b) =>
+          b.averageScore - a.averageScore ||
+          b.quizzesTaken - a.quizzesTaken,
+      )
+      .slice(0, LEADERBOARD_SIZE)
+      .map((e, i) => ({ rank: i + 1, ...e }));
+
+    await cacheSet(cacheKeyString, leaderboard, LEADERBOARD_TTL_SECONDS);
+
+    return leaderboard;
+  }
+
+  // ─── Course Sharing / Referrals (#325) ─────────────────────────────────
+
+  /** 10-char base62 referral token from 8 random bytes. */
+  private generateReferralCode(): string {
+    const alphabet =
+      "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    const bytes = crypto.randomBytes(10);
+    let code = "";
+    for (const b of bytes) code += alphabet[b % alphabet.length];
+    return code;
+  }
+
+  private buildShareUrl(courseId: string, referralCode: string): string {
+    const base = config.PUBLIC_BASE_URL?.replace(/\/$/, "") ?? "";
+    return `${base}/api/v1/courses/${courseId}?ref=${referralCode}`;
+  }
+
+  private async toShareLink(
+    row: typeof courseShares.$inferSelect,
+  ): Promise<CourseShareLink> {
+    const url = this.buildShareUrl(row.courseId, row.referralCode);
+    return {
+      courseId: row.courseId,
+      referralCode: row.referralCode,
+      url,
+      qrCode: await QRCode.toDataURL(url, { margin: 1, width: 240 }),
+      clickCount: row.clickCount,
+      enrollmentCount: row.enrollmentCount,
+    };
+  }
+
+  /**
+   * Get (or lazily create) the caller's referral link for a course (#325).
+   * The link is stable — calling this repeatedly returns the same code and
+   * its accumulated click / enrollment counts. Scoped by a per-user,
+   * per-course lock so two concurrent first-time calls can't both insert.
+   */
+  async createShareLink(
+    userId: string,
+    courseId: string,
+  ): Promise<CourseShareLink> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course || !course.isActive) {
+      throw new NotFoundError("Course");
+    }
+
+    return withLock(`course-share:${userId}:${courseId}`, async () => {
+      const existing = await db.query.courseShares.findFirst({
+        where: and(
+          eq(courseShares.userId, userId),
+          eq(courseShares.courseId, courseId),
+        ),
+      });
+      if (existing) return this.toShareLink(existing);
+
+      // Retry on the (astronomically unlikely) referral_code collision.
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          const [row] = await db
+            .insert(courseShares)
+            .values({
+              userId,
+              courseId,
+              referralCode: this.generateReferralCode(),
+            })
+            .returning();
+          await auditLog("course.shared", { userId, courseId });
+          return this.toShareLink(row);
+        } catch (err) {
+          const code = (err as { code?: string }).code;
+          // 23505 = unique_violation. A concurrent insert of the same
+          // (user, course) pair means we should return their row.
+          if (code === "23505") {
+            const row = await db.query.courseShares.findFirst({
+              where: and(
+                eq(courseShares.userId, userId),
+                eq(courseShares.courseId, courseId),
+              ),
+            });
+            if (row) return this.toShareLink(row);
+            continue; // else it was a code collision — regenerate
+          }
+          throw err;
+        }
+      }
+      throw new Error("Could not allocate a unique referral code");
+    });
+  }
+
+  /**
+   * Resolve a referral code to its course, counting the click (#325). Used
+   * by the public share link so opening it is tracked. A missing/stale code
+   * 404s rather than silently redirecting.
+   */
+  async resolveShareLink(
+    referralCode: string,
+    viewerId: string | null,
+  ): Promise<ResolvedShareLink> {
+    const share = await db.query.courseShares.findFirst({
+      where: eq(courseShares.referralCode, referralCode),
+    });
+    if (!share) {
+      throw new NotFoundError("Share link");
+    }
+
+    // Don't inflate the metric when the sharer opens their own link.
+    if (viewerId !== share.userId) {
+      await db
+        .update(courseShares)
+        .set({ clickCount: sql`${courseShares.clickCount} + 1` })
+        .where(eq(courseShares.id, share.id));
+    }
+
+    return {
+      referralCode: share.referralCode,
+      sharedByUserId: share.userId,
+      course: await this.getCourseDetail(share.courseId, viewerId),
+    };
+  }
+
+  /**
+   * Credit a referral with an enrollment (#325). Best-effort — called after
+   * a successful enroll(); a bad or self-referral code is ignored rather
+   * than failing the enrollment.
+   */
+  private async trackReferralEnrollment(
+    referralCode: string,
+    courseId: string,
+    enrolleeId: string,
+  ): Promise<void> {
+    try {
+      const result = await db
+        .update(courseShares)
+        .set({ enrollmentCount: sql`${courseShares.enrollmentCount} + 1` })
+        .where(
+          and(
+            eq(courseShares.referralCode, referralCode),
+            eq(courseShares.courseId, courseId),
+            ne(courseShares.userId, enrolleeId),
+          ),
+        )
+        .returning({ userId: courseShares.userId });
+
+      if (result.length > 0) {
+        await auditLog("course.referral_enrolled", {
+          userId: enrolleeId,
+          courseId,
+        });
+      }
+    } catch (err) {
+      logger.warn(
+        { err, courseId, referralCode },
+        "Failed to record referral enrollment — enrollment itself succeeded",
+      );
+    }
+  }
+
   // ─── Admin ──────────────────────────────────────────────────────────────
 
   private async invalidateCourseCaches(courseId?: string): Promise<void> {
@@ -583,11 +858,44 @@ export class CourseService {
       contentHash: row.contentHash,
       isActive: row.isActive,
       modules: (row.modules ?? []) as CourseModuleDefinition[],
+      accessibilityScore: row.accessibilityScore,
       createdAt: row.createdAt,
     };
   }
 
-  async createCourse(data: CreateCourseBody): Promise<AdminCourse> {
+  /**
+   * Every free-text content field of a course, keyed for warning
+   * attribution (#326): the course description plus each module's
+   * description (both the authoring-time `courseModules` metadata and the
+   * admin-defined `modules` structure).
+   */
+  private courseContentFields(row: {
+    description?: string | null;
+    courseModules?: CourseModuleMetadata[] | null;
+    modules?: CourseModuleDefinition[] | null;
+  }): Record<string, string | null | undefined> {
+    const fields: Record<string, string | null | undefined> = {
+      description: row.description,
+    };
+    for (const m of this.normalizeCourseModules(row.courseModules ?? null)) {
+      if (m.description) fields[`module "${m.title}"`] = m.description;
+    }
+    for (const m of (row.modules ?? []) as CourseModuleDefinition[]) {
+      if (m.description) fields[`module "${m.title}"`] = m.description;
+    }
+    return fields;
+  }
+
+  async createCourse(
+    data: CreateCourseBody,
+  ): Promise<AdminCourseWithAccessibility> {
+    const accessibility = checkAccessibility(
+      this.courseContentFields({
+        description: data.description,
+        courseModules: data.courseModules ?? null,
+      }),
+    );
+
     const [course] = await db
       .insert(courses)
       .values({
@@ -597,35 +905,57 @@ export class CourseService {
         tags: data.tags,
         courseModules: data.courseModules,
         contentHash: data.contentHash,
+        accessibilityScore: accessibility.score,
       })
       .returning();
 
     await this.invalidateCourseCaches();
     await auditLog("course.created", { courseId: course.id });
-    logger.info({ courseId: course.id }, "Course created");
+    logger.info(
+      { courseId: course.id, accessibilityScore: accessibility.score },
+      "Course created",
+    );
 
-    return this.toAdminCourse(course);
+    return { ...this.toAdminCourse(course), accessibility };
   }
 
   async updateCourse(
     courseId: string,
     data: UpdateCourseBody,
-  ): Promise<AdminCourse> {
-    const [course] = await db
+  ): Promise<AdminCourseWithAccessibility> {
+    const [updated] = await db
       .update(courses)
       .set(data)
       .where(eq(courses.id, courseId))
       .returning();
 
-    if (!course) {
+    if (!updated) {
       throw new NotFoundError("Course");
+    }
+
+    // Recompute from the merged post-update row so the score reflects the
+    // whole course, not just the fields in this request (#326).
+    const accessibility = checkAccessibility(
+      this.courseContentFields(updated),
+    );
+
+    let course = updated;
+    if (updated.accessibilityScore !== accessibility.score) {
+      [course] = await db
+        .update(courses)
+        .set({ accessibilityScore: accessibility.score })
+        .where(eq(courses.id, courseId))
+        .returning();
     }
 
     await this.invalidateCourseCaches(courseId);
     await auditLog("course.updated", { courseId });
-    logger.info({ courseId }, "Course updated");
+    logger.info(
+      { courseId, accessibilityScore: accessibility.score },
+      "Course updated",
+    );
 
-    return this.toAdminCourse(course);
+    return { ...this.toAdminCourse(course), accessibility };
   }
 
   /** Soft-deletes a course by setting isActive = false (#292). */
@@ -658,6 +988,8 @@ export class CourseService {
         description: module.description,
         estimatedDurationMinutes: module.estimatedDurationMinutes,
       }));
+  }
+
   // ─── Admin: Module Management (#304) ───────────────────────────────────
 
   /**

@@ -84,6 +84,10 @@ export const courses = pgTable(
       .notNull()
       .default([]),
     isActive: boolean("is_active").notNull().default(true),
+    // 0–100 accessibility score for the course's authored content (#326),
+    // recomputed on every create/update. Null until first written. Advisory
+    // only — a low score never blocks saving the course.
+    accessibilityScore: integer("accessibility_score"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -123,6 +127,38 @@ export const enrollments = pgTable(
       table.userId,
       table.courseId
     ),
+  ]
+);
+
+// ─── Course Shares (Referral Links) ─────────────────────────────────────────
+
+// One shareable referral link per user per course (#325). `referralCode` is
+// the short token embedded in the link; clickCount / enrollmentCount are
+// incremented as the link is opened and as referred users enrol, so
+// word-of-mouth growth can be measured (and later rewarded).
+export const courseShares = pgTable(
+  "course_shares",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    courseId: uuid("course_id")
+      .notNull()
+      .references(() => courses.id, { onDelete: "cascade" }),
+    referralCode: varchar("referral_code", { length: 16 }).notNull().unique(),
+    clickCount: integer("click_count").notNull().default(0),
+    enrollmentCount: integer("enrollment_count").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_course_shares_user_course").on(
+      table.userId,
+      table.courseId
+    ),
+    index("idx_course_shares_referral_code").on(table.referralCode),
   ]
 );
 

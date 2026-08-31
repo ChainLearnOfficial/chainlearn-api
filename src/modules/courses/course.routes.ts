@@ -6,6 +6,8 @@ import {
   listCoursesSchema,
   courseIdParamsSchema,
   popularCoursesQuerySchema,
+  enrollCourseQuerySchema,
+  shareCodeParamsSchema,
 } from "./course.types.js";
 
 export async function courseRoutes(app: FastifyInstance): Promise<void> {
@@ -59,17 +61,36 @@ export async function courseRoutes(app: FastifyInstance): Promise<void> {
     (request, reply) => courseController.popular(request, reply)
   );
 
-  app.get<{ Params: { id: string } }>(
-    "/:id/modules",
+  app.get<{ Params: { code: string } }>(
+    "/shared/:code",
     {
-      preHandler: [optionalAuth, validate({ params: courseIdParamsSchema })],
+      preHandler: [optionalAuth, validate({ params: shareCodeParamsSchema })],
       schema: {
-        description: "List course module metadata",
+        description:
+          "Resolve a course referral link, counting the click (#325)",
+        tags: ["courses"],
+        params: {
+          type: "object",
+          required: ["code"],
+          properties: { code: { type: "string" } },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => courseController.resolveShare(request, reply)
+  );
+
+  app.get<{ Params: { id: string } }>(
+    "/:id/leaderboard",
+    {
+      preHandler: [validate({ params: courseIdParamsSchema })],
+      schema: {
+        description:
+          "Per-course leaderboard: top 20 learners by average quiz score",
         tags: ["courses"],
         params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
       } as FastifySchema,
     },
-    (request, reply) => courseController.modules(request, reply)
+    (request, reply) => courseController.leaderboard(request, reply)
   );
 
   app.get<{ Params: { id: string } }>(
@@ -99,17 +120,42 @@ export async function courseRoutes(app: FastifyInstance): Promise<void> {
     (request, reply) => courseController.modules(request, reply)
   );
 
-  app.post<{ Params: { id: string } }>(
+  app.post<{ Params: { id: string }; Querystring: import("./course.types.js").EnrollCourseQuery }>(
     "/:id/enroll",
+    {
+      preHandler: [
+        authGuard,
+        validate({
+          params: courseIdParamsSchema,
+          querystring: enrollCourseQuerySchema,
+        }),
+      ],
+      schema: {
+        description: "Enroll in a course (optionally via a referral link)",
+        tags: ["courses"],
+        security: [{ bearerAuth: [] }],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+        querystring: {
+          type: "object",
+          properties: { ref: { type: "string" } },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => courseController.enroll(request, reply)
+  );
+
+  app.post<{ Params: { id: string } }>(
+    "/:id/share",
     {
       preHandler: [authGuard, validate({ params: courseIdParamsSchema })],
       schema: {
-        description: "Enroll in a course",
+        description:
+          "Generate a shareable referral link (with QR code) for a course (#325)",
         tags: ["courses"],
         security: [{ bearerAuth: [] }],
         params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
       } as FastifySchema,
     },
-    (request, reply) => courseController.enroll(request, reply)
+    (request, reply) => courseController.share(request, reply)
   );
 }

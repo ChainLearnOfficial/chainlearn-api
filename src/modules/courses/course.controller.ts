@@ -5,6 +5,8 @@ import type {
   ListCoursesQuery,
   CourseIdParams,
   PopularCoursesQuery,
+  EnrollCourseQuery,
+  ShareCodeParams,
 } from "./course.types.js";
 
 export class CourseController {
@@ -60,31 +62,20 @@ export class CourseController {
   }
 
   /**
-   * GET /api/courses/:id/modules
-   * List module metadata for a course.
-   */
-  async modules(
-    request: FastifyRequest<{ Params: CourseIdParams }>,
-    reply: FastifyReply
-  ): Promise<void> {
-    const { id } = request.params;
-    const userId = (request as AuthenticatedRequest).authUser?.id ?? null;
-    const course = await courseService.getCourseDetail(id, userId);
-
-    reply.send({ success: true, data: course.modules });
-  }
-
-  /**
    * POST /api/courses/:id/enroll
    * Enroll the authenticated user in a course.
    */
   async enroll(
-    request: FastifyRequest<{ Params: CourseIdParams }>,
+    request: FastifyRequest<{ Params: CourseIdParams; Querystring: EnrollCourseQuery }>,
     reply: FastifyReply
   ): Promise<void> {
     const { id } = request.params;
     const { authUser } = request as AuthenticatedRequest;
-    const { contentHashMismatch } = await courseService.enroll(authUser.id, id);
+    const { contentHashMismatch } = await courseService.enroll(
+      authUser.id,
+      id,
+      request.query?.ref,
+    );
 
     if (contentHashMismatch) {
       reply.header(
@@ -97,6 +88,36 @@ export class CourseController {
       success: true,
       message: "Enrolled successfully",
     });
+  }
+
+  /**
+   * POST /api/v1/courses/:id/share
+   * Get (or create) the caller's referral link for a course (#325).
+   */
+  async share(
+    request: FastifyRequest<{ Params: CourseIdParams }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id } = request.params;
+    const { authUser } = request as AuthenticatedRequest;
+    const link = await courseService.createShareLink(authUser.id, id);
+
+    reply.status(201).send({ success: true, data: link });
+  }
+
+  /**
+   * GET /api/v1/courses/shared/:code
+   * Resolve a referral link to its course, counting the click (#325).
+   */
+  async resolveShare(
+    request: FastifyRequest<{ Params: ShareCodeParams }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { code } = request.params;
+    const viewerId = (request as AuthenticatedRequest).authUser?.id ?? null;
+    const resolved = await courseService.resolveShareLink(code, viewerId);
+
+    reply.send({ success: true, data: resolved });
   }
 
   /**
@@ -113,6 +134,20 @@ export class CourseController {
     const modules = await courseService.getCourseModules(authUser.id, id);
 
     reply.send({ success: true, data: modules });
+  }
+
+  /**
+   * GET /api/v1/courses/:id/leaderboard
+   * Top performers for a course, ranked by average quiz score (#324).
+   */
+  async leaderboard(
+    request: FastifyRequest<{ Params: CourseIdParams }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id } = request.params;
+    const leaderboard = await courseService.getLeaderboard(id);
+
+    reply.send({ success: true, data: leaderboard });
   }
 
   /**

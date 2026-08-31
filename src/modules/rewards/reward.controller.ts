@@ -67,6 +67,21 @@ export class RewardController {
   }
 
   /**
+   * GET /api/v1/rewards/pending
+   * List the authenticated user's queued / awaiting-confirmation reward
+   * claims (#327).
+   */
+  async pending(
+    request: FastifyRequest,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { authUser } = request as AuthenticatedRequest;
+    const pending = await rewardService.getPendingRewards(authUser.id);
+
+    reply.send({ success: true, data: pending });
+  }
+
+  /**
    * GET /api/rewards/history
    * Get reward claim history for the authenticated user, paginated.
    */

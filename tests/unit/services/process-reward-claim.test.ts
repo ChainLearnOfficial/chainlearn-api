@@ -70,6 +70,7 @@ vi.mock("../../../src/cache/index.js", () => ({
   cacheSet: vi.fn().mockResolvedValue(undefined),
   cacheDel: vi.fn().mockResolvedValue(undefined),
   cacheKey: vi.fn((...parts: string[]) => parts.join(":")),
+  cacheKeyPattern: vi.fn((...parts: string[]) => `${parts.join(":")}:*`),
   cacheInvalidatePattern: vi.fn().mockResolvedValue(undefined),
   cacheHits: { labels: vi.fn().mockReturnValue({ inc: vi.fn() }) },
   cacheMisses: { labels: vi.fn().mockReturnValue({ inc: vi.fn() }) },

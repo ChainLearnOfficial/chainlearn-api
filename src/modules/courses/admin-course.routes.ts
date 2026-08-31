@@ -149,6 +149,21 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
     (request, reply) => adminCourseController.publish(request, reply)
   );
 
+  app.post<{ Params: { id: string } }>(
+    "/:id/duplicate",
+    {
+      preHandler: [validate({ params: courseIdParamsSchema })],
+      schema: {
+        description:
+          "Duplicate a course, its modules, and quizzes into a new draft course (admin only)",
+        tags: ["admin", "courses"],
+        security: [{ bearerAuth: [] }],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      } as FastifySchema,
+    },
+    (request, reply) => adminCourseController.duplicate(request, reply)
+  );
+
   app.post<{
     Params: { id: string };
     Body: import("./course.types.js").CreateModuleBody;

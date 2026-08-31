@@ -1373,6 +1373,73 @@ export class CourseService {
     return { ...this.toAdminCourse(published), accessibility };
   }
 
+  /**
+   * Duplicate a course — metadata, modules, and quizzes — into a new draft
+   * course (isActive = false) titled "<original> (Copy)". Module IDs are
+   * copied as-is rather than regenerated so the duplicated quizzes (which
+   * reference them via moduleId) still resolve against the new course's
+   * module list.
+   */
+  async duplicateCourse(courseId: string): Promise<AdminCourseWithAccessibility> {
+    const original = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!original) {
+      throw new NotFoundError("Course");
+    }
+
+    const originalQuizzes = await db
+      .select()
+      .from(quizzes)
+      .where(eq(quizzes.courseId, courseId));
+
+    const duplicate = await db.transaction(async (tx) => {
+      const [newCourse] = await tx
+        .insert(courses)
+        .values({
+          title: `${original.title} (Copy)`,
+          description: original.description,
+          difficulty: original.difficulty,
+          tags: original.tags ?? [],
+          courseModules: original.courseModules,
+          modules: (original.modules ?? []) as CourseModuleDefinition[],
+          // A fresh course has no on-chain content commitment of its own yet.
+          contentHash: null,
+          isActive: false,
+          accessibilityScore: original.accessibilityScore,
+        })
+        .returning();
+
+      if (originalQuizzes.length > 0) {
+        await tx.insert(quizzes).values(
+          originalQuizzes.map((quiz) => ({
+            courseId: newCourse.id,
+            moduleId: quiz.moduleId,
+            questions: quiz.questions,
+          })),
+        );
+      }
+
+      return newCourse;
+    });
+
+    await this.invalidateCourseCaches();
+    await auditLog("course.duplicated", {
+      courseId: duplicate.id,
+      sourceCourseId: courseId,
+    });
+    logger.info(
+      { sourceCourseId: courseId, courseId: duplicate.id },
+      "Course duplicated",
+    );
+
+    const accessibility = checkAccessibility(
+      this.courseContentFields(duplicate),
+    );
+
+    return { ...this.toAdminCourse(duplicate), accessibility };
+  }
+
   private normalizeCourseModules(
     modules: CourseModuleMetadata[] | null,
   ): CourseModuleMetadata[] {

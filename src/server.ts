@@ -34,6 +34,10 @@ import {
   stopIdempotencyCleanup,
 } from "./jobs/cleanup-idempotency.js";
 import {
+  startNotificationCleanup,
+  stopNotificationCleanup,
+} from "./jobs/cleanup-notifications.js";
+import {
   startReconciliationJob,
   stopReconciliationJob,
 } from "./jobs/reconcile-pending-rewards.js";
@@ -307,6 +311,7 @@ async function start() {
 
   startRetryProcessor(processRetryJob);
   startIdempotencyCleanup();
+  startNotificationCleanup();
   startReconciliationJob();
   // Re-enqueue any reward claims dropped during a Redis restart (#208).
   recoverLostJobs().catch((err) => logger.error({ err }, "recoverLostJobs startup failed"));
@@ -343,6 +348,7 @@ async function start() {
     logger.info({ signal }, "Received shutdown signal");
     stopRetryProcessor();
     stopIdempotencyCleanup();
+    stopNotificationCleanup();
     stopReconciliationJob();
     if (cacheWarmInterval) {
       clearInterval(cacheWarmInterval);

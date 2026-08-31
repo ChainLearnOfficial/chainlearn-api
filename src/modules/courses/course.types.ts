@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { CourseModuleDefinition } from "../../database/schema.js";
 import type { AccessibilityReport } from "./accessibility.js";
+import { sanitizeText } from "../../utils/sanitize.js";
 
 // ─── Request Schemas ────────────────────────────────────────────────────────
 
@@ -88,6 +89,22 @@ export const moduleParamsSchema = z.object({
   moduleId: z.string().min(1).max(100),
 });
 
+// ─── Review Request Schemas ─────────────────────────────────────────────────
+
+export const listReviewsQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(50).default(20),
+});
+
+export const createReviewSchema = z.object({
+  rating: z.coerce.number().int().min(1).max(5),
+  reviewText: z
+    .string()
+    .max(2000)
+    .optional()
+    .transform((v) => (v ? sanitizeText(v) : v)),
+});
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 export type ListCoursesQuery = z.infer<typeof listCoursesSchema>;
@@ -100,6 +117,8 @@ export type UpdateCourseBody = z.infer<typeof updateCourseSchema>;
 export type CreateModuleBody = z.infer<typeof createModuleSchema>;
 export type UpdateModuleBody = z.infer<typeof updateModuleSchema>;
 export type ModuleParams = z.infer<typeof moduleParamsSchema>;
+export type ListReviewsQuery = z.infer<typeof listReviewsQuerySchema>;
+export type CreateReviewBody = z.infer<typeof createReviewSchema>;
 
 export interface CourseSummary {
   id: string;
@@ -115,6 +134,9 @@ export interface CourseDetail extends CourseSummary {
   contentHash: string | null;
   modules: CourseModule[];
   createdAt: Date;
+  /** Mean of all review ratings (1–5), rounded to 2dp. Null with no reviews. */
+  averageRating: number | null;
+  reviewCount: number;
 }
 
 export interface CourseModule {
@@ -166,6 +188,24 @@ export interface ResolvedShareLink {
   referralCode: string;
   sharedByUserId: string;
   course: CourseDetail;
+}
+
+/** One row of GET /api/v1/courses/:id/reviews. */
+export interface CourseReview {
+  id: string;
+  userId: string;
+  displayName: string | null;
+  rating: number;
+  reviewText: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface CourseReviewsResult {
+  reviews: CourseReview[];
+  total: number;
+  averageRating: number | null;
+  totalReviews: number;
 }
 
 export interface CourseStats {

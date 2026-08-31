@@ -1,17 +1,17 @@
 import { test, describe, expect, beforeEach, afterEach, vi } from "vitest";
-import { db } from "../config/database.js";
-import { redis } from "../config/redis.js";
-import { courseService } from "../modules/courses/course.service.js";
-import { userService } from "../modules/users/user.service.js";
-import { cacheKey, cacheHits, cacheMisses } from "../cache/index.js";
-import { warmCourseCache } from "../cache/warmer.js";
+import { db } from "../../src/config/database.js";
+import { redis } from "../../src/config/redis.js";
+import { courseService } from "../../src/modules/courses/course.service.js";
+import { userService } from "../../src/modules/users/user.service.js";
+import { cacheKey, cacheHits, cacheMisses } from "../../src/cache/index.js";
+import { warmCourseCache } from "../../src/cache/warmer.js";
 import {
   courses,
   enrollments,
   users,
   quizSubmissions,
   quizzes,
-} from "../database/schema.js";
+} from "../../src/database/schema.js";
 import { eq } from "drizzle-orm";
 
 describe("Redis Caching & Invalidation Test Suite", () => {

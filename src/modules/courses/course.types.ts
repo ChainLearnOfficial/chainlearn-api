@@ -100,6 +100,13 @@ export const listReviewsQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(50).default(20),
 });
 
+// ─── Admin: Enrolled Users Request Schema (#340) ────────────────────────────
+
+export const listEnrolledUsersQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(50).default(20),
+});
+
 export const createReviewSchema = z.object({
   rating: z.coerce.number().int().min(1).max(5),
   reviewText: z
@@ -123,6 +130,7 @@ export type CreateModuleBody = z.infer<typeof createModuleSchema>;
 export type UpdateModuleBody = z.infer<typeof updateModuleSchema>;
 export type ModuleParams = z.infer<typeof moduleParamsSchema>;
 export type ListReviewsQuery = z.infer<typeof listReviewsQuerySchema>;
+export type ListEnrolledUsersQuery = z.infer<typeof listEnrolledUsersQuerySchema>;
 export type CreateReviewBody = z.infer<typeof createReviewSchema>;
 
 export interface CourseSummary {
@@ -211,6 +219,34 @@ export interface CourseReviewsResult {
   total: number;
   averageRating: number | null;
   totalReviews: number;
+}
+
+// #340: one row per user enrolled in a course, with their quiz-progress
+// summary for that course. quizCount/averageScore are scoped to quizzes
+// belonging to this course (via quizzes.courseId), non-superseded
+// submissions only — mirrors how reward logic elsewhere treats a
+// superseded submission as no longer "the" submission for its quiz.
+export interface EnrolledUserSummary {
+  userId: string;
+  displayName: string | null;
+  stellarAddress: string;
+  enrolledAt: Date;
+  completedAt: Date | null;
+  quizCount: number;
+  /**
+   * Average of quiz_submissions.score across this user's non-superseded
+   * submissions for this course. score is the raw correct-answer count
+   * for that submission's quiz (see QuizService.submitQuiz), NOT a
+   * percentage — quizzes in this codebase aren't a fixed length, so this
+   * is not comparable across quizzes with different question counts.
+   * null when the user has no submissions for this course yet.
+   */
+  averageScore: number | null;
+}
+
+export interface EnrolledUsersResult {
+  users: EnrolledUserSummary[];
+  total: number;
 }
 
 export interface CourseStats {

@@ -65,6 +65,8 @@ import type {
   CreateReviewBody,
   CourseReview,
   CourseReviewsResult,
+  ListEnrolledUsersQuery,
+  EnrolledUsersResult,
 } from "./course.types.js";
 
 const POPULAR_COURSES_TTL_SECONDS = 300;
@@ -1141,6 +1143,115 @@ export class CourseService {
       averageRating: stats.averageRating,
       totalReviews: stats.reviewCount,
     };
+  }
+
+  /**
+   * Admin: paginated list of a course's enrolled users with their
+   * quiz-progress summary (#340). quizCount/averageScore are computed from
+   * quiz_submissions joined to quizzes scoped to this course, excluding
+   * superseded submissions (a retried quiz's earlier submission is kept
+   * for history but no longer counts as "the" submission — same rule
+   * reward logic elsewhere in this service follows).
+   */
+  async getEnrolledUsers(
+    courseId: string,
+    query: ListEnrolledUsersQuery,
+  ): Promise<EnrolledUsersResult> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    const namespace = "courses";
+    const cacheKeyString = cacheKey(
+      namespace,
+      "enrolled-users",
+      courseId,
+      query.page,
+      query.limit,
+    );
+
+    const cached = await cacheGet<EnrolledUsersResult>(
+      namespace,
+      cacheKeyString,
+    );
+    if (cached) return cached;
+
+    const offset = (query.page - 1) * query.limit;
+
+    const [[totalResult], enrolledRows] = await Promise.all([
+      db
+        .select({ value: count() })
+        .from(enrollments)
+        .where(eq(enrollments.courseId, courseId)),
+      db
+        .select({
+          userId: users.id,
+          displayName: users.displayName,
+          stellarAddress: users.stellarAddress,
+          enrolledAt: enrollments.enrolledAt,
+          completedAt: enrollments.completedAt,
+        })
+        .from(enrollments)
+        .innerJoin(users, eq(enrollments.userId, users.id))
+        .where(eq(enrollments.courseId, courseId))
+        .orderBy(desc(enrollments.enrolledAt))
+        .limit(query.limit)
+        .offset(offset),
+    ]);
+
+    const userIds = enrolledRows.map((row) => row.userId);
+
+    const progressRows = userIds.length
+      ? await db
+          .select({
+            userId: quizSubmissions.userId,
+            quizCount: count(),
+            averageScore: sql<string | null>`AVG(${quizSubmissions.score})`,
+          })
+          .from(quizSubmissions)
+          .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+          .where(
+            and(
+              eq(quizzes.courseId, courseId),
+              eq(quizSubmissions.superseded, false),
+              inArray(quizSubmissions.userId, userIds),
+            ),
+          )
+          .groupBy(quizSubmissions.userId)
+      : [];
+
+    const progressByUser = new Map(
+      progressRows.map((row) => [
+        row.userId,
+        {
+          quizCount: row.quizCount,
+          averageScore:
+            row.averageScore != null
+              ? Number(Number(row.averageScore).toFixed(2))
+              : null,
+        },
+      ]),
+    );
+
+    const result: EnrolledUsersResult = {
+      users: enrolledRows.map((row) => ({
+        userId: row.userId,
+        displayName: row.displayName,
+        stellarAddress: row.stellarAddress,
+        enrolledAt: row.enrolledAt,
+        completedAt: row.completedAt,
+        quizCount: progressByUser.get(row.userId)?.quizCount ?? 0,
+        averageScore: progressByUser.get(row.userId)?.averageScore ?? null,
+      })),
+      total: totalResult?.value ?? 0,
+    };
+
+    await cacheSet(cacheKeyString, result, 30);
+
+    return result;
   }
 
   /**

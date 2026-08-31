@@ -32,8 +32,10 @@ import {
   MAX_RETRIES_PER_MODULE_PER_DAY,
   MAX_QUIZ_GENERATIONS_PER_MODULE_PER_HOUR,
   type GenerateQuizBody,
+  type GenerateQuizBatchBody,
   type SubmitQuizBody,
   type QuizWithQuestions,
+  type QuizBatchGenerateEntry,
   type QuizSubmissionResult,
   type QuizQuestion,
   type QuizStats,
@@ -126,6 +128,47 @@ export class QuizService {
       questions: this.toClientQuestions(generatedQuestions),
       createdAt: quiz.createdAt,
     };
+  }
+
+  /**
+   * Generate quizzes for several modules of the same course in one request
+   * (#308). Each module goes through the same generateQuiz path — enrollment
+   * check, per-module rate limit, existing-quiz short-circuit, AI generation
+   * with placeholder fallback — sequentially rather than in parallel so a
+   * batch request can't fan out into a burst of concurrent AI service calls.
+   * One module failing (e.g. its own per-module generation rate limit) is
+   * reported in that module's entry rather than aborting the rest of the
+   * batch.
+   */
+  async generateQuizBatch(
+    userId: string,
+    data: GenerateQuizBatchBody
+  ): Promise<QuizBatchGenerateEntry[]> {
+    const results: QuizBatchGenerateEntry[] = [];
+
+    for (const moduleId of data.moduleIds) {
+      try {
+        const quiz = await this.generateQuiz(userId, {
+          courseId: data.courseId,
+          moduleId,
+          difficulty: data.difficulty,
+          numQuestions: data.numQuestions,
+        });
+        results.push({ moduleId, success: true, quiz });
+      } catch (err) {
+        logger.warn(
+          { err, courseId: data.courseId, moduleId },
+          "Batch quiz generation failed for module"
+        );
+        results.push({
+          moduleId,
+          success: false,
+          error: err instanceof Error ? err.message : "Quiz generation failed",
+        });
+      }
+    }
+
+    return results;
   }
 
   /**

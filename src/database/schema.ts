@@ -187,7 +187,9 @@ export const quizzes = pgTable(
       .references(() => courses.id, { onDelete: "cascade" }),
     moduleId: varchar("module_id", { length: 100 }).notNull(),
     questions: jsonb("questions").notNull(),
-    generatedFor: uuid("generated_for").references(() => users.id),
+    generatedFor: uuid("generated_for").references(() => users.id, {
+      onDelete: "cascade",
+    }),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

@@ -48,6 +48,28 @@ const REWARD_AMOUNT = 10; // credits per passed quiz
 const PENDING_REWARDS_TTL_SECONDS = 10; // #327 — near-real-time
 const PENDING_CONFIRMATION_ETA_SECONDS = 300; // reconcile job runs every 5 min
 
+/**
+ * Detects if an error is a bad sequence error from Stellar.
+ * Uses multiple detection methods for robustness across SDK versions.
+ */
+function isBadSeqError(err: StellarError): boolean {
+  // Primary detection: string matching (backwards compatible)
+  if (err.message.includes("bad_seq") || err.message.includes("tx_bad_seq")) {
+    return true;
+  }
+  
+  // Robust detection: check Horizon response structure
+  const response = (err as any)?.response;
+  if (response?.status === 400) {
+    const resultCodes = response?.data?.extras?.result_codes;
+    if (resultCodes?.transaction === "tx_bad_seq") {
+      return true;
+    }
+  }
+  
+  return false;
+}
+
 export async function selectSubmissionForUpdate(
   tx: Parameters<typeof db.transaction>[0] extends (arg: infer T) => any ? T : never,
   submissionId: string,
@@ -122,7 +144,7 @@ async function _executeStellarRewardClaim(claimData: RewardClaimData): Promise<s
     );
     if (
       err instanceof StellarError &&
-      (err.message.includes("bad_seq") || err.message.includes("tx_bad_seq"))
+      isBadSeqError(err)
     ) {
       return handleBadSeqError(claimData.submissionId, claimData.stellarAddress);
     }
@@ -229,7 +251,7 @@ export async function processRewardClaim(
     await _applyRewardToDb(submissionId, userId, txHash);
 
     return true;
-  }).then(async (result) => {
+  }, 90_000).then(async (result) => {
     if (result) {
       await cacheDel(cacheKey("user", "progress", userId));
       await cacheDel(cacheKey("user", "profile", userId));
@@ -418,7 +440,7 @@ export class RewardService {
         queued: false,
         message: `Successfully claimed ${REWARD_AMOUNT} credits`,
       };
-    });
+    }, 90_000);
   }
 
   /**
@@ -482,7 +504,7 @@ export class RewardService {
     }));
 
     const result = { history, total: totalResult?.value ?? 0 };
-    await cacheSet(cacheKeyString, result, 30);
+    await cacheSet(cacheKeyString, result, 300);
 
     return result;
   }

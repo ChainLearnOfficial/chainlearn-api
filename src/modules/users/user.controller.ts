@@ -87,6 +87,27 @@ export class UserController {
   }
 
   /**
+   * GET /api/users/me/export
+   * GDPR data export — returns all of the user's data as a downloadable
+   * JSON file (closes #350).
+   */
+  async exportData(
+    request: FastifyRequest,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { authUser } = request as AuthenticatedRequest;
+    const data = await userService.exportUserData(authUser.id);
+
+    reply
+      .header(
+        "Content-Disposition",
+        `attachment; filename="chainlearn-export-${authUser.id}.json"`
+      )
+      .type("application/json")
+      .send(data);
+  }
+
+  /**
    * DELETE /api/users/me
    * Soft-delete the authenticated user's account.
    */

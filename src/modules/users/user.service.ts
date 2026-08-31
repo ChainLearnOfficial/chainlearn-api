@@ -32,6 +32,7 @@ import type {
   UserActivityPage,
   UserProfile,
   UserProgress,
+  UserDataExport,
 } from "./user.types.js";
 
 export class UserService {
@@ -520,6 +521,98 @@ export class UserService {
 
     await auditLog("user.account_deleted", { userId });
     logger.info({ userId }, "Account deleted");
+  }
+
+  /**
+   * GDPR data export — closes #350. Aggregates every category of data the
+   * platform holds on the user into a single downloadable JSON document.
+   */
+  async exportUserData(userId: string): Promise<UserDataExport> {
+    const user = await db.query.users.findFirst({
+      where: eq(users.id, userId),
+    });
+
+    if (!user) {
+      throw new NotFoundError("User");
+    }
+
+    const [enrollmentRows, submissionRows, credentialRows] = await Promise.all([
+      db
+        .select({
+          courseId: enrollments.courseId,
+          courseTitle: courses.title,
+          enrolledAt: enrollments.enrolledAt,
+          completedAt: enrollments.completedAt,
+        })
+        .from(enrollments)
+        .innerJoin(courses, eq(enrollments.courseId, courses.id))
+        .where(eq(enrollments.userId, userId)),
+      db
+        .select({
+          id: quizSubmissions.id,
+          quizId: quizSubmissions.quizId,
+          score: quizSubmissions.score,
+          rewardClaimed: quizSubmissions.rewardClaimed,
+          rewardAmount: quizSubmissions.rewardAmount,
+          txHash: quizSubmissions.txHash,
+          submittedAt: quizSubmissions.submittedAt,
+        })
+        .from(quizSubmissions)
+        .where(eq(quizSubmissions.userId, userId)),
+      db
+        .select({
+          id: credentials.id,
+          courseId: credentials.courseId,
+          courseTitle: courses.title,
+          score: credentials.score,
+          nftAssetCode: credentials.nftAssetCode,
+          nftIssuer: credentials.nftIssuer,
+          mintTxHash: credentials.mintTxHash,
+          revoked: credentials.revoked,
+          mintedAt: credentials.mintedAt,
+        })
+        .from(credentials)
+        .innerJoin(courses, eq(credentials.courseId, courses.id))
+        .where(eq(credentials.userId, userId)),
+    ]);
+
+    const rewardClaims = submissionRows
+      .filter((s) => s.rewardClaimed)
+      .map((s) => ({
+        submissionId: s.id,
+        amount: s.rewardAmount,
+        txHash: s.txHash,
+        claimedAt: s.submittedAt,
+      }));
+
+    const exportData: UserDataExport = {
+      exportVersion: 1,
+      exportedAt: new Date().toISOString(),
+      profile: {
+        id: user.id,
+        stellarAddress: user.stellarAddress,
+        displayName: user.displayName,
+        background: user.background,
+        learningGoal: user.learningGoal,
+        pace: user.pace ?? "medium",
+        language: user.language ?? "en",
+        credits: user.credits,
+        createdAt: user.createdAt,
+      },
+      enrollments: enrollmentRows,
+      quizSubmissions: submissionRows.map((s) => ({
+        id: s.id,
+        quizId: s.quizId,
+        score: s.score,
+        submittedAt: s.submittedAt,
+      })),
+      credentials: credentialRows,
+      rewardClaims,
+    };
+
+    await auditLog("user.data_exported", { userId });
+
+    return exportData;
   }
 
   private async deleteLocalAvatar(avatarUrl: string | null): Promise<void> {

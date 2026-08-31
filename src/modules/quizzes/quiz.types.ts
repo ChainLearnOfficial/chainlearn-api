@@ -63,6 +63,8 @@ export interface QuizQuestion {
   id: string;
   text: string;
   options: string[];
+  correctFeedback?: string; // Custom feedback for correct answer
+  incorrectFeedback?: string; // Custom feedback for incorrect answer
   // correctIndex is NOT sent to client
 }
 

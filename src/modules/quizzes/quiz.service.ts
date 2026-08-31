@@ -15,12 +15,15 @@ import { redis } from "../../config/redis.js";
 import { generateQuizFromAI } from "./ai-client.js";
 import { sanitizeQuizFeedback } from "../../utils/sanitize.js";
 import { auditLog } from "../../audit/index.js";
+import { dispatchWebhook } from "../../services/webhook-dispatcher.js";
 import { quizSubmissionsTotal } from "../../metrics/index.js";
 import {
   cacheGet,
   cacheSet,
   cacheDel,
   cacheKey,
+  cacheGet,
+  cacheSet,
   cacheKeyPattern,
   cacheInvalidatePattern,
 } from "../../cache/index.js";
@@ -212,9 +215,13 @@ export class QuizService {
               },
               "Submitted selectedIndex is out of range for this question's options — treating as incorrect"
             );
+            // Use custom feedback if available for incorrect answers
+            const customFeedback = question.incorrectFeedback;
             feedbackParts.push(
               sanitizeQuizFeedback(
-                `Q: "${question.text}" - Incorrect. The correct answer was: "${question.options[question.correctIndex]}"`
+                customFeedback
+                  ? `Q: "${question.text}" - Incorrect. ${customFeedback}`
+                  : `Q: "${question.text}" - Incorrect. The correct answer was: "${question.options[question.correctIndex]}"`
               )
             );
             continue;
@@ -222,13 +229,23 @@ export class QuizService {
 
           if (answer.selectedIndex === question.correctIndex) {
             correctCount++;
-            feedbackParts.push(
-              sanitizeQuizFeedback(`Q: "${question.text}" - Correct!`)
-            );
-          } else {
+            // Use custom feedback if available, otherwise fall back to generic
+            const customFeedback = question.correctFeedback;
             feedbackParts.push(
               sanitizeQuizFeedback(
-                `Q: "${question.text}" - Incorrect. The correct answer was: "${question.options[question.correctIndex]}"`
+                customFeedback
+                  ? `Q: "${question.text}" - Correct! ${customFeedback}`
+                  : `Q: "${question.text}" - Correct!`
+              )
+            );
+          } else {
+            // Use custom feedback if available, otherwise fall back to generic with correct answer
+            const customFeedback = question.incorrectFeedback;
+            feedbackParts.push(
+              sanitizeQuizFeedback(
+                customFeedback
+                  ? `Q: "${question.text}" - Incorrect. ${customFeedback}`
+                  : `Q: "${question.text}" - Incorrect. The correct answer was: "${question.options[question.correctIndex]}"`
               )
             );
           }
@@ -302,6 +319,54 @@ export class QuizService {
         cacheDel(cacheKey("user", "progress", userId)),
         cacheInvalidatePattern(cacheKeyPattern("user", "activity", userId)),
       ]);
+
+      // Dispatch webhook events for quiz submission
+      try {
+        await dispatchWebhook({
+          id: crypto.randomUUID(),
+          event: "quiz.submitted",
+          timestamp: new Date(),
+          data: {
+            userId,
+            quizId,
+            submissionId: result.id,
+            score: result.score,
+            totalQuestions: result.totalQuestions,
+            passed: result.passed,
+          },
+        });
+
+        if (result.passed) {
+          await dispatchWebhook({
+            id: crypto.randomUUID(),
+            event: "quiz.passed",
+            timestamp: new Date(),
+            data: {
+              userId,
+              quizId,
+              submissionId: result.id,
+              score: result.score,
+              totalQuestions: result.totalQuestions,
+            },
+          });
+        } else {
+          await dispatchWebhook({
+            id: crypto.randomUUID(),
+            event: "quiz.failed",
+            timestamp: new Date(),
+            data: {
+              userId,
+              quizId,
+              submissionId: result.id,
+              score: result.score,
+              totalQuestions: result.totalQuestions,
+            },
+          });
+        }
+      } catch (err) {
+        logger.error({ err, userId, quizId }, "Failed to dispatch quiz webhook");
+        // Don't fail the submission if webhook dispatch fails
+      }
 
       return result;
     });
@@ -707,7 +772,13 @@ export class QuizService {
   }
 
   private toClientQuestions(questions: StoredQuestion[]): QuizQuestion[] {
-    return questions.map(({ id, text, options }) => ({ id, text, options }));
+    return questions.map(({ id, text, options, correctFeedback, incorrectFeedback }) => ({
+      id,
+      text,
+      options,
+      ...(correctFeedback && { correctFeedback }),
+      ...(incorrectFeedback && { incorrectFeedback }),
+    }));
   }
 }
 

@@ -24,7 +24,7 @@ export async function warmCourseCache(): Promise<void> {
   try {
     logger.info("Starting course listing cache warming cycle...");
 
-    const landingPageQuery = { page: 1, limit: 20 };
+    const landingPageQuery = { page: 1, limit: WARM_PAGE_LIMIT };
     const initialData = await courseService.listCourses(null, landingPageQuery);
 
     let page = 1;

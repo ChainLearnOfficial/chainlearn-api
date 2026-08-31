@@ -53,11 +53,6 @@ export const users = pgTable(
     // a soft delete — the row (and its enrollments/credentials, which are
     // never touched here) is preserved for on-chain record consistency.
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
-    // Set by AdminUsersService.banUser (#347). Null means the user is not banned.
-    // Once set, authGuard treats the user as banned and returns 403.
-    bannedAt: timestamp("banned_at", { withTimezone: true }),
-    // Reason for the ban, if any.
-    banReason: text("ban_reason"),
   },
   (table) => [index("idx_users_stellar_address").on(table.stellarAddress)]
 );
@@ -89,10 +84,6 @@ export const courses = pgTable(
       .notNull()
       .default([]),
     isActive: boolean("is_active").notNull().default(true),
-    // 0–100 accessibility score for the course's authored content (#326),
-    // recomputed on every create/update. Null until first written. Advisory
-    // only — a low score never blocks saving the course.
-    accessibilityScore: integer("accessibility_score"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -132,38 +123,6 @@ export const enrollments = pgTable(
       table.userId,
       table.courseId
     ),
-  ]
-);
-
-// ─── Course Shares (Referral Links) ─────────────────────────────────────────
-
-// One shareable referral link per user per course (#325). `referralCode` is
-// the short token embedded in the link; clickCount / enrollmentCount are
-// incremented as the link is opened and as referred users enrol, so
-// word-of-mouth growth can be measured (and later rewarded).
-export const courseShares = pgTable(
-  "course_shares",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    userId: uuid("user_id")
-      .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
-    courseId: uuid("course_id")
-      .notNull()
-      .references(() => courses.id, { onDelete: "cascade" }),
-    referralCode: varchar("referral_code", { length: 16 }).notNull().unique(),
-    clickCount: integer("click_count").notNull().default(0),
-    enrollmentCount: integer("enrollment_count").notNull().default(0),
-    createdAt: timestamp("created_at", { withTimezone: true })
-      .notNull()
-      .defaultNow(),
-  },
-  (table) => [
-    uniqueIndex("idx_course_shares_user_course").on(
-      table.userId,
-      table.courseId
-    ),
-    index("idx_course_shares_referral_code").on(table.referralCode),
   ]
 );
 
@@ -292,12 +251,10 @@ export const idempotencyKeys = pgTable(
   (table) => [index("idx_idempotency_expires").on(table.expiresAt)]
 );
 
-// ─── Course Reviews ─────────────────────────────────────────────────────────
+// ─── Enrollment Waitlist ────────────────────────────────────────────────────
 
-// One rating/review per user per course (upsert on repeat submission).
-// Average rating is computed from this table and cached by CourseService.
-export const courseReviews = pgTable(
-  "course_reviews",
+export const enrollmentWaitlist = pgTable(
+  "enrollment_waitlist",
   {
     id: uuid("id").primaryKey().defaultRandom(),
     userId: uuid("user_id")
@@ -306,8 +263,27 @@ export const courseReviews = pgTable(
     courseId: uuid("course_id")
       .notNull()
       .references(() => courses.id, { onDelete: "cascade" }),
-    rating: integer("rating").notNull(),
-    reviewText: text("review_text"),
+    position: integer("position").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_waitlist_user_course").on(table.userId, table.courseId),
+    index("idx_waitlist_course_position").on(table.courseId, table.position),
+  ]
+);
+
+// ─── Webhooks ───────────────────────────────────────────────────────────────
+
+export const webhooks = pgTable(
+  "webhooks",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    url: varchar("url", { length: 2048 }).notNull(),
+    events: jsonb("events").$type<string[]>().notNull(), // e.g., ["enrollment", "quiz.completed", "reward.claimed"]
+    secret: varchar("secret", { length: 256 }).notNull(), // HMAC secret for signing payloads
+    active: boolean("active").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -316,41 +292,37 @@ export const courseReviews = pgTable(
       .defaultNow(),
   },
   (table) => [
-    uniqueIndex("idx_course_reviews_user_course").on(
-      table.userId,
-      table.courseId,
-    ),
-    index("idx_course_reviews_course_id").on(table.courseId),
-    check("chk_course_reviews_rating", sql`(rating >= 1 AND rating <= 5)`),
+    index("idx_webhooks_active").on(table.active),
   ]
 );
 
-// ─── Notifications ──────────────────────────────────────────────────────────
+// ─── Webhook Attempts (for retry tracking) ──────────────────────────────────
 
-// In-app user notifications (reward claims, credential mints, system
-// announcements). Rows older than 30 days are purged by
-// jobs/cleanup-notifications.ts.
-export const notifications = pgTable(
-  "notifications",
+export const webhookAttempts = pgTable(
+  "webhook_attempts",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    userId: uuid("user_id")
+    webhookId: uuid("webhook_id")
       .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
-    type: varchar("type", { length: 50 }).notNull(),
-    title: varchar("title", { length: 255 }).notNull(),
-    message: text("message").notNull(),
-    read: boolean("read").notNull().default(false),
+      .references(() => webhooks.id, { onDelete: "cascade" }),
+    event: varchar("event", { length: 100 }).notNull(),
+    payload: jsonb("payload").notNull(),
+    statusCode: integer("status_code"),
+    responseBody: text("response_body"),
+    errorMessage: text("error_message"),
+    retryCount: integer("retry_count").notNull().default(0),
+    nextRetryAt: timestamp("next_retry_at", { withTimezone: true }),
+    succeededAt: timestamp("succeeded_at", { withTimezone: true }),
+    failedAt: timestamp("failed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
   },
   (table) => [
-    index("idx_notifications_user_created").on(
-      table.userId,
-      sql`${table.createdAt} DESC`,
-    ),
-    index("idx_notifications_user_read").on(table.userId, table.read),
+    index("idx_webhook_attempts_webhook_id").on(table.webhookId),
+    index("idx_webhook_attempts_event").on(table.event),
+    index("idx_webhook_attempts_next_retry").on(table.nextRetryAt),
+    index("idx_webhook_attempts_succeeded").on(table.succeededAt),
   ]
 );
 

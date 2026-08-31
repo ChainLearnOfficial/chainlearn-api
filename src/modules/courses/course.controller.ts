@@ -5,10 +5,6 @@ import type {
   ListCoursesQuery,
   CourseIdParams,
   PopularCoursesQuery,
-  EnrollCourseQuery,
-  ShareCodeParams,
-  ListReviewsQuery,
-  CreateReviewBody,
 } from "./course.types.js";
 
 export class CourseController {
@@ -64,20 +60,31 @@ export class CourseController {
   }
 
   /**
+   * GET /api/courses/:id/modules
+   * List module metadata for a course.
+   */
+  async modulesPublic(
+    request: FastifyRequest<{ Params: CourseIdParams }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id } = request.params;
+    const userId = (request as AuthenticatedRequest).authUser?.id ?? null;
+    const course = await courseService.getCourseDetail(id, userId);
+
+    reply.send({ success: true, data: course.modules });
+  }
+
+  /**
    * POST /api/courses/:id/enroll
    * Enroll the authenticated user in a course.
    */
   async enroll(
-    request: FastifyRequest<{ Params: CourseIdParams; Querystring: EnrollCourseQuery }>,
+    request: FastifyRequest<{ Params: CourseIdParams }>,
     reply: FastifyReply
   ): Promise<void> {
     const { id } = request.params;
     const { authUser } = request as AuthenticatedRequest;
-    const { contentHashMismatch } = await courseService.enroll(
-      authUser.id,
-      id,
-      request.query?.ref,
-    );
+    const { contentHashMismatch } = await courseService.enroll(authUser.id, id);
 
     if (contentHashMismatch) {
       reply.header(
@@ -90,54 +97,6 @@ export class CourseController {
       success: true,
       message: "Enrolled successfully",
     });
-  }
-
-  /**
-   * POST /api/courses/enroll/batch
-   * Batch enroll the authenticated user in multiple courses.
-   */
-  async batchEnroll(
-    request: FastifyRequest<{ Body: { courseIds: string[] } }>,
-    reply: FastifyReply
-  ): Promise<void> {
-    const { authUser } = request as AuthenticatedRequest;
-    const { courseIds } = request.body;
-    const results = await courseService.batchEnroll(authUser.id, courseIds);
-
-    reply.status(201).send({
-      success: true,
-      data: results,
-    });
-  }
-
-  /**
-   * POST /api/v1/courses/:id/share
-   * Get (or create) the caller's referral link for a course (#325).
-   */
-  async share(
-    request: FastifyRequest<{ Params: CourseIdParams }>,
-    reply: FastifyReply
-  ): Promise<void> {
-    const { id } = request.params;
-    const { authUser } = request as AuthenticatedRequest;
-    const link = await courseService.createShareLink(authUser.id, id);
-
-    reply.status(201).send({ success: true, data: link });
-  }
-
-  /**
-   * GET /api/v1/courses/shared/:code
-   * Resolve a referral link to its course, counting the click (#325).
-   */
-  async resolveShare(
-    request: FastifyRequest<{ Params: ShareCodeParams }>,
-    reply: FastifyReply
-  ): Promise<void> {
-    const { code } = request.params;
-    const viewerId = (request as AuthenticatedRequest).authUser?.id ?? null;
-    const resolved = await courseService.resolveShareLink(code, viewerId);
-
-    reply.send({ success: true, data: resolved });
   }
 
   /**
@@ -157,20 +116,6 @@ export class CourseController {
   }
 
   /**
-   * GET /api/v1/courses/:id/leaderboard
-   * Top performers for a course, ranked by average quiz score (#324).
-   */
-  async leaderboard(
-    request: FastifyRequest<{ Params: CourseIdParams }>,
-    reply: FastifyReply
-  ): Promise<void> {
-    const { id } = request.params;
-    const leaderboard = await courseService.getLeaderboard(id);
-
-    reply.send({ success: true, data: leaderboard });
-  }
-
-  /**
    * GET /api/courses/popular
    * List active courses ordered by enrollment count descending.
    */
@@ -182,63 +127,6 @@ export class CourseController {
     const courses = await courseService.getPopularCourses(limit);
 
     reply.send({ success: true, data: courses });
-  }
-
-  /**
-   * GET /api/v1/courses/recommended
-   * Get personalized course recommendations based on enrollment history (#328).
-   */
-  async recommended(
-    request: FastifyRequest<{ Querystring: PopularCoursesQuery }>,
-    reply: FastifyReply
-  ): Promise<void> {
-    const { authUser } = request as AuthenticatedRequest;
-    const { limit } = request.query;
-    const recommendations = await courseService.getRecommendedCourses(authUser.id, limit);
-
-    reply.send({ success: true, data: recommendations });
-  }
-
-  /**
-   * GET /api/v1/courses/:id/reviews
-   * List a course's reviews (paginated), alongside its average rating.
-   */
-  async reviews(
-    request: FastifyRequest<{ Params: CourseIdParams; Querystring: ListReviewsQuery }>,
-    reply: FastifyReply
-  ): Promise<void> {
-    const { id } = request.params;
-    const result = await courseService.getCourseReviews(id, request.query);
-
-    reply.send({
-      success: true,
-      data: result.reviews,
-      pagination: {
-        page: request.query.page,
-        limit: request.query.limit,
-        total: result.total,
-      },
-      summary: {
-        averageRating: result.averageRating,
-        totalReviews: result.totalReviews,
-      },
-    });
-  }
-
-  /**
-   * POST /api/v1/courses/:id/reviews
-   * Rate and review a completed course. One review per user per course —
-   * a repeat submission updates the existing review.
-   */
-  async createReview(
-    request: FastifyRequest<{ Params: CourseIdParams; Body: CreateReviewBody }>,
-    reply: FastifyReply
-  ): Promise<void> {
-    const { id } = request.params;
-    const { authUser } = request as AuthenticatedRequest;
-    const review = await courseService.upsertReview(authUser.id, id, request.body);
-
-    reply.status(201).send({ success: true, data: review });
   }
 }
 

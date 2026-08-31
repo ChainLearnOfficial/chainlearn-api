@@ -169,6 +169,16 @@ export interface CourseModuleWithProgress extends CourseModule {
   completed: boolean;
 }
 
+/** One row of GET /api/v1/courses/:id/prerequisites (#369). `completed` is
+ * null for an anonymous caller (no user to check completion against) and a
+ * boolean — enrolled + completedAt set — for an authenticated one. */
+export interface PrerequisiteCourse {
+  id: string;
+  title: string;
+  difficulty: string;
+  completed: boolean | null;
+}
+
 /** One row of GET /api/v1/courses/:id/leaderboard (#324). `averageScore` is
  * the mean of the user's per-quiz percentages (each submission's raw
  * correct-answer count normalized against its own quiz's question count, the

@@ -9,6 +9,8 @@ const aiQuizQuestionSchema = z.object({
   prompt: z.string(),
   options: z.array(z.string()),
   correct_index: z.number().int(),
+  correct_feedback: z.string().optional(),
+  incorrect_feedback: z.string().optional(),
 });
 
 const aiQuizResponseSchema = z.object({

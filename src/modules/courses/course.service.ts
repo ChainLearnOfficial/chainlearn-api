@@ -1,41 +1,22 @@
-import {
-  eq,
-  ne,
-  and,
-  count,
-  desc,
-  inArray,
-  ilike,
-  or,
-  isNull,
-  sql,
-} from "drizzle-orm";
+import { eq, and, count, desc, inArray, ilike, or, isNull, sql } from "drizzle-orm";
 import crypto from "node:crypto";
-import QRCode from "qrcode";
-import { checkAccessibility } from "./accessibility.js";
 import { db } from "../../config/database.js";
 import {
   courses,
   enrollments,
   quizzes,
   quizSubmissions,
-  courseShares,
-  courseReviews,
-  credentials,
   users,
   type CourseModuleDefinition,
 } from "../../database/schema.js";
 import { config } from "../../config/index.js";
-import {
-  NotFoundError,
-  ConflictError,
-  ForbiddenError,
-  ValidationError,
-} from "../../utils/errors.js";
+import { NotFoundError, ConflictError, ForbiddenError } from "../../utils/errors.js";
 import { withLock } from "../../utils/lock.js";
 import { logger } from "../../utils/logger.js";
 import { getOnChainContentHash } from "../../stellar/progress-tracker.js";
 import { auditLog } from "../../audit/index.js";
+import { dispatchWebhook } from "../../services/webhook-dispatcher.js";
+import { waitlistService } from "./waitlist.service.js";
 import {
   cacheGet,
   cacheSet,
@@ -49,11 +30,7 @@ import type {
   CourseSummary,
   CourseDetail,
   CourseStats,
-  CourseLeaderboardEntry,
-  CourseShareLink,
-  ResolvedShareLink,
   AdminCourse,
-  AdminCourseWithAccessibility,
   CreateCourseBody,
   CourseModule,
   CourseModuleMetadata,
@@ -70,8 +47,6 @@ import type {
 } from "./course.types.js";
 
 const POPULAR_COURSES_TTL_SECONDS = 300;
-const LEADERBOARD_TTL_SECONDS = 300;
-const LEADERBOARD_SIZE = 20;
 
 export class CourseService {
   async getStats(): Promise<CourseStats> {
@@ -279,7 +254,6 @@ export class CourseService {
         .from(enrollments)
         .where(eq(enrollments.courseId, courseId));
 
-      const reviewStats = await this.getReviewStats(courseId);
       const moduleMetadata = this.normalizeCourseModules(course.courseModules);
       let modules: CourseModule[];
 
@@ -315,11 +289,11 @@ export class CourseService {
         difficulty: course.difficulty,
         isActive: course.isActive,
         enrolledCount: countResult?.value ?? 0,
-        contentHash: course.contentHash,
+        contentHash: course.contentHash ?? null,
         modules,
         createdAt: course.createdAt,
-        averageRating: reviewStats.averageRating,
-        reviewCount: reviewStats.reviewCount,
+        averageRating: null,
+        reviewCount: 0,
       };
 
       await cacheSet(cacheKeyString, cachedDetail, 120);
@@ -458,7 +432,6 @@ export class CourseService {
   async enroll(
     userId: string,
     courseId: string,
-    referralCode?: string,
   ): Promise<{ contentHashMismatch: boolean }> {
     let storedContentHash: string | null = null;
 
@@ -509,6 +482,25 @@ export class CourseService {
         await tx.insert(enrollments).values({ userId, courseId });
       });
 
+      // Remove from waitlist if enrolled successfully
+      await waitlistService.removeFromWaitlist(userId, courseId);
+
+      // Dispatch webhook event for enrollment
+      try {
+        await dispatchWebhook({
+          id: crypto.randomUUID(),
+          event: "enrollment.created",
+          timestamp: new Date(),
+          data: {
+            userId,
+            courseId,
+          },
+        });
+      } catch (err) {
+        logger.error({ err, userId, courseId }, "Failed to dispatch enrollment webhook");
+        // Don't fail the enrollment if webhook dispatch fails
+      }
+
       // Cache invalidation necessarily happens outside the DB transaction —
       // Redis isn't part of the Postgres transaction, so there's no way to
       // make this atomic with the commit above (issue #152). cacheDel/
@@ -545,12 +537,6 @@ export class CourseService {
       }
     });
 
-    // Credit the referral link (#325), if the enrollment came through one.
-    // Runs outside the lock and never fails the enrollment.
-    if (referralCode) {
-      await this.trackReferralEnrollment(referralCode, courseId, userId);
-    }
-
     // Run after the lock releases — a slow/unreachable contract read must
     // never extend how long the enrollment lock is held.
     const contentHashMismatch = await this.checkContentHash(
@@ -559,44 +545,6 @@ export class CourseService {
     );
 
     return { contentHashMismatch };
-  }
-
-  /**
-   * Batch enroll user in multiple courses (#345). Processes each enrollment
-   * sequentially with individual validation. Returns per-course results.
-   */
-  async batchEnroll(
-    userId: string,
-    courseIds: string[],
-  ): Promise<
-    Array<{
-      courseId: string;
-      success: boolean;
-      message: string;
-    }>
-  > {
-    const results = [];
-
-    for (const courseId of courseIds) {
-      try {
-        await this.enroll(userId, courseId);
-        results.push({
-          courseId,
-          success: true,
-          message: "Enrolled successfully",
-        });
-      } catch (error) {
-        const message =
-          error instanceof Error ? error.message : "Enrollment failed";
-        results.push({
-          courseId,
-          success: false,
-          message,
-        });
-      }
-    }
-
-    return results;
   }
 
   /**
@@ -1342,44 +1290,12 @@ export class CourseService {
       contentHash: row.contentHash,
       isActive: row.isActive,
       modules: (row.modules ?? []) as CourseModuleDefinition[],
-      accessibilityScore: row.accessibilityScore,
+      accessibilityScore: null,
       createdAt: row.createdAt,
     };
   }
 
-  /**
-   * Every free-text content field of a course, keyed for warning
-   * attribution (#326): the course description plus each module's
-   * description (both the authoring-time `courseModules` metadata and the
-   * admin-defined `modules` structure).
-   */
-  private courseContentFields(row: {
-    description?: string | null;
-    courseModules?: CourseModuleMetadata[] | null;
-    modules?: CourseModuleDefinition[] | null;
-  }): Record<string, string | null | undefined> {
-    const fields: Record<string, string | null | undefined> = {
-      description: row.description,
-    };
-    for (const m of this.normalizeCourseModules(row.courseModules ?? null)) {
-      if (m.description) fields[`module "${m.title}"`] = m.description;
-    }
-    for (const m of (row.modules ?? []) as CourseModuleDefinition[]) {
-      if (m.description) fields[`module "${m.title}"`] = m.description;
-    }
-    return fields;
-  }
-
-  async createCourse(
-    data: CreateCourseBody,
-  ): Promise<AdminCourseWithAccessibility> {
-    const accessibility = checkAccessibility(
-      this.courseContentFields({
-        description: data.description,
-        courseModules: data.courseModules ?? null,
-      }),
-    );
-
+  async createCourse(data: CreateCourseBody): Promise<AdminCourse> {
     const [course] = await db
       .insert(courses)
       .values({
@@ -1389,57 +1305,35 @@ export class CourseService {
         tags: data.tags,
         courseModules: data.courseModules,
         contentHash: data.contentHash,
-        accessibilityScore: accessibility.score,
       })
       .returning();
 
     await this.invalidateCourseCaches();
     await auditLog("course.created", { courseId: course.id });
-    logger.info(
-      { courseId: course.id, accessibilityScore: accessibility.score },
-      "Course created",
-    );
+    logger.info({ courseId: course.id }, "Course created");
 
-    return { ...this.toAdminCourse(course), accessibility };
+    return this.toAdminCourse(course);
   }
 
   async updateCourse(
     courseId: string,
     data: UpdateCourseBody,
-  ): Promise<AdminCourseWithAccessibility> {
-    const [updated] = await db
+  ): Promise<AdminCourse> {
+    const [course] = await db
       .update(courses)
       .set(data)
       .where(eq(courses.id, courseId))
       .returning();
 
-    if (!updated) {
+    if (!course) {
       throw new NotFoundError("Course");
-    }
-
-    // Recompute from the merged post-update row so the score reflects the
-    // whole course, not just the fields in this request (#326).
-    const accessibility = checkAccessibility(
-      this.courseContentFields(updated),
-    );
-
-    let course = updated;
-    if (updated.accessibilityScore !== accessibility.score) {
-      [course] = await db
-        .update(courses)
-        .set({ accessibilityScore: accessibility.score })
-        .where(eq(courses.id, courseId))
-        .returning();
     }
 
     await this.invalidateCourseCaches(courseId);
     await auditLog("course.updated", { courseId });
-    logger.info(
-      { courseId, accessibilityScore: accessibility.score },
-      "Course updated",
-    );
+    logger.info({ courseId }, "Course updated");
 
-    return { ...this.toAdminCourse(course), accessibility };
+    return this.toAdminCourse(course);
   }
 
   /** Soft-deletes a course by setting isActive = false (#292). */
@@ -1457,136 +1351,6 @@ export class CourseService {
     await this.invalidateCourseCaches(courseId);
     await auditLog("course.deleted", { courseId });
     logger.info({ courseId }, "Course soft-deleted");
-  }
-
-  /**
-   * Publish a course (set isActive = true) after validating it has the
-   * content required to go live: a title, description, difficulty, at
-   * least one module, and at least one quiz per module. Validation checks
-   * the admin-defined `modules` structure (#304) against quizzes.moduleId,
-   * since that's what a learner actually walks through.
-   */
-  async publishCourse(courseId: string): Promise<AdminCourseWithAccessibility> {
-    const [course] = await db
-      .select()
-      .from(courses)
-      .where(eq(courses.id, courseId));
-
-    if (!course) {
-      throw new NotFoundError("Course");
-    }
-
-    const missing: string[] = [];
-    if (!course.title?.trim()) missing.push("title");
-    if (!course.description?.trim()) missing.push("description");
-    if (!course.difficulty?.trim()) missing.push("difficulty");
-
-    const modules = (course.modules ?? []) as CourseModuleDefinition[];
-    if (modules.length === 0) {
-      missing.push("at least one module");
-    } else {
-      const quizModuleRows = await db
-        .select({ moduleId: quizzes.moduleId })
-        .from(quizzes)
-        .where(eq(quizzes.courseId, courseId))
-        .groupBy(quizzes.moduleId);
-      const moduleIdsWithQuizzes = new Set(
-        quizModuleRows.map((row) => row.moduleId),
-      );
-
-      for (const module of modules) {
-        if (!moduleIdsWithQuizzes.has(module.id)) {
-          missing.push(`at least one quiz for module "${module.title}"`);
-        }
-      }
-    }
-
-    if (missing.length > 0) {
-      throw new ValidationError({ requirements: missing });
-    }
-
-    const [published] = await db
-      .update(courses)
-      .set({ isActive: true })
-      .where(eq(courses.id, courseId))
-      .returning();
-
-    await this.invalidateCourseCaches(courseId);
-    await auditLog("course.published", { courseId });
-    logger.info({ courseId }, "Course published");
-
-    const accessibility = checkAccessibility(
-      this.courseContentFields(published),
-    );
-
-    return { ...this.toAdminCourse(published), accessibility };
-  }
-
-  /**
-   * Duplicate a course — metadata, modules, and quizzes — into a new draft
-   * course (isActive = false) titled "<original> (Copy)". Module IDs are
-   * copied as-is rather than regenerated so the duplicated quizzes (which
-   * reference them via moduleId) still resolve against the new course's
-   * module list.
-   */
-  async duplicateCourse(courseId: string): Promise<AdminCourseWithAccessibility> {
-    const original = await db.query.courses.findFirst({
-      where: eq(courses.id, courseId),
-    });
-    if (!original) {
-      throw new NotFoundError("Course");
-    }
-
-    const originalQuizzes = await db
-      .select()
-      .from(quizzes)
-      .where(eq(quizzes.courseId, courseId));
-
-    const duplicate = await db.transaction(async (tx) => {
-      const [newCourse] = await tx
-        .insert(courses)
-        .values({
-          title: `${original.title} (Copy)`,
-          description: original.description,
-          difficulty: original.difficulty,
-          tags: original.tags ?? [],
-          courseModules: original.courseModules,
-          modules: (original.modules ?? []) as CourseModuleDefinition[],
-          // A fresh course has no on-chain content commitment of its own yet.
-          contentHash: null,
-          isActive: false,
-          accessibilityScore: original.accessibilityScore,
-        })
-        .returning();
-
-      if (originalQuizzes.length > 0) {
-        await tx.insert(quizzes).values(
-          originalQuizzes.map((quiz) => ({
-            courseId: newCourse.id,
-            moduleId: quiz.moduleId,
-            questions: quiz.questions,
-          })),
-        );
-      }
-
-      return newCourse;
-    });
-
-    await this.invalidateCourseCaches();
-    await auditLog("course.duplicated", {
-      courseId: duplicate.id,
-      sourceCourseId: courseId,
-    });
-    logger.info(
-      { sourceCourseId: courseId, courseId: duplicate.id },
-      "Course duplicated",
-    );
-
-    const accessibility = checkAccessibility(
-      this.courseContentFields(duplicate),
-    );
-
-    return { ...this.toAdminCourse(duplicate), accessibility };
   }
 
   private normalizeCourseModules(

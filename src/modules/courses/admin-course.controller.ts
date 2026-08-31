@@ -53,6 +53,22 @@ export class AdminCourseController {
   }
 
   /**
+   * POST /api/admin/courses/:id/archive
+   * Archive a course (sets isActive = false, archivedAt = now()). Distinct
+   * from `remove`: archiving records when it happened so it can be told
+   * apart from other reasons a course might be inactive (#358).
+   */
+  async archive(
+    request: FastifyRequest<{ Params: CourseIdParams }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id } = request.params;
+    await courseService.archiveCourse(id);
+
+    reply.send({ success: true, message: "Course archived" });
+  }
+
+  /**
    * POST /api/admin/courses/:id/publish
    * Validate required content is present, then publish (isActive = true).
    */

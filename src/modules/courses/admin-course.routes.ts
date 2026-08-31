@@ -136,6 +136,21 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
   );
 
   app.post<{ Params: { id: string } }>(
+    "/:id/archive",
+    {
+      preHandler: [validate({ params: courseIdParamsSchema })],
+      schema: {
+        description:
+          "Archive a course: hides it from public listings while preserving data and enrolled users' access (admin only)",
+        tags: ["admin", "courses"],
+        security: [{ bearerAuth: [] }],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      } as FastifySchema,
+    },
+    (request, reply) => adminCourseController.archive(request, reply)
+  );
+
+  app.post<{ Params: { id: string } }>(
     "/:id/publish",
     {
       preHandler: [validate({ params: courseIdParamsSchema })],

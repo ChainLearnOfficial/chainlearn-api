@@ -15,6 +15,28 @@ import { withAccountLock } from "../utils/account-lock.js";
 const MAX_SEQ_RETRIES = 3;
 
 /**
+ * Detects if an error is a bad sequence error from Stellar.
+ * Uses multiple detection methods for robustness across SDK versions.
+ */
+function isBadSeqError(err: StellarError): boolean {
+  // Primary detection: string matching (backwards compatible)
+  if (err.message.includes("bad_seq") || err.message.includes("tx_bad_seq")) {
+    return true;
+  }
+  
+  // Robust detection: check Horizon response structure
+  const response = (err as any)?.response;
+  if (response?.status === 400) {
+    const resultCodes = response?.data?.extras?.result_codes;
+    if (resultCodes?.transaction === "tx_bad_seq") {
+      return true;
+    }
+  }
+  
+  return false;
+}
+
+/**
  * Build and submit a Soroban contract invocation transaction.
  */
 export async function invokeContract(
@@ -81,7 +103,7 @@ export async function invokeContract(
         const result = await stellarClient.submitTransaction(preparedTx);
         return result.hash;
       } catch (err: any) {
-        if (err instanceof StellarError && (err.message.includes("bad_seq") || err.message.includes("tx_bad_seq"))) {
+        if (err instanceof StellarError && isBadSeqError(err)) {
           await sequenceCache.invalidate(keypair.publicKey());
           logger.warn({ attempt, err }, "Sequence number conflict, retrying with fresh sequence");
           continue;

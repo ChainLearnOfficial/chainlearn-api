@@ -94,6 +94,16 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
     (request, reply) => userController.getProgress(request, reply)
   );
 
+  app.get(
+    "/me/learning-path",
+    {
+      schema: {
+        description: "Get personalized learning path recommendations",
+        tags: ["users"],
+        security: [{ bearerAuth: [] }],
+      } as FastifySchema,
+    },
+    (request, reply) => userController.getLearningPath(request, reply)
   app.get<{ Querystring: import("../notifications/notification.types.js").ListNotificationsQuery }>(
     "/me/notifications",
     {

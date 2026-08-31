@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { eq, count, sql, desc, and, lt, type SQL } from "drizzle-orm";
+import { eq, count, sql, desc, and, lt, isNull, type SQL } from "drizzle-orm";
 import type { AnyPgColumn } from "drizzle-orm/pg-core";
 import { db } from "../../config/database.js";
 import {
@@ -400,6 +400,94 @@ export class UserService {
    * trigger (migration 0009) maintains it on every UPDATE regardless of
    * which columns changed.
    */
+  async getLearningPath(userId: string): Promise<Array<{
+    courseId: string;
+    courseTitle: string;
+    difficulty: string;
+    rationale: string;
+  }>> {
+    const user = await db.query.users.findFirst({
+      where: eq(users.id, userId),
+    });
+
+    if (!user) {
+      throw new NotFoundError("User");
+    }
+
+    // Get completed courses (those with credentials)
+    const completed = await db
+      .select({ courseId: credentials.courseId })
+      .from(credentials)
+      .where(eq(credentials.userId, userId));
+
+    const completedIds = new Set(completed.map((c) => c.courseId));
+
+    // Get currently enrolled courses
+    const enrolled = await db
+      .select({ courseId: enrollments.courseId })
+      .from(enrollments)
+      .where(
+        and(
+          eq(enrollments.userId, userId),
+          isNull(enrollments.completedAt),
+        ),
+      );
+
+    const enrolledIds = new Set(enrolled.map((e) => e.courseId));
+
+    // Get all active courses ordered by difficulty
+    const allCourses = await db
+      .select()
+      .from(courses)
+      .where(eq(courses.isActive, true))
+      .orderBy(courses.difficulty);
+
+    // Simple recommendation: next difficulty level after highest completed
+    const difficultyOrder = ["beginner", "intermediate", "advanced"];
+    let maxDifficultyIndex = -1;
+
+    for (const course of allCourses) {
+      if (completedIds.has(course.id)) {
+        const idx = difficultyOrder.indexOf(course.difficulty);
+        if (idx > maxDifficultyIndex) {
+          maxDifficultyIndex = idx;
+        }
+      }
+    }
+
+    const recommendations: Array<{
+      courseId: string;
+      courseTitle: string;
+      difficulty: string;
+      rationale: string;
+    }> = [];
+
+    // Recommend courses from next difficulty level
+    const nextDifficultyLevel =
+      maxDifficultyIndex < difficultyOrder.length - 1
+        ? difficultyOrder[maxDifficultyIndex + 1]
+        : null;
+
+    if (nextDifficultyLevel) {
+      for (const course of allCourses) {
+        if (
+          course.difficulty === nextDifficultyLevel &&
+          !completedIds.has(course.id) &&
+          !enrolledIds.has(course.id)
+        ) {
+          recommendations.push({
+            courseId: course.id,
+            courseTitle: course.title,
+            difficulty: course.difficulty,
+            rationale: `Next step in your learning journey: ${nextDifficultyLevel} level`,
+          });
+        }
+      }
+    }
+
+    return recommendations;
+  }
+
   async deleteAccount(userId: string): Promise<void> {
     const [deleted] = await db
       .update(users)

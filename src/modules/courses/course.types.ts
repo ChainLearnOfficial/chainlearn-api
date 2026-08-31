@@ -30,6 +30,10 @@ export const enrollCourseQuerySchema = z.object({
   ref: referralCodeSchema.optional(),
 });
 
+export const batchEnrollSchema = z.object({
+  courseIds: z.array(z.string().uuid()).min(1).max(100),
+});
+
 export const shareCodeParamsSchema = z.object({
   code: referralCodeSchema,
 });
@@ -111,6 +115,7 @@ export type ListCoursesQuery = z.infer<typeof listCoursesSchema>;
 export type CourseIdParams = z.infer<typeof courseIdParamsSchema>;
 export type PopularCoursesQuery = z.infer<typeof popularCoursesQuerySchema>;
 export type EnrollCourseQuery = z.infer<typeof enrollCourseQuerySchema>;
+export type BatchEnrollBody = z.infer<typeof batchEnrollSchema>;
 export type ShareCodeParams = z.infer<typeof shareCodeParamsSchema>;
 export type CreateCourseBody = z.infer<typeof createCourseSchema>;
 export type UpdateCourseBody = z.infer<typeof updateCourseSchema>;

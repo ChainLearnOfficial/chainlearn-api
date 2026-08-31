@@ -92,9 +92,6 @@ function ensureConfig(): Env {
   return _config;
 }
 
-// Lazy config — loadConfig() only runs on first property access, not at import time
-export const config: Env = new Proxy({} as Env, {
-  get(_, prop) {
-    return (ensureConfig() as any)[prop];
-  },
-});
+// Eagerly load config at module import time to preserve type safety
+// (test-mode fallback is handled in loadConfig())
+export const config: Env = ensureConfig();

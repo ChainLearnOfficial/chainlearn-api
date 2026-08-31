@@ -306,6 +306,7 @@ describe("Concurrent Request Safety", () => {
         const chainData = [
           [{ id: "course-1", isActive: true }],
           [],
+          [{ value: 0 }],
         ];
         let callIndex = 0;
 

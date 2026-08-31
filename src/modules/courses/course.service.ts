@@ -1,6 +1,14 @@
+import { eq, and, count, desc, inArray, ilike, or, isNull } from "drizzle-orm";
 import { eq, and, count, desc, inArray, ilike, or, sql } from "drizzle-orm";
 import { db } from "../../config/database.js";
 import { courses, enrollments, quizzes, quizSubmissions } from "../../database/schema.js";
+import {
+  courses,
+  enrollments,
+  quizzes,
+  type CourseModuleDefinition,
+} from "../../database/schema.js";
+import { config } from "../../config/index.js";
 import { NotFoundError, ConflictError, ForbiddenError } from "../../utils/errors.js";
 import { withLock } from "../../utils/lock.js";
 import { logger } from "../../utils/logger.js";
@@ -21,8 +29,12 @@ import type {
   CourseStats,
   AdminCourse,
   CreateCourseBody,
+  CourseModule,
+  CourseModuleMetadata,
   UpdateCourseBody,
   CourseModuleWithProgress,
+  CreateModuleBody,
+  UpdateModuleBody,
 } from "./course.types.js";
 
 const POPULAR_COURSES_TTL_SECONDS = 300;
@@ -233,12 +245,33 @@ export class CourseService {
         .from(enrollments)
         .where(eq(enrollments.courseId, courseId));
 
-      const moduleRows = await db
-        .select({ moduleId: quizzes.moduleId })
-        .from(quizzes)
-        .where(eq(quizzes.courseId, courseId))
-        .groupBy(quizzes.moduleId)
-        .orderBy(quizzes.moduleId);
+      const moduleMetadata = this.normalizeCourseModules(course.courseModules);
+      let modules: CourseModule[];
+
+      if (moduleMetadata.length > 0) {
+        modules = moduleMetadata.map((module, i) => ({
+          id: module.id,
+          title: module.title,
+          description: module.description ?? null,
+          estimatedDurationMinutes: module.estimatedDurationMinutes ?? null,
+          order: i + 1,
+        }));
+      } else {
+        const moduleRows = await db
+          .select({ moduleId: quizzes.moduleId })
+          .from(quizzes)
+          .where(eq(quizzes.courseId, courseId))
+          .groupBy(quizzes.moduleId)
+          .orderBy(quizzes.moduleId);
+
+        modules = moduleRows.map((row, i) => ({
+          id: row.moduleId,
+          title: row.moduleId,
+          description: null,
+          estimatedDurationMinutes: null,
+          order: i + 1,
+        }));
+      }
 
       cachedDetail = {
         id: course.id,
@@ -248,11 +281,7 @@ export class CourseService {
         isActive: course.isActive,
         enrolledCount: countResult?.value ?? 0,
         contentHash: course.contentHash,
-        modules: moduleRows.map((row, i) => ({
-          id: row.moduleId,
-          title: row.moduleId,
-          order: i + 1,
-        })),
+        modules,
         createdAt: course.createdAt,
       };
 
@@ -420,6 +449,23 @@ export class CourseService {
           throw new ConflictError("Already enrolled in this course");
         }
 
+        // Enrollment cap (#306) — only active (not yet completed)
+        // enrollments count toward the limit, so finishing a course frees
+        // up a slot for a new one.
+        const [activeCountResult] = await tx
+          .select({ value: count() })
+          .from(enrollments)
+          .where(
+            and(eq(enrollments.userId, userId), isNull(enrollments.completedAt)),
+          );
+        const activeCount = activeCountResult?.value ?? 0;
+
+        if (activeCount >= config.MAX_ENROLLMENTS) {
+          throw new ForbiddenError(
+            `Enrollment limit reached: ${activeCount}/${config.MAX_ENROLLMENTS} active enrollments. Complete or drop a course before enrolling in a new one.`,
+          );
+        }
+
         await tx.insert(enrollments).values({ userId, courseId });
       });
 
@@ -514,6 +560,7 @@ export class CourseService {
     const invalidations = await Promise.allSettled([
       cacheInvalidatePattern(cacheKeyPattern("courses", "list")),
       cacheInvalidatePattern(cacheKeyPattern("courses", "popular")),
+      cacheDel(cacheKey("courses", "stats")),
       ...(courseId ? [cacheDel(cacheKey("courses", "detail", courseId))] : []),
     ]);
     const failed = invalidations.filter((r) => r.status === "rejected");
@@ -532,8 +579,10 @@ export class CourseService {
       description: row.description,
       difficulty: row.difficulty,
       tags: row.tags ?? [],
+      courseModules: this.normalizeCourseModules(row.courseModules),
       contentHash: row.contentHash,
       isActive: row.isActive,
+      modules: (row.modules ?? []) as CourseModuleDefinition[],
       createdAt: row.createdAt,
     };
   }
@@ -546,6 +595,7 @@ export class CourseService {
         description: data.description,
         difficulty: data.difficulty,
         tags: data.tags,
+        courseModules: data.courseModules,
         contentHash: data.contentHash,
       })
       .returning();
@@ -593,6 +643,157 @@ export class CourseService {
     await this.invalidateCourseCaches(courseId);
     await auditLog("course.deleted", { courseId });
     logger.info({ courseId }, "Course soft-deleted");
+  }
+
+  private normalizeCourseModules(
+    modules: CourseModuleMetadata[] | null,
+  ): CourseModuleMetadata[] {
+    if (!Array.isArray(modules)) return [];
+
+    return modules
+      .filter((module) => module.id && module.title)
+      .map((module) => ({
+        id: module.id,
+        title: module.title,
+        description: module.description,
+        estimatedDurationMinutes: module.estimatedDurationMinutes,
+      }));
+  // ─── Admin: Module Management (#304) ───────────────────────────────────
+
+  /**
+   * Modules are stored as an ordered array in courses.modules (jsonb) — the
+   * lock scopes read-modify-write of that array so two concurrent module
+   * writes on the same course can't clobber each other.
+   */
+  async createModule(
+    courseId: string,
+    data: CreateModuleBody,
+  ): Promise<CourseModuleDefinition> {
+    return withLock(`course-modules:${courseId}`, async () => {
+      const [course] = await db
+        .select()
+        .from(courses)
+        .where(eq(courses.id, courseId));
+
+      if (!course) {
+        throw new NotFoundError("Course");
+      }
+
+      const existingModules = (course.modules ??
+        []) as CourseModuleDefinition[];
+      const newModule: CourseModuleDefinition = {
+        id: crypto.randomUUID(),
+        title: data.title,
+        description: data.description,
+        order: data.order ?? existingModules.length,
+      };
+      const updatedModules = [...existingModules, newModule].sort(
+        (a, b) => a.order - b.order,
+      );
+
+      await db
+        .update(courses)
+        .set({ modules: updatedModules })
+        .where(eq(courses.id, courseId));
+
+      await this.invalidateCourseCaches(courseId);
+      await auditLog("course.module.created", {
+        courseId,
+        moduleId: newModule.id,
+      });
+      logger.info({ courseId, moduleId: newModule.id }, "Course module created");
+
+      return newModule;
+    });
+  }
+
+  async updateModule(
+    courseId: string,
+    moduleId: string,
+    data: UpdateModuleBody,
+  ): Promise<CourseModuleDefinition> {
+    return withLock(`course-modules:${courseId}`, async () => {
+      const [course] = await db
+        .select()
+        .from(courses)
+        .where(eq(courses.id, courseId));
+
+      if (!course) {
+        throw new NotFoundError("Course");
+      }
+
+      const existingModules = (course.modules ??
+        []) as CourseModuleDefinition[];
+      const index = existingModules.findIndex((m) => m.id === moduleId);
+      if (index === -1) {
+        throw new NotFoundError("Module");
+      }
+
+      const updated: CourseModuleDefinition = {
+        ...existingModules[index],
+        ...data,
+      };
+      const updatedModules = [...existingModules];
+      updatedModules[index] = updated;
+      updatedModules.sort((a, b) => a.order - b.order);
+
+      await db
+        .update(courses)
+        .set({ modules: updatedModules })
+        .where(eq(courses.id, courseId));
+
+      await this.invalidateCourseCaches(courseId);
+      await auditLog("course.module.updated", { courseId, moduleId });
+      logger.info({ courseId, moduleId }, "Course module updated");
+
+      return updated;
+    });
+  }
+
+  /**
+   * Deleting a module also removes its associated quizzes (and, via the FK
+   * cascade on quiz_submissions, their submissions) — a module with no
+   * content definition shouldn't leave orphaned quiz data behind.
+   */
+  async deleteModule(courseId: string, moduleId: string): Promise<void> {
+    await withLock(`course-modules:${courseId}`, async () => {
+      await db.transaction(async (tx) => {
+        const [course] = await tx
+          .select()
+          .from(courses)
+          .where(eq(courses.id, courseId));
+
+        if (!course) {
+          throw new NotFoundError("Course");
+        }
+
+        const existingModules = (course.modules ??
+          []) as CourseModuleDefinition[];
+        const index = existingModules.findIndex((m) => m.id === moduleId);
+        if (index === -1) {
+          throw new NotFoundError("Module");
+        }
+
+        const updatedModules = existingModules.filter(
+          (m) => m.id !== moduleId,
+        );
+
+        await tx
+          .update(courses)
+          .set({ modules: updatedModules })
+          .where(eq(courses.id, courseId));
+
+        await tx
+          .delete(quizzes)
+          .where(
+            and(eq(quizzes.courseId, courseId), eq(quizzes.moduleId, moduleId)),
+          );
+      });
+    });
+
+    await this.invalidateCourseCaches(courseId);
+    await auditLog("course.module.deleted", { courseId, moduleId });
+    logger.info({ courseId, moduleId }, "Course module deleted");
   }
 }
 

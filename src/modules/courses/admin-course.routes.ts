@@ -6,6 +6,9 @@ import {
   createCourseSchema,
   updateCourseSchema,
   courseIdParamsSchema,
+  createModuleSchema,
+  updateModuleSchema,
+  moduleParamsSchema,
 } from "./course.types.js";
 
 /** Admin-only course management (#292). Every route requires an admin user. */
@@ -35,6 +38,24 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
               type: "array",
               items: { type: "string", minLength: 1, maxLength: 50 },
               maxItems: 20,
+            },
+            courseModules: {
+              type: "array",
+              maxItems: 100,
+              items: {
+                type: "object",
+                required: ["id", "title"],
+                properties: {
+                  id: { type: "string", minLength: 1, maxLength: 100 },
+                  title: { type: "string", minLength: 1, maxLength: 255 },
+                  description: { type: "string", maxLength: 1000 },
+                  estimatedDurationMinutes: {
+                    type: "integer",
+                    minimum: 1,
+                    maximum: 1440,
+                  },
+                },
+              },
             },
             contentHash: { type: "string", maxLength: 64 },
           },
@@ -72,6 +93,24 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
               items: { type: "string", minLength: 1, maxLength: 50 },
               maxItems: 20,
             },
+            courseModules: {
+              type: "array",
+              maxItems: 100,
+              items: {
+                type: "object",
+                required: ["id", "title"],
+                properties: {
+                  id: { type: "string", minLength: 1, maxLength: 100 },
+                  title: { type: "string", minLength: 1, maxLength: 255 },
+                  description: { type: "string", maxLength: 1000 },
+                  estimatedDurationMinutes: {
+                    type: "integer",
+                    minimum: 1,
+                    maximum: 1440,
+                  },
+                },
+              },
+            },
             contentHash: { type: "string", maxLength: 64 },
             isActive: { type: "boolean" },
           },
@@ -93,5 +132,88 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => adminCourseController.remove(request, reply)
+  );
+
+  app.post<{
+    Params: { id: string };
+    Body: import("./course.types.js").CreateModuleBody;
+  }>(
+    "/:id/modules",
+    {
+      preHandler: [
+        validate({ params: courseIdParamsSchema, body: createModuleSchema }),
+      ],
+      schema: {
+        description: "Create a course module definition (admin only)",
+        tags: ["admin", "courses"],
+        security: [{ bearerAuth: [] }],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+        body: {
+          type: "object",
+          required: ["title"],
+          properties: {
+            title: { type: "string", minLength: 1, maxLength: 255 },
+            description: { type: "string", maxLength: 2000 },
+            order: { type: "integer", minimum: 0 },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => adminCourseController.createModule(request, reply)
+  );
+
+  app.put<{
+    Params: { id: string; moduleId: string };
+    Body: import("./course.types.js").UpdateModuleBody;
+  }>(
+    "/:id/modules/:moduleId",
+    {
+      preHandler: [
+        validate({ params: moduleParamsSchema, body: updateModuleSchema }),
+      ],
+      schema: {
+        description: "Update a course module definition (admin only)",
+        tags: ["admin", "courses"],
+        security: [{ bearerAuth: [] }],
+        params: {
+          type: "object",
+          required: ["id", "moduleId"],
+          properties: {
+            id: { type: "string", format: "uuid" },
+            moduleId: { type: "string", minLength: 1, maxLength: 100 },
+          },
+        },
+        body: {
+          type: "object",
+          properties: {
+            title: { type: "string", minLength: 1, maxLength: 255 },
+            description: { type: "string", maxLength: 2000 },
+            order: { type: "integer", minimum: 0 },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => adminCourseController.updateModule(request, reply)
+  );
+
+  app.delete<{ Params: { id: string; moduleId: string } }>(
+    "/:id/modules/:moduleId",
+    {
+      preHandler: [validate({ params: moduleParamsSchema })],
+      schema: {
+        description: "Delete a course module definition and its quizzes (admin only)",
+        tags: ["admin", "courses"],
+        security: [{ bearerAuth: [] }],
+        params: {
+          type: "object",
+          required: ["id", "moduleId"],
+          properties: {
+            id: { type: "string", format: "uuid" },
+            moduleId: { type: "string", minLength: 1, maxLength: 100 },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => adminCourseController.removeModule(request, reply)
   );
 }

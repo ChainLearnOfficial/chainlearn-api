@@ -60,6 +60,19 @@ export async function courseRoutes(app: FastifyInstance): Promise<void> {
   );
 
   app.get<{ Params: { id: string } }>(
+    "/:id/modules",
+    {
+      preHandler: [optionalAuth, validate({ params: courseIdParamsSchema })],
+      schema: {
+        description: "List course module metadata",
+        tags: ["courses"],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      } as FastifySchema,
+    },
+    (request, reply) => courseController.modules(request, reply)
+  );
+
+  app.get<{ Params: { id: string } }>(
     "/:id",
     {
       preHandler: [optionalAuth, validate({ params: courseIdParamsSchema })],

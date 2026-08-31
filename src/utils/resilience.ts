@@ -14,12 +14,13 @@ export function isTransientError(err: Error): boolean {
     msg.includes("ECONNRESET") ||
     msg.includes("ENOTFOUND") ||
     msg.includes("socket hang up") ||
-    msg.includes("timed out")
+    msg.includes("timed out") ||
+    /too many requests/i.test(msg)
   ) {
     return true;
   }
 
-  const statusMatch = msg.match(/\b(502|503|504)\b/);
+  const statusMatch = msg.match(/\b(429|502|503|504)\b/);
   if (statusMatch) return true;
 
   return false;
@@ -149,7 +150,10 @@ export function createCircuitBreaker(options: CircuitBreakerOptions): CircuitBre
       recordSuccess();
       return result;
     } catch (err) {
-      if (err instanceof Error && isTransientError(err)) {
+      // A half-open probe must re-open the circuit on any failure, transient
+      // or not — otherwise a persistent non-transient error (e.g. a 400 from
+      // a corrupted account) would let unlimited probes through.
+      if (state === CircuitState.HalfOpen || (err instanceof Error && isTransientError(err))) {
         recordFailure();
       } else {
         halfOpenProbeInFlight = false;

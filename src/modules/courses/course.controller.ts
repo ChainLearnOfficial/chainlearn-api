@@ -60,6 +60,21 @@ export class CourseController {
   }
 
   /**
+   * GET /api/courses/:id/modules
+   * List module metadata for a course.
+   */
+  async modules(
+    request: FastifyRequest<{ Params: CourseIdParams }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id } = request.params;
+    const userId = (request as AuthenticatedRequest).authUser?.id ?? null;
+    const course = await courseService.getCourseDetail(id, userId);
+
+    reply.send({ success: true, data: course.modules });
+  }
+
+  /**
    * POST /api/courses/:id/enroll
    * Enroll the authenticated user in a course.
    */

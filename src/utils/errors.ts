@@ -57,7 +57,12 @@ export class StellarError extends AppError {
 }
 
 export class RateLimitError extends AppError {
-  constructor(message: string = "Rate limit exceeded") {
+  /** Seconds the client should wait before retrying, if known. When set,
+   *  the error handler surfaces this as a `Retry-After` response header. */
+  public readonly retryAfterSeconds?: number;
+
+  constructor(message: string = "Rate limit exceeded", retryAfterSeconds?: number) {
     super(message, 429, "RATE_LIMIT_EXCEEDED");
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 }

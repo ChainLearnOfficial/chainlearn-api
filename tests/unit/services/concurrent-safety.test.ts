@@ -59,6 +59,7 @@ vi.mock("../../../src/cache/index.js", () => ({
   cacheSet: vi.fn().mockResolvedValue(undefined),
   cacheDel: vi.fn().mockResolvedValue(undefined),
   cacheKey: vi.fn((...parts: string[]) => parts.join(":")),
+  cacheKeyPattern: vi.fn((...parts: string[]) => `${parts.join(":")}:*`),
   cacheInvalidatePattern: vi.fn().mockResolvedValue(undefined),
   cacheHits: { labels: vi.fn().mockReturnValue({ inc: vi.fn() }) },
   cacheMisses: { labels: vi.fn().mockReturnValue({ inc: vi.fn() }) },
@@ -69,6 +70,7 @@ import { rewardService } from "../../../src/modules/rewards/reward.service.js";
 import { credentialService } from "../../../src/modules/credentials/credential.service.js";
 import { courseService } from "../../../src/modules/courses/course.service.js";
 import { quizService } from "../../../src/modules/quizzes/quiz.service.js";
+import { cacheDel, cacheInvalidatePattern, cacheKey, cacheKeyPattern } from "../../../src/cache/index.js";
 
 const mockDb = vi.mocked(db);
 
@@ -306,6 +308,7 @@ describe("Concurrent Request Safety", () => {
         const chainData = [
           [{ id: "course-1", isActive: true }],
           [],
+          [{ value: 0 }],
         ];
         let callIndex = 0;
 
@@ -453,6 +456,16 @@ describe("Concurrent Request Safety", () => {
       });
       expect(result.id).toBe("sub-new");
       expect(result.passed).toBe(true);
+
+      // Verify cache invalidation after quiz submission — the progress cache
+      // (totalQuizScore, rewardsClaimed) and activity timeline cache must be
+      // invalidated so stale data isn't served.
+      expect(cacheDel).toHaveBeenCalledWith(
+        cacheKey("user", "progress", "user-1"),
+      );
+      expect(cacheInvalidatePattern).toHaveBeenCalledWith(
+        cacheKeyPattern("user", "activity", "user-1"),
+      );
     });
 
     it("should throw ConflictError when quiz already submitted", async () => {

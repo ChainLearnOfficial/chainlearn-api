@@ -13,6 +13,13 @@ import {
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
+export interface CourseModuleDefinition {
+  id: string;
+  title: string;
+  description: string;
+  order: number;
+}
+
 // ─── Users ──────────────────────────────────────────────────────────────────
 
 export const users = pgTable(
@@ -40,6 +47,12 @@ export const users = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
+    // Set by UserService.deleteAccount (#290). Null means the account is
+    // active. Once set, authGuard treats the user as if they no longer
+    // exist, so any JWT issued before deletion stops working. Deliberately
+    // a soft delete — the row (and its enrollments/credentials, which are
+    // never touched here) is preserved for on-chain record consistency.
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
   },
   (table) => [index("idx_users_stellar_address").on(table.stellarAddress)]
 );
@@ -57,6 +70,19 @@ export const courses = pgTable(
       .default("beginner"),
     contentHash: varchar("content_hash", { length: 64 }),
     tags: jsonb("tags").$type<string[]>().notNull().default([]),
+    courseModules: jsonb("course_modules").$type<Array<{
+      id: string;
+      title: string;
+      description?: string;
+      estimatedDurationMinutes?: number;
+    }>>(),
+    // Admin-defined module structure (#304): id/title/description/order.
+    // Independent of the moduleId strings quizzes reference — this is the
+    // authoring-time definition, not derived from existing quizzes.
+    modules: jsonb("modules")
+      .$type<CourseModuleDefinition[]>()
+      .notNull()
+      .default([]),
     isActive: boolean("is_active").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
@@ -233,5 +259,14 @@ export const auditLogs = pgTable(
     event: varchar("event", { length: 255 }).notNull(),
     fields: jsonb("fields"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  }
+  },
+  (table) => [
+    // Both indexes already exist in the database (migration 0006) but were
+    // never reflected here in the Drizzle schema — added now so the ORM
+    // schema matches reality and so admin-users' audit-log listing (#289)
+    // is backed by an index for its `event` filter and its `created_at`
+    // range/ordering.
+    index("idx_audit_logs_event").on(table.event),
+    index("idx_audit_logs_created_at").on(table.createdAt),
+  ]
 );

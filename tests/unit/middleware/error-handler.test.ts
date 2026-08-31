@@ -10,7 +10,7 @@ vi.mock("../../../src/config/index.js", () => ({
 }));
 
 import { registerErrorHandler } from "../../../src/middleware/error-handler.js";
-import { AppError, ValidationError } from "../../../src/utils/errors.js";
+import { AppError, ValidationError, RateLimitError } from "../../../src/utils/errors.js";
 
 describe("Error Handler Middleware", () => {
   let mockApp: any;
@@ -22,6 +22,10 @@ describe("Error Handler Middleware", () => {
       setErrorHandler: vi.fn((handler) => {
         errorHandler = handler;
       }),
+      // registerErrorHandler also registers a not-found handler — without
+      // stubbing this, every test below fails before any assertion runs
+      // (pre-existing gap: this mock predates that Fastify API being used).
+      setNotFoundHandler: vi.fn(),
     };
     registerErrorHandler(mockApp);
   });
@@ -69,6 +73,41 @@ describe("Error Handler Middleware", () => {
         message: "Resource not found",
       })
     );
+  });
+
+  it("should set a Retry-After header when RateLimitError carries retryAfterSeconds (#291)", async () => {
+    const rateLimitError = new RateLimitError("Too many requests", 120);
+    const mockRequest: any = {};
+    const mockReply: any = {
+      status: vi.fn().mockReturnThis(),
+      send: vi.fn().mockReturnThis(),
+      header: vi.fn().mockReturnThis(),
+    };
+
+    errorHandler(rateLimitError, mockRequest, mockReply);
+
+    expect(mockReply.header).toHaveBeenCalledWith("Retry-After", "120");
+    expect(mockReply.status).toHaveBeenCalledWith(429);
+    expect(mockReply.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        statusCode: 429,
+        error: "RATE_LIMIT_EXCEEDED",
+      })
+    );
+  });
+
+  it("should not set a Retry-After header when RateLimitError has no retryAfterSeconds", async () => {
+    const rateLimitError = new RateLimitError("Too many requests");
+    const mockRequest: any = {};
+    const mockReply: any = {
+      status: vi.fn().mockReturnThis(),
+      send: vi.fn().mockReturnThis(),
+      header: vi.fn().mockReturnThis(),
+    };
+
+    errorHandler(rateLimitError, mockRequest, mockReply);
+
+    expect(mockReply.header).not.toHaveBeenCalled();
   });
 
   it("should handle generic Error", async () => {

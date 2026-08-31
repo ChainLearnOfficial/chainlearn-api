@@ -65,6 +65,13 @@ export async function authGuard(
       throw new UnauthorizedError("User no longer exists");
     }
 
+    // A soft-deleted account (#290) must behave like it no longer exists for
+    // auth purposes — no JWT blocklist needed, since every authenticated
+    // request already re-fetches the user row here.
+    if (user.deletedAt) {
+      throw new UnauthorizedError("User no longer exists");
+    }
+
     // Validate that the stellarAddress in the JWT matches the database record
     // This provides defense-in-depth against token forgery scenarios
     if (decoded.stellarAddress !== user.stellarAddress) {

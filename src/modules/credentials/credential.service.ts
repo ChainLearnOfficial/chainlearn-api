@@ -12,6 +12,7 @@ import {
   NotFoundError,
   ForbiddenError,
   ConflictError,
+  AppError,
 } from "../../utils/errors.js";
 import { withLock } from "../../utils/lock.js";
 import { invokeContract } from "../../stellar/transactions.js";
@@ -20,7 +21,11 @@ import { config } from "../../config/index.js";
 import { logger } from "../../utils/logger.js";
 import crypto from "node:crypto";
 import StellarSdk from "@stellar/stellar-sdk";
-import type { MintResult, CredentialListItem } from "./credential.types.js";
+import type {
+  BatchMintResultItem,
+  CredentialListItem,
+  MintResult,
+} from "./credential.types.js";
 import { auditLog } from "../../audit/index.js";
 import {
   stellarTxDurationSeconds,
@@ -198,6 +203,42 @@ export class CredentialService {
         message: "Course completion credential minted successfully",
       };
     });
+  }
+
+  async batchMint(
+    userId: string,
+    submissions: Array<{ courseId: string; submissionId: string }>,
+  ): Promise<BatchMintResultItem[]> {
+    const results: BatchMintResultItem[] = [];
+
+    for (const submission of submissions) {
+      try {
+        const data = await this.mint(
+          userId,
+          submission.courseId,
+          submission.submissionId,
+        );
+        results.push({
+          ...submission,
+          success: true,
+          data,
+        });
+      } catch (err) {
+        results.push({
+          ...submission,
+          success: false,
+          error: {
+            code: err instanceof AppError ? err.code : "INTERNAL_ERROR",
+            message:
+              err instanceof AppError
+                ? err.message
+                : "Failed to mint credential",
+          },
+        });
+      }
+    }
+
+    return results;
   }
 
   /**

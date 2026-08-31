@@ -12,6 +12,16 @@ export const PASSING_PERCENTAGE = 70;
 // single calendar day (#295).
 export const MAX_RETRIES_PER_MODULE_PER_DAY = 3;
 
+// Max number of times a user may *generate* a quiz for the same module
+// within a rolling hour (#291). Distinct from MAX_RETRIES_PER_MODULE_PER_DAY,
+// which limits retry *submissions* per calendar day — this limits the
+// generation call itself, independent of whether a quiz already existed for
+// that module (generateQuiz's existing-quiz short-circuit means most calls
+// won't hit the AI service at all, but a user hammering the endpoint before
+// the first quiz is created still shouldn't be able to spam AI generation
+// calls).
+export const MAX_QUIZ_GENERATIONS_PER_MODULE_PER_HOUR = 5;
+
 // ─── Request Schemas ────────────────────────────────────────────────────────
 
 export const generateQuizSchema = z.object({
@@ -38,11 +48,16 @@ export const quizIdParamsSchema = z.object({
   id: z.string().uuid("Invalid quiz ID"),
 });
 
+export const quizStatsQuerySchema = z.object({
+  courseId: z.string().uuid("Invalid course ID").optional(),
+});
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 export type GenerateQuizBody = z.infer<typeof generateQuizSchema>;
 export type SubmitQuizBody = z.infer<typeof submitQuizSchema>;
 export type QuizIdParams = z.infer<typeof quizIdParamsSchema>;
+export type QuizStatsQuery = z.infer<typeof quizStatsQuerySchema>;
 
 export interface QuizQuestion {
   id: string;
@@ -67,4 +82,11 @@ export interface QuizSubmissionResult {
   passed: boolean;
   feedback: string;
   rewardAvailable: boolean;
+}
+
+export interface QuizStats {
+  averageScore: number;
+  passRate: number;
+  totalSubmissions: number;
+  submissionsPerCourse: Record<string, number>;
 }

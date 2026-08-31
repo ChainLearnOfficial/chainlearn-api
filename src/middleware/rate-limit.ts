@@ -56,3 +56,17 @@ export const claimRateLimit: RateLimitOptions = {
   },
   errorResponseBuilder,
 };
+
+/**
+ * Batch credential minting may trigger several sequential on-chain writes in
+ * one request, so keep it tighter than ordinary API traffic.
+ */
+export const batchMintRateLimit: RateLimitOptions = {
+  max: 5,
+  timeWindow: "1 minute",
+  keyGenerator: (request: FastifyRequest) => {
+    const authReq = request as any;
+    return authReq.authUser?.id ?? request.ip;
+  },
+  errorResponseBuilder,
+};

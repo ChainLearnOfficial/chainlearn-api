@@ -7,6 +7,7 @@ import type {
   CreateModuleBody,
   UpdateModuleBody,
   ModuleParams,
+  ListEnrolledUsersQuery,
 } from "./course.types.js";
 
 export class AdminCourseController {
@@ -135,6 +136,31 @@ export class AdminCourseController {
     await courseService.deleteModule(id, moduleId);
 
     reply.send({ success: true, message: "Module deleted" });
+  }
+
+  /**
+   * GET /api/admin/courses/:id/enrolled-users
+   * Paginated list of users enrolled in a course, with progress (#340).
+   */
+  async listEnrolledUsers(
+    request: FastifyRequest<{
+      Params: CourseIdParams;
+      Querystring: ListEnrolledUsersQuery;
+    }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id } = request.params;
+    const result = await courseService.getEnrolledUsers(id, request.query);
+
+    reply.send({
+      success: true,
+      data: result.users,
+      pagination: {
+        page: request.query.page,
+        limit: request.query.limit,
+        total: result.total,
+      },
+    });
   }
 }
 

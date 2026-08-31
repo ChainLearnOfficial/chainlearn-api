@@ -41,6 +41,10 @@ import {
   startReconciliationJob,
   stopReconciliationJob,
 } from "./jobs/reconcile-pending-rewards.js";
+import {
+  startWebhookRetryProcessor,
+  stopWebhookRetryProcessor,
+} from "./jobs/process-webhook-retries.js";
 import { processRewardClaim } from "./modules/rewards/reward.service.js";
 import { warmCourseCache } from "./cache/warmer.js";
 import { runWithRequestContext } from "./utils/request-context.js";
@@ -308,6 +312,7 @@ async function start() {
   startIdempotencyCleanup();
   startNotificationCleanup();
   startReconciliationJob();
+  startWebhookRetryProcessor();
   // Re-enqueue any reward claims dropped during a Redis restart (#208).
   recoverLostJobs().catch((err) => logger.error({ err }, "recoverLostJobs startup failed"));
 
@@ -345,6 +350,7 @@ async function start() {
     stopIdempotencyCleanup();
     stopNotificationCleanup();
     stopReconciliationJob();
+    stopWebhookRetryProcessor();
     if (cacheWarmInterval) {
       clearInterval(cacheWarmInterval);
     }

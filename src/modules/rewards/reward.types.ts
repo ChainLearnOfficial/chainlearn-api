@@ -12,10 +12,15 @@ export const getHistorySchema = z.object({
   limit: z.coerce.number().int().min(1).max(50).default(20),
 });
 
+export const getLeaderboardSchema = z.object({
+  limit: z.coerce.number().int().min(1).max(50).default(50),
+});
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 export type ClaimRewardBody = z.infer<typeof claimRewardSchema>;
 export type GetHistoryQuery = z.infer<typeof getHistorySchema>;
+export type GetLeaderboardQuery = z.infer<typeof getLeaderboardSchema>;
 
 export interface RewardClaimResult {
   submissionId: string;
@@ -34,20 +39,13 @@ export interface RewardHistoryItem {
   claimedAt: Date;
 }
 
-/** One entry of GET /api/v1/rewards/pending (#327).
- * - `queued`: the claim is waiting in the retry queue (Stellar was
- *   unavailable when it was requested). `queuePosition` and
- *   `estimatedProcessingSeconds` are populated.
- * - `awaiting_confirmation`: the on-chain transaction was submitted but a
- *   sequence error left its outcome unconfirmed; the reconciliation job
- *   (every 5 min) resolves it. `queuePosition` is null. */
-export interface PendingRewardItem {
-  submissionId: string;
-  courseTitle: string;
-  amount: number;
-  status: "queued" | "awaiting_confirmation";
-  queuePosition: number | null;
-  estimatedProcessingSeconds: number;
-  txHash: string | null;
-  submittedAt: Date;
+export interface LeaderboardEntry {
+  rank: number;
+  displayName: string;
+  credits: number;
+}
+
+export interface LeaderboardResponse {
+  entries: LeaderboardEntry[];
+  generatedAt: Date;
 }

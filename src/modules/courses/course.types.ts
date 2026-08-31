@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { CourseModuleDefinition } from "../../database/schema.js";
 
 // ─── Request Schemas ────────────────────────────────────────────────────────
 
@@ -19,11 +20,19 @@ export const popularCoursesQuerySchema = z.object({
 
 // ─── Admin Request Schemas ──────────────────────────────────────────────────
 
+export const courseModuleSchema = z.object({
+  id: z.string().min(1).max(100),
+  title: z.string().min(1).max(255),
+  description: z.string().max(1000).optional(),
+  estimatedDurationMinutes: z.coerce.number().int().positive().max(1440).optional(),
+});
+
 export const createCourseSchema = z.object({
   title: z.string().min(1).max(255),
   description: z.string().min(1),
   difficulty: z.enum(["beginner", "intermediate", "advanced"]).default("beginner"),
   tags: z.array(z.string().min(1).max(50)).max(20).default([]),
+  courseModules: z.array(courseModuleSchema).max(100).optional(),
   contentHash: z.string().max(64).optional(),
 });
 
@@ -33,12 +42,36 @@ export const updateCourseSchema = z
     description: z.string().min(1).optional(),
     difficulty: z.enum(["beginner", "intermediate", "advanced"]).optional(),
     tags: z.array(z.string().min(1).max(50)).max(20).optional(),
+    courseModules: z.array(courseModuleSchema).max(100).optional(),
     contentHash: z.string().max(64).optional(),
     isActive: z.boolean().optional(),
   })
   .refine((data) => Object.keys(data).length > 0, {
     message: "At least one field must be provided",
   });
+
+// ─── Admin Module Request Schemas (#304) ────────────────────────────────────
+
+export const createModuleSchema = z.object({
+  title: z.string().min(1).max(255),
+  description: z.string().min(1).max(2000).default(""),
+  order: z.coerce.number().int().min(0).optional(),
+});
+
+export const updateModuleSchema = z
+  .object({
+    title: z.string().min(1).max(255).optional(),
+    description: z.string().min(1).max(2000).optional(),
+    order: z.coerce.number().int().min(0).optional(),
+  })
+  .refine((data) => Object.keys(data).length > 0, {
+    message: "At least one field must be provided",
+  });
+
+export const moduleParamsSchema = z.object({
+  id: z.string().uuid("Invalid course ID"),
+  moduleId: z.string().min(1).max(100),
+});
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -47,6 +80,9 @@ export type CourseIdParams = z.infer<typeof courseIdParamsSchema>;
 export type PopularCoursesQuery = z.infer<typeof popularCoursesQuerySchema>;
 export type CreateCourseBody = z.infer<typeof createCourseSchema>;
 export type UpdateCourseBody = z.infer<typeof updateCourseSchema>;
+export type CreateModuleBody = z.infer<typeof createModuleSchema>;
+export type UpdateModuleBody = z.infer<typeof updateModuleSchema>;
+export type ModuleParams = z.infer<typeof moduleParamsSchema>;
 
 export interface CourseSummary {
   id: string;
@@ -67,6 +103,8 @@ export interface CourseDetail extends CourseSummary {
 export interface CourseModule {
   id: string;
   title: string;
+  description: string | null;
+  estimatedDurationMinutes: number | null;
   order: number;
 }
 
@@ -82,7 +120,11 @@ export interface AdminCourse {
   description: string;
   difficulty: string;
   tags: string[];
+  courseModules: CourseModuleMetadata[];
   contentHash: string | null;
   isActive: boolean;
+  modules: CourseModuleDefinition[];
   createdAt: Date;
 }
+
+export type CourseModuleMetadata = z.infer<typeof courseModuleSchema>;

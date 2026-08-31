@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { eq, and } from "drizzle-orm";
 import { db } from "../../config/database.js";
 import { quizzes, quizSubmissions, enrollments } from "../../database/schema.js";
@@ -15,6 +16,7 @@ import { generateQuizFromAI } from "./ai-client.js";
 import { sanitizeQuizFeedback } from "../../utils/sanitize.js";
 import { auditLog } from "../../audit/index.js";
 import { quizSubmissionsTotal } from "../../metrics/index.js";
+import { cacheGet, cacheSet, cacheKey } from "../../cache/index.js";
 import {
   PASSING_PERCENTAGE,
   MAX_RETRIES_PER_MODULE_PER_DAY,
@@ -24,9 +26,17 @@ import {
   type QuizWithQuestions,
   type QuizSubmissionResult,
   type QuizQuestion,
+  type QuizStats,
 } from "./quiz.types.js";
 
+const QUIZ_STATS_TTL_SECONDS = 300;
+
 type GeneratedQuestion = QuizQuestion & { correctIndex: number };
+type StoredQuestion = GeneratedQuestion & {
+  originalQuestionIndex: number;
+  originalCorrectIndex: number;
+  originalOptions: string[];
+};
 
 export class QuizService {
   /**
@@ -64,28 +74,25 @@ export class QuizService {
 
     if (existing) {
       // Return existing quiz, strip correct answers
-      const questions = existing.questions as Array<{
-        id: string;
-        text: string;
-        options: string[];
-        correctIndex: number;
-      }>;
+      const questions = existing.questions as StoredQuestion[];
 
       return {
         id: existing.id,
         courseId: existing.courseId,
         moduleId: existing.moduleId,
-        questions: questions.map(({ correctIndex: _, ...q }) => q),
+        questions: this.toClientQuestions(questions),
         createdAt: existing.createdAt,
       };
     }
 
-    const generatedQuestions = await this.generateQuestions(userId, {
-      courseId: data.courseId,
-      moduleId: data.moduleId,
-      difficulty: data.difficulty ?? "beginner",
-      numQuestions: data.numQuestions ?? 5,
-    });
+    const generatedQuestions = this.shuffleQuestions(
+      await this.generateQuestions(userId, {
+        courseId: data.courseId,
+        moduleId: data.moduleId,
+        difficulty: data.difficulty ?? "beginner",
+        numQuestions: data.numQuestions ?? 5,
+      }),
+    );
 
     const [quiz] = await db
       .insert(quizzes)
@@ -106,7 +113,7 @@ export class QuizService {
       id: quiz.id,
       courseId: quiz.courseId,
       moduleId: quiz.moduleId,
-      questions: generatedQuestions.map(({ correctIndex: _, ...q }) => q),
+      questions: this.toClientQuestions(generatedQuestions),
       createdAt: quiz.createdAt,
     };
   }
@@ -159,12 +166,7 @@ export class QuizService {
         }
 
         // Grade the quiz
-        const questions = (quiz.questions ?? []) as Array<{
-          id: string;
-          text: string;
-          options: string[];
-          correctIndex: number;
-        }>;
+        const questions = (quiz.questions ?? []) as StoredQuestion[];
 
         if (!questions || questions.length === 0) {
           throw new ForbiddenError("Quiz has no questions");
@@ -321,10 +323,12 @@ export class QuizService {
 
       await this.assertRetryAllowed(userId, quiz.courseId, quiz.moduleId);
 
-      const generatedQuestions = await this.generateQuestions(userId, {
-        courseId: quiz.courseId,
-        moduleId: quiz.moduleId,
-      });
+      const generatedQuestions = this.shuffleQuestions(
+        await this.generateQuestions(userId, {
+          courseId: quiz.courseId,
+          moduleId: quiz.moduleId,
+        }),
+      );
 
       const [newQuiz] = await db
         .insert(quizzes)
@@ -363,7 +367,7 @@ export class QuizService {
         id: newQuiz.id,
         courseId: newQuiz.courseId,
         moduleId: newQuiz.moduleId,
-        questions: generatedQuestions.map(({ correctIndex: _, ...q }) => q),
+        questions: this.toClientQuestions(generatedQuestions),
         createdAt: newQuiz.createdAt,
       };
     });
@@ -519,6 +523,73 @@ export class QuizService {
     }
   }
 
+  /**
+   * Aggregate quiz statistics (#307): average score, pass rate, total
+   * submissions, and a per-course submission breakdown. Superseded
+   * submissions (from #295 retries) are excluded so a retried quiz's stale
+   * attempt doesn't double-count. `score` is stored as a raw correct-answer
+   * count, not a percentage, so each row is normalized against its own
+   * quiz's question count before averaging — quizzes can have different
+   * numbers of questions (numQuestions: 1-20).
+   */
+  async getQuizStats(courseId?: string): Promise<QuizStats> {
+    const namespace = "quizzes";
+    const cacheKeyString = cacheKey(namespace, "stats", courseId ?? "all");
+
+    const cached = await cacheGet<QuizStats>(namespace, cacheKeyString);
+    if (cached) return cached;
+
+    const conditions = [eq(quizSubmissions.superseded, false)];
+    if (courseId) {
+      conditions.push(eq(quizzes.courseId, courseId));
+    }
+
+    const rows = await db
+      .select({
+        score: quizSubmissions.score,
+        courseId: quizzes.courseId,
+        questions: quizzes.questions,
+      })
+      .from(quizSubmissions)
+      .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+      .where(and(...conditions));
+
+    let percentageSum = 0;
+    let passCount = 0;
+    const submissionsPerCourse: Record<string, number> = {};
+
+    for (const row of rows) {
+      const totalQuestions = Array.isArray(row.questions)
+        ? row.questions.length
+        : 0;
+      const percentage =
+        totalQuestions > 0 && row.score != null
+          ? Math.round((row.score / totalQuestions) * 100)
+          : 0;
+
+      percentageSum += percentage;
+      if (percentage >= PASSING_PERCENTAGE) passCount++;
+      submissionsPerCourse[row.courseId] =
+        (submissionsPerCourse[row.courseId] ?? 0) + 1;
+    }
+
+    const totalSubmissions = rows.length;
+    const stats: QuizStats = {
+      averageScore:
+        totalSubmissions > 0 ? Math.round(percentageSum / totalSubmissions) : 0,
+      passRate:
+        totalSubmissions > 0
+          ? Math.round((passCount / totalSubmissions) * 100)
+          : 0,
+      totalSubmissions,
+      submissionsPerCourse,
+    };
+
+    await cacheSet(cacheKeyString, stats, QUIZ_STATS_TTL_SECONDS);
+
+    return stats;
+  }
+
   private createPlaceholderQuestions(
     courseId: string,
     moduleId: string
@@ -564,6 +635,44 @@ export class QuizService {
         correctIndex: 1,
       },
     ];
+  }
+
+  private shuffleQuestions(questions: GeneratedQuestion[]): StoredQuestion[] {
+    const storedQuestions = questions.map((question, originalQuestionIndex) => {
+      const shuffledOptions = this.shuffleArray(
+        question.options.map((option, originalOptionIndex) => ({
+          option,
+          originalOptionIndex,
+        })),
+      );
+      const correctIndex = shuffledOptions.findIndex(
+        (option) => option.originalOptionIndex === question.correctIndex,
+      );
+
+      return {
+        ...question,
+        options: shuffledOptions.map((option) => option.option),
+        correctIndex,
+        originalQuestionIndex,
+        originalCorrectIndex: question.correctIndex,
+        originalOptions: question.options,
+      };
+    });
+
+    return this.shuffleArray(storedQuestions);
+  }
+
+  private shuffleArray<T>(items: T[]): T[] {
+    const shuffled = [...items];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = crypto.randomInt(i + 1);
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    return shuffled;
+  }
+
+  private toClientQuestions(questions: StoredQuestion[]): QuizQuestion[] {
+    return questions.map(({ id, text, options }) => ({ id, text, options }));
   }
 }
 

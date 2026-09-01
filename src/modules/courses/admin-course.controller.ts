@@ -139,6 +139,22 @@ export class AdminCourseController {
   }
 
   /**
+   * GET /api/v1/admin/courses/:id/analytics
+   * Detailed analytics: enrollment trends, completion rate, average quiz
+   * score, average time-to-complete, and modules learners struggle with
+   * most (cached 1 hour).
+   */
+  async analytics(
+    request: FastifyRequest<{ Params: CourseIdParams }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id } = request.params;
+    const analytics = await courseService.getCourseAnalytics(id);
+
+    reply.send({ success: true, data: analytics });
+  }
+
+  /**
    * GET /api/admin/courses/:id/enrolled-users
    * Paginated list of users enrolled in a course, with progress (#340).
    */

@@ -301,6 +301,44 @@ export interface AdminCourseWithAccessibility extends AdminCourse {
 
 export type CourseModuleMetadata = z.infer<typeof courseModuleSchema>;
 
+/** One bucket of GET /api/v1/admin/courses/:id/analytics's enrollment trend. */
+export interface EnrollmentTrendPoint {
+  /** ISO date (YYYY-MM-DD) — the start of the day/week bucket. */
+  date: string;
+  count: number;
+}
+
+/** Per-module quiz performance, used to flag modules learners struggle with
+ * most (lowest average score) — GET /api/v1/admin/courses/:id/analytics. */
+export interface ModuleDifficulty {
+  moduleId: string;
+  title: string | null;
+  averageScore: number | null;
+  submissionCount: number;
+  /** True when averageScore is below the quiz passing threshold. */
+  difficult: boolean;
+}
+
+/** Response of GET /api/v1/admin/courses/:id/analytics. */
+export interface CourseAnalytics {
+  courseId: string;
+  totalEnrollments: number;
+  /** Percentage (0-100) of enrollments with a non-null completedAt. */
+  completionRate: number;
+  /** Mean hours between enrolledAt and completedAt, null with no completions. */
+  averageTimeToCompleteHours: number | null;
+  /** Mean quiz score percentage across all non-superseded submissions for
+   * the course's quizzes, null with no submissions. */
+  averageQuizScore: number | null;
+  enrollmentTrends: {
+    daily: EnrollmentTrendPoint[];
+    weekly: EnrollmentTrendPoint[];
+  };
+  /** Modules ordered by average score ascending — lowest first. */
+  moduleDifficulty: ModuleDifficulty[];
+  generatedAt: Date;
+}
+
 /** Response of POST /api/v1/courses/:id/report. */
 export interface CourseReportResult {
   id: string;

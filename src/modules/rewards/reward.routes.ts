@@ -3,7 +3,12 @@ import { rewardController } from "./reward.controller.js";
 import { authGuard, optionalAuth } from "../../middleware/auth.js";
 import { validate } from "../../middleware/validation.js";
 import { claimRateLimit } from "../../middleware/rate-limit.js";
-import { claimRewardSchema, getHistorySchema, getLeaderboardSchema } from "./reward.types.js";
+import {
+  claimRewardSchema,
+  getHistorySchema,
+  getLeaderboardSchema,
+  getTransactionsSchema,
+} from "./reward.types.js";
 
 export async function rewardRoutes(app: FastifyInstance): Promise<void> {
   // Leaderboard endpoint - no auth required, so we register it before the authGuard hook
@@ -80,5 +85,26 @@ export async function rewardRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => rewardController.history(request, reply)
+  );
+
+  app.get<{ Querystring: import("./reward.types.js").GetTransactionsQuery }>(
+    "/transactions",
+    {
+      preHandler: [validate({ querystring: getTransactionsSchema })],
+      schema: {
+        description:
+          "List the caller's reward-related blockchain transactions with on-chain verification status (cached 30s)",
+        tags: ["rewards"],
+        security: [{ bearerAuth: [] }],
+        querystring: {
+          type: "object",
+          properties: {
+            page: { type: "integer", minimum: 1, default: 1 },
+            limit: { type: "integer", minimum: 1, maximum: 50, default: 20 },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => rewardController.transactions(request, reply)
   );
 }

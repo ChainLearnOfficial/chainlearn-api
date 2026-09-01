@@ -23,7 +23,11 @@ import { logger } from "../../utils/logger.js";
 import { enqueueReward } from "../../services/retry-queue.js";
 import { dispatchWebhook } from "../../services/webhook-dispatcher.js";
 import StellarSdk from "@stellar/stellar-sdk";
-import type { RewardClaimResult, RewardHistoryItem } from "./reward.types.js";
+import type {
+  RewardClaimResult,
+  RewardHistoryItem,
+  RewardTransaction,
+} from "./reward.types.js";
 import { PASSING_PERCENTAGE } from "../quizzes/quiz.types.js";
 import { auditLog } from "../../audit/index.js";
 import {
@@ -470,6 +474,93 @@ export class RewardService {
     }));
 
     const result = { history, total: totalResult?.value ?? 0 };
+    await cacheSet(cacheKeyString, result, 30);
+
+    return result;
+  }
+
+  /**
+   * Get all reward-related blockchain transactions for a user, each
+   * verified against Stellar Horizon so the caller doesn't have to trust
+   * the stored tx hash blindly. Paginated and cached for 30s — verification
+   * involves a live Horizon call per transaction, so a short cache keeps
+   * repeated page loads cheap without going stale for long.
+   */
+  async getTransactions(
+    userId: string,
+    page: number,
+    limit: number,
+  ): Promise<{ transactions: RewardTransaction[]; total: number }> {
+    const namespace = "rewards";
+    const cacheKeyString = cacheKey(namespace, "transactions", userId, page, limit);
+
+    const cached = await cacheGet<{ transactions: RewardTransaction[]; total: number }>(
+      namespace,
+      cacheKeyString,
+    );
+    if (cached) return cached;
+
+    const offset = (page - 1) * limit;
+    const where = and(
+      eq(quizSubmissions.userId, userId),
+      sql`${quizSubmissions.txHash} IS NOT NULL`,
+    );
+
+    const [totalResult] = await db
+      .select({ value: sql<number>`count(*)`.mapWith(Number) })
+      .from(quizSubmissions)
+      .where(where);
+
+    const rows = await db
+      .select({
+        id: quizSubmissions.id,
+        txHash: quizSubmissions.txHash,
+        rewardAmount: quizSubmissions.rewardAmount,
+        submittedAt: quizSubmissions.submittedAt,
+        courseTitle: courses.title,
+      })
+      .from(quizSubmissions)
+      .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+      .innerJoin(courses, eq(quizzes.courseId, courses.id))
+      .where(where)
+      .orderBy(desc(quizSubmissions.submittedAt))
+      .limit(limit)
+      .offset(offset);
+
+    const transactions: RewardTransaction[] = await Promise.all(
+      rows.map(async (row) => {
+        const txHash = row.txHash as string;
+
+        // A bad_seq retry marks the tx as pending indexer confirmation
+        // rather than a real hash — nothing to look up on Horizon yet.
+        if (txHash === "pending_indexer_confirmation") {
+          return {
+            id: row.id,
+            courseTitle: row.courseTitle,
+            amount: row.rewardAmount ?? REWARD_AMOUNT,
+            txHash,
+            status: "pending" as const,
+            blockHeight: null,
+            confirmationCount: null,
+            submittedAt: row.submittedAt,
+          };
+        }
+
+        const verification = await stellarClient.getHorizonTransaction(txHash);
+        return {
+          id: row.id,
+          courseTitle: row.courseTitle,
+          amount: row.rewardAmount ?? REWARD_AMOUNT,
+          txHash,
+          status: verification.status,
+          blockHeight: verification.ledger,
+          confirmationCount: verification.confirmations,
+          submittedAt: row.submittedAt,
+        };
+      }),
+    );
+
+    const result = { transactions, total: totalResult?.value ?? 0 };
     await cacheSet(cacheKeyString, result, 30);
 
     return result;

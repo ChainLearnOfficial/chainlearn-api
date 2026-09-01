@@ -13,6 +13,7 @@ import {
   shareCodeParamsSchema,
   listReviewsQuerySchema,
   createReviewSchema,
+  reportCourseSchema,
   listEnrolledUsersQuerySchema,
 } from "./course.types.js";
 import { joinWaitlistSchema, leaveWaitlistSchema } from "./waitlist.types.js";
@@ -324,6 +325,32 @@ export async function courseRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => courseController.share(request, reply)
+  );
+
+  app.post<{ Params: { id: string }; Body: import("./course.types.js").ReportCourseBody }>(
+    "/:id/report",
+    {
+      preHandler: [
+        authGuard,
+        validate({ params: courseIdParamsSchema, body: reportCourseSchema }),
+      ],
+      schema: {
+        description:
+          "Report a course for inappropriate content, outdated material, errors, or other issues (one report per user per course)",
+        tags: ["courses"],
+        security: [{ bearerAuth: [] }],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+        body: {
+          type: "object",
+          required: ["reason"],
+          properties: {
+            reason: { type: "string", enum: ["inappropriate", "outdated", "error", "other"] },
+            description: { type: "string", maxLength: 2000 },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => courseController.report(request, reply)
   );
 
   // ─── Waitlist Endpoints ──────────────────────────────────────────────────

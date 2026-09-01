@@ -8,6 +8,7 @@ import {
   verifySchema,
   refreshSchema,
   logoutSchema,
+  sessionIdParamsSchema,
 } from "./auth.types.js";
 
 export async function authRoutes(app: FastifyInstance): Promise<void> {
@@ -117,5 +118,38 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => authController.logout(request, reply)
+  );
+
+  app.get(
+    "/sessions",
+    {
+      preHandler: [authGuard],
+      schema: {
+        description:
+          "List the caller's active sessions, with device info and last activity",
+        tags: ["auth"],
+        security: [{ bearerAuth: [] }],
+      } as FastifySchema,
+    },
+    (request, reply) => authController.listSessions(request, reply)
+  );
+
+  app.delete<{ Params: import("./auth.types.js").SessionIdParams }>(
+    "/sessions/:sessionId",
+    {
+      preHandler: [authGuard, validate({ params: sessionIdParamsSchema })],
+      schema: {
+        description:
+          "Revoke one of the caller's sessions — its token is blacklisted immediately",
+        tags: ["auth"],
+        security: [{ bearerAuth: [] }],
+        params: {
+          type: "object",
+          required: ["sessionId"],
+          properties: { sessionId: { type: "string", format: "uuid" } },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => authController.revokeSession(request, reply)
   );
 }

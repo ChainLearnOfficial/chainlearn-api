@@ -1,7 +1,11 @@
 import type { FastifyRequest, FastifyReply } from "fastify";
 import { rewardService } from "./reward.service.js";
 import type { AuthenticatedRequest } from "../../middleware/auth.js";
-import type { ClaimRewardBody, GetHistoryQuery } from "./reward.types.js";
+import type {
+  ClaimRewardBody,
+  GetHistoryQuery,
+  GetTransactionsQuery,
+} from "./reward.types.js";
 import {
   checkIdempotency,
   storeIdempotentResponse,
@@ -100,6 +104,30 @@ export class RewardController {
     reply.send({
       success: true,
       data: history,
+      pagination: { page, limit, total },
+    });
+  }
+
+  /**
+   * GET /api/v1/rewards/transactions
+   * List the authenticated user's reward-related blockchain transactions,
+   * each with its on-chain verification status against Stellar Horizon.
+   */
+  async transactions(
+    request: FastifyRequest<{ Querystring: GetTransactionsQuery }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { authUser } = request as AuthenticatedRequest;
+    const { page, limit } = request.query;
+    const { transactions, total } = await rewardService.getTransactions(
+      authUser.id,
+      page,
+      limit
+    );
+
+    reply.send({
+      success: true,
+      data: transactions,
       pagination: { page, limit, total },
     });
   }

@@ -375,32 +375,71 @@ export const webhookAttempts = pgTable(
   ]
 );
 
-// ─── Announcements ──────────────────────────────────────────────────────────
+// ─── Course Reports ─────────────────────────────────────────────────────────
 
-// Platform-wide announcements admins broadcast to all users (#353) —
-// maintenance windows, new features, policy changes. `active` is an
-// explicit admin-controlled switch independent of `expiresAt`, so an
-// announcement can be taken down early without waiting for its expiry.
-export const announcements = pgTable(
-  "announcements",
+export const courseReports = pgTable(
+  "course_reports",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    title: varchar("title", { length: 255 }).notNull(),
-    message: text("message").notNull(),
-    priority: varchar("priority", { length: 20 }).notNull().default("normal"),
-    active: boolean("active").notNull().default(true),
+    courseId: uuid("course_id")
+      .notNull()
+      .references(() => courses.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    reason: varchar("reason", { length: 20 }).notNull(),
+    description: text("description"),
+    status: varchar("status", { length: 20 }).notNull().default("pending"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
-    expiresAt: timestamp("expires_at", { withTimezone: true }),
   },
   (table) => [
-    // Matches the public listing's access pattern (WHERE active = true AND
-    // (expires_at IS NULL OR expires_at > now()) ORDER BY created_at DESC).
-    index("idx_announcements_active_created").on(
-      table.active,
-      sql`${table.createdAt} DESC`,
+    uniqueIndex("idx_course_reports_user_course").on(
+      table.userId,
+      table.courseId
     ),
+    index("idx_course_reports_course_id").on(table.courseId),
+    index("idx_course_reports_status").on(table.status),
+    check(
+      "chk_course_reports_reason",
+      sql`${table.reason} IN ('inappropriate', 'outdated', 'error', 'other')`
+    ),
+    check(
+      "chk_course_reports_status",
+      sql`${table.status} IN ('pending', 'reviewed', 'dismissed')`
+    ),
+  ]
+);
+
+// ─── Sessions ───────────────────────────────────────────────────────────────
+
+export const sessions = pgTable(
+  "sessions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    // The JWT's `jti` claim. Unique so authGuard can upsert the same row on
+    // every request from the same token instead of inserting a new one.
+    tokenId: varchar("token_id", { length: 64 }).notNull(),
+    deviceInfo: text("device_info"),
+    ipAddress: varchar("ip_address", { length: 45 }),
+    lastActive: timestamp("last_active", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    // Set by SessionService.revokeSession. The session's jti is also added
+    // to the JWT denylist at the same time, so a revoked session's token
+    // stops working immediately rather than only once this row is checked.
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_sessions_token_id").on(table.tokenId),
+    index("idx_sessions_user_revoked").on(table.userId, table.revokedAt),
   ]
 );
 

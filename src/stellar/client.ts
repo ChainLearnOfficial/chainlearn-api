@@ -161,6 +161,61 @@ export class StellarClient {
     }
   }
 
+  /**
+   * Look up a submitted transaction on Horizon and report its on-chain
+   * verification status. Used by GET /api/v1/rewards/transactions so users
+   * can verify their reward transactions rather than trusting the stored
+   * tx hash alone.
+   *
+   * Ledger lookup (for confirmation count) is best-effort — if it fails the
+   * transaction's own confirmed/failed status is still returned with
+   * confirmations left null, rather than failing the whole verification.
+   */
+  async getHorizonTransaction(txHash: string): Promise<{
+    status: "confirmed" | "pending" | "failed";
+    ledger: number | null;
+    confirmations: number | null;
+  }> {
+    logger.debug({ requestId: getRequestId(), txHash }, "Verifying Stellar transaction on Horizon");
+    let tx: StellarSdk.Horizon.ServerApi.TransactionRecord;
+    try {
+      tx = await circuitBreakerExecute(
+        () =>
+          stellarRetry.execute(() =>
+            withTimeout(this.horizon.transactions().transaction(txHash).call(), READ_TIMEOUT_MS)
+          ),
+        "read"
+      );
+    } catch (err: any) {
+      const status = err?.response?.status ?? err?.status;
+      if (status === 404) {
+        return { status: "pending", ledger: null, confirmations: null };
+      }
+      logger.warn({ err, txHash }, "Horizon transaction lookup failed — reporting pending");
+      return { status: "pending", ledger: null, confirmations: null };
+    }
+
+    if (!tx.successful) {
+      return { status: "failed", ledger: tx.ledger, confirmations: null };
+    }
+
+    let confirmations: number | null = null;
+    try {
+      const latestLedgers = await withTimeout(
+        this.horizon.ledgers().order("desc").limit(1).call(),
+        READ_TIMEOUT_MS
+      );
+      const latestSequence = latestLedgers.records[0]?.sequence;
+      if (typeof latestSequence === "number") {
+        confirmations = Math.max(latestSequence - tx.ledger + 1, 0);
+      }
+    } catch (err) {
+      logger.warn({ err, txHash }, "Failed to fetch latest ledger for confirmation count");
+    }
+
+    return { status: "confirmed", ledger: tx.ledger, confirmations };
+  }
+
   /** Check Soroban RPC health by calling getLatestLedger. */
   async checkSorobanHealth(): Promise<void> {
     try {

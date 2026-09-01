@@ -277,6 +277,21 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
     (request, reply) => adminCourseController.removeModule(request, reply)
   );
 
+  app.get<{ Params: { id: string } }>(
+    "/:id/analytics",
+    {
+      preHandler: [validate({ params: courseIdParamsSchema })],
+      schema: {
+        description:
+          "Detailed course analytics: enrollment trends (daily/weekly), completion rate, average time-to-complete, average quiz score, and modules with the lowest average score (admin only, cached 1 hour)",
+        tags: ["admin", "courses"],
+        security: [{ bearerAuth: [] }],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      } as FastifySchema,
+    },
+    (request, reply) => adminCourseController.analytics(request, reply)
+  );
+
   app.get<{
     Params: { id: string };
     Querystring: import("./course.types.js").ListEnrolledUsersQuery;

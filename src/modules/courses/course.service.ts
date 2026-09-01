@@ -7,6 +7,8 @@ import {
   quizzes,
   quizSubmissions,
   users,
+  courseReports,
+  notifications,
   type CourseModuleDefinition,
 } from "../../database/schema.js";
 import { config } from "../../config/index.js";
@@ -14,6 +16,7 @@ import { NotFoundError, ConflictError, ForbiddenError } from "../../utils/errors
 import { withLock } from "../../utils/lock.js";
 import { logger } from "../../utils/logger.js";
 import { getOnChainContentHash } from "../../stellar/progress-tracker.js";
+import { PASSING_PERCENTAGE } from "../quizzes/quiz.types.js";
 import { auditLog } from "../../audit/index.js";
 import { dispatchWebhook } from "../../services/webhook-dispatcher.js";
 import { waitlistService } from "./waitlist.service.js";
@@ -49,6 +52,11 @@ import type {
   ImportCourseResult,
   ListEnrolledUsersQuery,
   EnrolledUsersResult,
+  ReportCourseBody,
+  CourseReportResult,
+  CourseAnalytics,
+  EnrollmentTrendPoint,
+  ModuleDifficulty,
 } from "./course.types.js";
 
 const POPULAR_COURSES_TTL_SECONDS = 300;
@@ -1794,6 +1802,222 @@ export class CourseService {
     await this.invalidateCourseCaches(courseId);
     await auditLog("course.module.deleted", { courseId, moduleId });
     logger.info({ courseId, moduleId }, "Course module deleted");
+  }
+
+  /**
+   * Detailed analytics for a course creator: enrollment trends, completion
+   * rate, average quiz score, average time-to-complete, and which modules
+   * learners struggle with most (lowest average quiz score). Cached for 1
+   * hour — this aggregates across every enrollment/submission for the
+   * course, too expensive to recompute on every dashboard load.
+   */
+  async getCourseAnalytics(courseId: string): Promise<CourseAnalytics> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    const namespace = "courses";
+    const cacheKeyString = cacheKey(namespace, "analytics", courseId);
+    const cached = await cacheGet<CourseAnalytics>(namespace, cacheKeyString);
+    if (cached) return cached;
+
+    const [dailyRows, weeklyRows, [totals], moduleRows] = await Promise.all([
+      db
+        .select({
+          date: sql<string>`date_trunc('day', ${enrollments.enrolledAt})::date`,
+          count: count(),
+        })
+        .from(enrollments)
+        .where(
+          and(
+            eq(enrollments.courseId, courseId),
+            sql`${enrollments.enrolledAt} >= now() - interval '30 days'`,
+          ),
+        )
+        .groupBy(sql`date_trunc('day', ${enrollments.enrolledAt})`)
+        .orderBy(sql`date_trunc('day', ${enrollments.enrolledAt})`),
+
+      db
+        .select({
+          date: sql<string>`date_trunc('week', ${enrollments.enrolledAt})::date`,
+          count: count(),
+        })
+        .from(enrollments)
+        .where(
+          and(
+            eq(enrollments.courseId, courseId),
+            sql`${enrollments.enrolledAt} >= now() - interval '12 weeks'`,
+          ),
+        )
+        .groupBy(sql`date_trunc('week', ${enrollments.enrolledAt})`)
+        .orderBy(sql`date_trunc('week', ${enrollments.enrolledAt})`),
+
+      db
+        .select({
+          totalEnrollments: count(),
+          completed: sql<number>`COUNT(*) FILTER (WHERE ${enrollments.completedAt} IS NOT NULL)`.mapWith(Number),
+          avgCompletionHours: sql<string | null>`AVG(EXTRACT(EPOCH FROM (${enrollments.completedAt} - ${enrollments.enrolledAt})) / 3600.0) FILTER (WHERE ${enrollments.completedAt} IS NOT NULL)`,
+          avgQuizScorePercent: sql<string | null>`(
+            SELECT AVG(${quizSubmissions.score}::numeric / NULLIF(jsonb_array_length(${quizzes.questions}), 0) * 100)
+            FROM ${quizSubmissions}
+            INNER JOIN ${quizzes} ON ${quizzes.id} = ${quizSubmissions.quizId}
+            WHERE ${quizzes.courseId} = ${courseId} AND ${quizSubmissions.superseded} = false
+          )`,
+        })
+        .from(enrollments)
+        .where(eq(enrollments.courseId, courseId)),
+
+      db
+        .select({
+          moduleId: quizzes.moduleId,
+          averageScorePercent: sql<string | null>`AVG(${quizSubmissions.score}::numeric / NULLIF(jsonb_array_length(${quizzes.questions}), 0) * 100)`,
+          submissionCount: count(),
+        })
+        .from(quizSubmissions)
+        .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+        .where(
+          and(eq(quizzes.courseId, courseId), eq(quizSubmissions.superseded, false)),
+        )
+        .groupBy(quizzes.moduleId),
+    ]);
+
+    const moduleDefinitions = (course.modules ?? []) as CourseModuleDefinition[];
+    const moduleTitleById = new Map(moduleDefinitions.map((m) => [m.id, m.title]));
+
+    const moduleDifficulty: ModuleDifficulty[] = moduleRows
+      .map((row) => {
+        const averageScore =
+          row.averageScorePercent !== null ? Math.round(Number(row.averageScorePercent)) : null;
+        return {
+          moduleId: row.moduleId,
+          title: moduleTitleById.get(row.moduleId) ?? null,
+          averageScore,
+          submissionCount: row.submissionCount,
+          difficult: averageScore !== null && averageScore < PASSING_PERCENTAGE,
+        };
+      })
+      .sort((a, b) => (a.averageScore ?? 0) - (b.averageScore ?? 0));
+
+    const toTrend = (rows: { date: string; count: number }[]): EnrollmentTrendPoint[] =>
+      rows.map((row) => ({ date: row.date, count: row.count }));
+
+    const totalEnrollments = totals?.totalEnrollments ?? 0;
+    const completed = totals?.completed ?? 0;
+
+    const analytics: CourseAnalytics = {
+      courseId,
+      totalEnrollments,
+      completionRate:
+        totalEnrollments > 0 ? Math.round((completed / totalEnrollments) * 100) : 0,
+      averageTimeToCompleteHours:
+        totals?.avgCompletionHours !== null && totals?.avgCompletionHours !== undefined
+          ? Math.round(Number(totals.avgCompletionHours) * 10) / 10
+          : null,
+      averageQuizScore:
+        totals?.avgQuizScorePercent !== null && totals?.avgQuizScorePercent !== undefined
+          ? Math.round(Number(totals.avgQuizScorePercent))
+          : null,
+      enrollmentTrends: {
+        daily: toTrend(dailyRows),
+        weekly: toTrend(weeklyRows),
+      },
+      moduleDifficulty,
+      generatedAt: new Date(),
+    };
+
+    await cacheSet(cacheKeyString, analytics, 3600);
+
+    return analytics;
+  }
+
+  /**
+   * Report a course for inappropriate content, errors, or other issues.
+   * One report per user per course — a repeat report from the same user
+   * for the same course is rejected rather than silently upserted, so the
+   * report count admins see stays a genuine distinct-reporter count.
+   */
+  async reportCourse(
+    userId: string,
+    courseId: string,
+    body: ReportCourseBody,
+  ): Promise<CourseReportResult> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    const existing = await db.query.courseReports.findFirst({
+      where: and(
+        eq(courseReports.courseId, courseId),
+        eq(courseReports.userId, userId),
+      ),
+    });
+    if (existing) {
+      throw new ConflictError("You have already reported this course");
+    }
+
+    const [report] = await db
+      .insert(courseReports)
+      .values({
+        courseId,
+        userId,
+        reason: body.reason,
+        description: body.description,
+      })
+      .returning();
+
+    await this.notifyAdminsOfReport(course.title, courseId, report.id, body.reason);
+
+    await auditLog("course.reported", {
+      courseId,
+      userId,
+      reportId: report.id,
+      reason: body.reason,
+    });
+    logger.info({ courseId, userId, reportId: report.id }, "Course reported");
+
+    return {
+      id: report.id,
+      courseId: report.courseId,
+      reason: report.reason,
+      status: report.status,
+      createdAt: report.createdAt,
+    };
+  }
+
+  /**
+   * Notifies every admin (in-app, via the notifications table) that a new
+   * course report came in. Best-effort — a notification-insert failure
+   * must not fail the report submission itself.
+   */
+  private async notifyAdminsOfReport(
+    courseTitle: string,
+    courseId: string,
+    reportId: string,
+    reason: string,
+  ): Promise<void> {
+    try {
+      const admins = await db.query.users.findMany({
+        where: eq(users.isAdmin, true),
+      });
+      if (admins.length === 0) return;
+
+      await db.insert(notifications).values(
+        admins.map((admin) => ({
+          userId: admin.id,
+          type: "course_report",
+          title: "New course report",
+          message: `"${courseTitle}" was reported for ${reason} (report ${reportId}).`,
+        })),
+      );
+    } catch (err) {
+      logger.warn({ err, courseId, reportId }, "Failed to notify admins of course report");
+    }
   }
 }
 

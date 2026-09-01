@@ -34,7 +34,7 @@ type AuditEvent =
   | "course.module.deleted"
   | "announcement.created"
   | "announcement.updated"
-  | "announcement.deleted";
+  | "announcement.deleted"
   | "webhook.created"
   | "webhook.updated"
   | "webhook.deleted"

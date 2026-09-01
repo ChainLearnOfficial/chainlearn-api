@@ -1510,8 +1510,6 @@ export class CourseService {
       ? { ...data, prerequisites: data.prerequisites.filter((id) => id !== courseId) }
       : data;
 
-    const [updated] = await db
-  ): Promise<AdminCourse> {
     const [course] = await db
       .update(courses)
       .set(sanitized)

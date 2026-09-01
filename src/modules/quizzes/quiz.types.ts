@@ -67,6 +67,18 @@ export const quizStatsQuerySchema = z.object({
   courseId: z.string().uuid("Invalid course ID").optional(),
 });
 
+export const QUIZ_FEEDBACK_TYPES = ["unclear", "wrong", "other"] as const;
+
+export const submitQuizFeedbackSchema = z.object({
+  questionId: z.string().min(1).max(100),
+  type: z.enum(QUIZ_FEEDBACK_TYPES),
+  comment: z.string().max(2000).optional(),
+});
+
+export const quizFeedbackSummaryQuerySchema = z.object({
+  questionId: z.string().min(1).max(100).optional(),
+});
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 export type GenerateQuizBody = z.infer<typeof generateQuizSchema>;
@@ -74,6 +86,8 @@ export type GenerateQuizBatchBody = z.infer<typeof generateQuizBatchSchema>;
 export type SubmitQuizBody = z.infer<typeof submitQuizSchema>;
 export type QuizIdParams = z.infer<typeof quizIdParamsSchema>;
 export type QuizStatsQuery = z.infer<typeof quizStatsQuerySchema>;
+export type SubmitQuizFeedbackBody = z.infer<typeof submitQuizFeedbackSchema>;
+export type QuizFeedbackSummaryQuery = z.infer<typeof quizFeedbackSummaryQuerySchema>;
 
 export interface QuizQuestion {
   id: string;
@@ -114,4 +128,20 @@ export interface QuizStats {
   passRate: number;
   totalSubmissions: number;
   submissionsPerCourse: Record<string, number>;
+}
+
+export interface QuizFeedbackEntry {
+  id: string;
+  questionId: string;
+  userId: string;
+  type: (typeof QUIZ_FEEDBACK_TYPES)[number];
+  comment: string | null;
+  createdAt: Date;
+}
+
+/** Per-question feedback counts, for admins reviewing which questions need work. */
+export interface QuizFeedbackSummaryEntry {
+  questionId: string;
+  total: number;
+  counts: Record<(typeof QUIZ_FEEDBACK_TYPES)[number], number>;
 }

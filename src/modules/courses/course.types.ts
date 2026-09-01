@@ -139,6 +139,7 @@ export const listReviewsQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(50).default(20),
 });
 
+// ─── Enrolled Users (admin, #355) ───────────────────────────────────────────
 // ─── Admin: Enrolled Users Request Schema (#340) ────────────────────────────
 
 export const listEnrolledUsersQuerySchema = z.object({
@@ -183,6 +184,7 @@ export type ListReviewsQuery = z.infer<typeof listReviewsQuerySchema>;
 export type ListEnrolledUsersQuery = z.infer<typeof listEnrolledUsersQuerySchema>;
 export type CreateReviewBody = z.infer<typeof createReviewSchema>;
 export type ReportCourseBody = z.infer<typeof reportCourseSchema>;
+export type ListEnrolledUsersQuery = z.infer<typeof listEnrolledUsersQuerySchema>;
 
 export interface CourseSummary {
   id: string;
@@ -282,6 +284,7 @@ export interface CourseReviewsResult {
   totalReviews: number;
 }
 
+export interface EnrolledUserEntry {
 // #340: one row per user enrolled in a course, with their quiz-progress
 // summary for that course. quizCount/averageScore are scoped to quizzes
 // belonging to this course (via quizzes.courseId), non-superseded
@@ -306,6 +309,7 @@ export interface EnrolledUserSummary {
 }
 
 export interface EnrolledUsersResult {
+  users: EnrolledUserEntry[];
   users: EnrolledUserSummary[];
   total: number;
 }

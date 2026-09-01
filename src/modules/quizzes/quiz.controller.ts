@@ -7,6 +7,8 @@ import type {
   SubmitQuizBody,
   QuizIdParams,
   QuizStatsQuery,
+  SubmitQuizFeedbackBody,
+  QuizFeedbackSummaryQuery,
 } from "./quiz.types.js";
 
 export class QuizController {
@@ -84,6 +86,37 @@ export class QuizController {
     const stats = await quizService.getQuizStats(courseId);
 
     reply.send({ success: true, data: stats });
+  }
+
+  /**
+   * POST /api/v1/quizzes/:id/feedback
+   * Submit feedback on a specific quiz question.
+   */
+  async submitFeedback(
+    request: FastifyRequest<{ Params: QuizIdParams; Body: SubmitQuizFeedbackBody }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { authUser } = request as AuthenticatedRequest;
+    const { id } = request.params;
+    const data = request.body;
+    const feedback = await quizService.submitFeedback(authUser.id, id, data);
+
+    reply.status(201).send({ success: true, data: feedback });
+  }
+
+  /**
+   * GET /api/v1/quizzes/:id/feedback/summary
+   * Per-question feedback counts for a quiz (admin only).
+   */
+  async feedbackSummary(
+    request: FastifyRequest<{ Params: QuizIdParams; Querystring: QuizFeedbackSummaryQuery }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id } = request.params;
+    const { questionId } = request.query;
+    const summary = await quizService.getFeedbackSummary(id, questionId);
+
+    reply.send({ success: true, data: summary });
   }
 }
 

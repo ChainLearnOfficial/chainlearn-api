@@ -211,6 +211,44 @@ export const quizSubmissions = pgTable(
   ]
 );
 
+// ─── Quiz Feedback ──────────────────────────────────────────────────────────
+
+export const quizFeedback = pgTable(
+  "quiz_feedback",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    quizId: uuid("quiz_id")
+      .notNull()
+      .references(() => quizzes.id, { onDelete: "cascade" }),
+    questionId: varchar("question_id", { length: 100 }).notNull(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    type: varchar("type", { length: 20 }).notNull(),
+    comment: text("comment"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    // One feedback submission per (quiz, question, user) — a second
+    // submission is rejected rather than silently overwriting the first.
+    uniqueIndex("idx_quiz_feedback_unique").on(
+      table.quizId,
+      table.questionId,
+      table.userId
+    ),
+    index("idx_quiz_feedback_quiz_question").on(
+      table.quizId,
+      table.questionId
+    ),
+    check(
+      "chk_quiz_feedback_type",
+      sql`type IN ('unclear', 'wrong', 'other')`
+    ),
+  ]
+);
+
 // ─── Credentials (NFT Certificates) ────────────────────────────────────────
 
 export const credentials = pgTable(

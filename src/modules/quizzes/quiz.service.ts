@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { eq, and } from "drizzle-orm";
 import { db } from "../../config/database.js";
-import { quizzes, quizSubmissions, enrollments } from "../../database/schema.js";
+import { quizzes, quizSubmissions, quizFeedback, enrollments } from "../../database/schema.js";
 import {
   NotFoundError,
   ForbiddenError,
@@ -22,8 +22,6 @@ import {
   cacheSet,
   cacheDel,
   cacheKey,
-  cacheGet,
-  cacheSet,
   cacheKeyPattern,
   cacheInvalidatePattern,
 } from "../../cache/index.js";
@@ -39,6 +37,9 @@ import {
   type QuizSubmissionResult,
   type QuizQuestion,
   type QuizStats,
+  type SubmitQuizFeedbackBody,
+  type QuizFeedbackEntry,
+  type QuizFeedbackSummaryEntry,
 } from "./quiz.types.js";
 
 const QUIZ_STATS_TTL_SECONDS = 300;
@@ -731,6 +732,117 @@ export class QuizService {
     await cacheSet(cacheKeyString, stats, QUIZ_STATS_TTL_SECONDS);
 
     return stats;
+  }
+
+  /**
+   * Submit feedback on a specific quiz question (#331): "this question is
+   * unclear", "wrong answer marked as correct", or something else.
+   *
+   * One submission per (quiz, question, user) — a second attempt is
+   * rejected with a ConflictError rather than overwriting the first, so a
+   * question's feedback count reflects distinct reporters.
+   */
+  async submitFeedback(
+    userId: string,
+    quizId: string,
+    data: SubmitQuizFeedbackBody,
+  ): Promise<QuizFeedbackEntry> {
+    const quiz = await db.query.quizzes.findFirst({
+      where: eq(quizzes.id, quizId),
+    });
+    if (!quiz) {
+      throw new NotFoundError("Quiz");
+    }
+
+    const questions = (quiz.questions ?? []) as StoredQuestion[];
+    if (!questions.some((q) => q.id === data.questionId)) {
+      throw new NotFoundError("Question");
+    }
+
+    const existing = await db.query.quizFeedback.findFirst({
+      where: and(
+        eq(quizFeedback.quizId, quizId),
+        eq(quizFeedback.questionId, data.questionId),
+        eq(quizFeedback.userId, userId),
+      ),
+    });
+    if (existing) {
+      throw new ConflictError("Feedback already submitted for this question");
+    }
+
+    try {
+      const [row] = await db
+        .insert(quizFeedback)
+        .values({
+          quizId,
+          questionId: data.questionId,
+          userId,
+          type: data.type,
+          comment: data.comment ?? null,
+        })
+        .returning();
+
+      await auditLog("quiz.feedback.submitted", {
+        userId,
+        courseId: quiz.courseId,
+      });
+
+      return row as QuizFeedbackEntry;
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      // 23505 = unique_violation — a concurrent submission for the same
+      // (quiz, question, user) beat this one to the pre-check above.
+      if (code === "23505") {
+        throw new ConflictError("Feedback already submitted for this question");
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Per-question feedback counts for a quiz, for admins reviewing which
+   * questions need work (#331).
+   */
+  async getFeedbackSummary(
+    quizId: string,
+    questionId?: string,
+  ): Promise<QuizFeedbackSummaryEntry[]> {
+    const quiz = await db.query.quizzes.findFirst({
+      where: eq(quizzes.id, quizId),
+    });
+    if (!quiz) {
+      throw new NotFoundError("Quiz");
+    }
+
+    const conditions = [eq(quizFeedback.quizId, quizId)];
+    if (questionId) {
+      conditions.push(eq(quizFeedback.questionId, questionId));
+    }
+
+    const rows = await db
+      .select({
+        questionId: quizFeedback.questionId,
+        type: quizFeedback.type,
+      })
+      .from(quizFeedback)
+      .where(and(...conditions));
+
+    const byQuestion = new Map<string, QuizFeedbackSummaryEntry>();
+    for (const row of rows) {
+      let entry = byQuestion.get(row.questionId);
+      if (!entry) {
+        entry = {
+          questionId: row.questionId,
+          total: 0,
+          counts: { unclear: 0, wrong: 0, other: 0 },
+        };
+        byQuestion.set(row.questionId, entry);
+      }
+      entry.total++;
+      entry.counts[row.type as QuizFeedbackEntry["type"]]++;
+    }
+
+    return Array.from(byQuestion.values());
   }
 
   private createPlaceholderQuestions(

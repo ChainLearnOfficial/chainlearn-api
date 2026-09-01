@@ -107,6 +107,17 @@ export const listEnrolledUsersQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(50).default(20),
 });
 
+// ─── Report Request Schema ───────────────────────────────────────────────────
+
+export const reportCourseSchema = z.object({
+  reason: z.enum(["inappropriate", "outdated", "error", "other"]),
+  description: z
+    .string()
+    .max(2000)
+    .optional()
+    .transform((v) => (v ? sanitizeText(v) : v)),
+});
+
 export const createReviewSchema = z.object({
   rating: z.coerce.number().int().min(1).max(5),
   reviewText: z
@@ -132,6 +143,7 @@ export type ModuleParams = z.infer<typeof moduleParamsSchema>;
 export type ListReviewsQuery = z.infer<typeof listReviewsQuerySchema>;
 export type ListEnrolledUsersQuery = z.infer<typeof listEnrolledUsersQuerySchema>;
 export type CreateReviewBody = z.infer<typeof createReviewSchema>;
+export type ReportCourseBody = z.infer<typeof reportCourseSchema>;
 
 export interface CourseSummary {
   id: string;
@@ -288,3 +300,12 @@ export interface AdminCourseWithAccessibility extends AdminCourse {
 }
 
 export type CourseModuleMetadata = z.infer<typeof courseModuleSchema>;
+
+/** Response of POST /api/v1/courses/:id/report. */
+export interface CourseReportResult {
+  id: string;
+  courseId: string;
+  reason: string;
+  status: string;
+  createdAt: Date;
+}

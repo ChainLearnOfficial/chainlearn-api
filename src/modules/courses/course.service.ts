@@ -7,6 +7,8 @@ import {
   quizzes,
   quizSubmissions,
   users,
+  courseReports,
+  notifications,
   type CourseModuleDefinition,
 } from "../../database/schema.js";
 import { config } from "../../config/index.js";
@@ -45,6 +47,8 @@ import type {
   CourseReviewsResult,
   ListEnrolledUsersQuery,
   EnrolledUsersResult,
+  ReportCourseBody,
+  CourseReportResult,
 } from "./course.types.js";
 
 const POPULAR_COURSES_TTL_SECONDS = 300;
@@ -1589,6 +1593,93 @@ export class CourseService {
     await this.invalidateCourseCaches(courseId);
     await auditLog("course.module.deleted", { courseId, moduleId });
     logger.info({ courseId, moduleId }, "Course module deleted");
+  }
+
+  /**
+   * Report a course for inappropriate content, errors, or other issues.
+   * One report per user per course — a repeat report from the same user
+   * for the same course is rejected rather than silently upserted, so the
+   * report count admins see stays a genuine distinct-reporter count.
+   */
+  async reportCourse(
+    userId: string,
+    courseId: string,
+    body: ReportCourseBody,
+  ): Promise<CourseReportResult> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    const existing = await db.query.courseReports.findFirst({
+      where: and(
+        eq(courseReports.courseId, courseId),
+        eq(courseReports.userId, userId),
+      ),
+    });
+    if (existing) {
+      throw new ConflictError("You have already reported this course");
+    }
+
+    const [report] = await db
+      .insert(courseReports)
+      .values({
+        courseId,
+        userId,
+        reason: body.reason,
+        description: body.description,
+      })
+      .returning();
+
+    await this.notifyAdminsOfReport(course.title, courseId, report.id, body.reason);
+
+    await auditLog("course.reported", {
+      courseId,
+      userId,
+      reportId: report.id,
+      reason: body.reason,
+    });
+    logger.info({ courseId, userId, reportId: report.id }, "Course reported");
+
+    return {
+      id: report.id,
+      courseId: report.courseId,
+      reason: report.reason,
+      status: report.status,
+      createdAt: report.createdAt,
+    };
+  }
+
+  /**
+   * Notifies every admin (in-app, via the notifications table) that a new
+   * course report came in. Best-effort — a notification-insert failure
+   * must not fail the report submission itself.
+   */
+  private async notifyAdminsOfReport(
+    courseTitle: string,
+    courseId: string,
+    reportId: string,
+    reason: string,
+  ): Promise<void> {
+    try {
+      const admins = await db.query.users.findMany({
+        where: eq(users.isAdmin, true),
+      });
+      if (admins.length === 0) return;
+
+      await db.insert(notifications).values(
+        admins.map((admin) => ({
+          userId: admin.id,
+          type: "course_report",
+          title: "New course report",
+          message: `"${courseTitle}" was reported for ${reason} (report ${reportId}).`,
+        })),
+      );
+    } catch (err) {
+      logger.warn({ err, courseId, reportId }, "Failed to notify admins of course report");
+    }
   }
 }
 

@@ -5,6 +5,7 @@ import type {
   ListCoursesQuery,
   CourseIdParams,
   PopularCoursesQuery,
+  ReportCourseBody,
 } from "./course.types.js";
 
 export class CourseController {
@@ -145,6 +146,21 @@ export class CourseController {
     const modules = await courseService.getCourseModules(authUser.id, id);
 
     reply.send({ success: true, data: modules });
+  }
+
+  /**
+   * POST /api/v1/courses/:id/report
+   * Report a course for inappropriate content, errors, or other issues.
+   */
+  async report(
+    request: FastifyRequest<{ Params: CourseIdParams; Body: ReportCourseBody }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id } = request.params;
+    const { authUser } = request as AuthenticatedRequest;
+    const report = await courseService.reportCourse(authUser.id, id, request.body);
+
+    reply.status(201).send({ success: true, data: report });
   }
 
   /**

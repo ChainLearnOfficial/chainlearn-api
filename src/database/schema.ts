@@ -326,6 +326,74 @@ export const webhookAttempts = pgTable(
   ]
 );
 
+// ─── Course Reports ─────────────────────────────────────────────────────────
+
+export const courseReports = pgTable(
+  "course_reports",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    courseId: uuid("course_id")
+      .notNull()
+      .references(() => courses.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    reason: varchar("reason", { length: 20 }).notNull(),
+    description: text("description"),
+    status: varchar("status", { length: 20 }).notNull().default("pending"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_course_reports_user_course").on(
+      table.userId,
+      table.courseId
+    ),
+    index("idx_course_reports_course_id").on(table.courseId),
+    index("idx_course_reports_status").on(table.status),
+    check(
+      "chk_course_reports_reason",
+      sql`${table.reason} IN ('inappropriate', 'outdated', 'error', 'other')`
+    ),
+    check(
+      "chk_course_reports_status",
+      sql`${table.status} IN ('pending', 'reviewed', 'dismissed')`
+    ),
+  ]
+);
+
+// ─── Sessions ───────────────────────────────────────────────────────────────
+
+export const sessions = pgTable(
+  "sessions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    // The JWT's `jti` claim. Unique so authGuard can upsert the same row on
+    // every request from the same token instead of inserting a new one.
+    tokenId: varchar("token_id", { length: 64 }).notNull(),
+    deviceInfo: text("device_info"),
+    ipAddress: varchar("ip_address", { length: 45 }),
+    lastActive: timestamp("last_active", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    // Set by SessionService.revokeSession. The session's jti is also added
+    // to the JWT denylist at the same time, so a revoked session's token
+    // stops working immediately rather than only once this row is checked.
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_sessions_token_id").on(table.tokenId),
+    index("idx_sessions_user_revoked").on(table.userId, table.revokedAt),
+  ]
+);
+
 // ─── Audit Logs ─────────────────────────────────────────────────────────────
 export const auditLogs = pgTable(
   "audit_logs",

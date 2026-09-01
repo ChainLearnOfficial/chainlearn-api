@@ -46,6 +46,10 @@ import type {
   CreateReviewBody,
   CourseReview,
   CourseReviewsResult,
+  CoursePrerequisiteEntry,
+  CoursePrerequisitesResult,
+  ImportCourseBody,
+  ImportCourseResult,
   ListEnrolledUsersQuery,
   EnrolledUsersResult,
   ReportCourseBody,
@@ -320,6 +324,73 @@ export class CourseService {
     return {
       ...cachedDetail,
       isEnrolled,
+    };
+  }
+
+  /**
+   * The prerequisite courses configured for `courseId`, each annotated with
+   * whether `userId` has completed it (#354). Purely advisory — never
+   * enforced at enroll() time, just surfaced here so a client can warn the
+   * user before they start a course they may not be ready for.
+   */
+  async getCoursePrerequisites(
+    courseId: string,
+    userId: string | null,
+  ): Promise<CoursePrerequisitesResult> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+
+    if (!course || !course.isActive) {
+      throw new NotFoundError("Course");
+    }
+
+    const prerequisiteIds = course.prerequisites ?? [];
+    if (prerequisiteIds.length === 0) {
+      return { prerequisites: [], met: true };
+    }
+
+    const prereqCourses = await db
+      .select({
+        id: courses.id,
+        title: courses.title,
+        difficulty: courses.difficulty,
+      })
+      .from(courses)
+      .where(inArray(courses.id, prerequisiteIds));
+
+    let completedIds = new Set<string>();
+    if (userId) {
+      const completedRows = await db
+        .select({ courseId: enrollments.courseId })
+        .from(enrollments)
+        .where(
+          and(
+            eq(enrollments.userId, userId),
+            inArray(enrollments.courseId, prerequisiteIds),
+            sql`${enrollments.completedAt} IS NOT NULL`,
+          ),
+        );
+      completedIds = new Set(completedRows.map((r) => r.courseId));
+    }
+
+    // Preserve the configured order rather than the DB's arbitrary IN()
+    // ordering, and keep prerequisite IDs that reference a
+    // deleted/deactivated course out of the response entirely.
+    const byId = new Map(prereqCourses.map((c) => [c.id, c]));
+    const prerequisites: CoursePrerequisiteEntry[] = prerequisiteIds
+      .map((id) => byId.get(id))
+      .filter((c): c is (typeof prereqCourses)[number] => !!c)
+      .map((c) => ({
+        id: c.id,
+        title: c.title,
+        difficulty: c.difficulty,
+        completed: completedIds.has(c.id),
+      }));
+
+    return {
+      prerequisites,
+      met: prerequisites.every((p) => p.completed),
     };
   }
 
@@ -1383,6 +1454,8 @@ export class CourseService {
       contentHash: row.contentHash,
       isActive: row.isActive,
       modules: (row.modules ?? []) as CourseModuleDefinition[],
+      accessibilityScore: row.accessibilityScore,
+      prerequisites: row.prerequisites ?? [],
       accessibilityScore: null,
       createdAt: row.createdAt,
     };
@@ -1398,6 +1471,8 @@ export class CourseService {
         tags: data.tags,
         courseModules: data.courseModules,
         contentHash: data.contentHash,
+        accessibilityScore: accessibility.score,
+        prerequisites: data.prerequisites ?? [],
       })
       .returning();
 
@@ -1408,13 +1483,46 @@ export class CourseService {
     return this.toAdminCourse(course);
   }
 
+  /**
+   * Bulk course creation from an uploaded JSON file (#366). Creates the
+   * course exactly as createCourse() does, then creates each entry in
+   * `modules` as a real course module (via createModule(), so each gets a
+   * generated ID and the same validation/locking/cache-invalidation/audit
+   * behavior a manually-created module would).
+   */
+  async importCourse(data: ImportCourseBody): Promise<ImportCourseResult> {
+    const course = await this.createCourse(data);
+
+    for (const module of data.modules) {
+      await this.createModule(course.id, module);
+    }
+
+    await auditLog("course.imported", {
+      courseId: course.id,
+      moduleCount: data.modules.length,
+    });
+    logger.info(
+      { courseId: course.id, moduleCount: data.modules.length },
+      "Course imported from JSON",
+    );
+
+    return { courseId: course.id, modulesCreated: data.modules.length };
+  }
+
   async updateCourse(
     courseId: string,
     data: UpdateCourseBody,
+  ): Promise<AdminCourseWithAccessibility> {
+    // A course can't be its own prerequisite.
+    const sanitized = data.prerequisites
+      ? { ...data, prerequisites: data.prerequisites.filter((id) => id !== courseId) }
+      : data;
+
+    const [updated] = await db
   ): Promise<AdminCourse> {
     const [course] = await db
       .update(courses)
-      .set(data)
+      .set(sanitized)
       .where(eq(courses.id, courseId))
       .returning();
 

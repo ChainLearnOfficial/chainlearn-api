@@ -84,6 +84,17 @@ export const courses = pgTable(
       .notNull()
       .default([]),
     isActive: boolean("is_active").notNull().default(true),
+    // 0–100 accessibility score for the course's authored content (#326),
+    // recomputed on every create/update. Null until first written. Advisory
+    // only — a low score never blocks saving the course.
+    accessibilityScore: integer("accessibility_score"),
+    // Course IDs that should be completed before this one (#354). Purely
+    // advisory — CourseService.enroll() never enforces this, it's surfaced
+    // to the client as a warning via getCoursePrerequisites().
+    prerequisites: jsonb("prerequisites")
+      .$type<string[]>()
+      .notNull()
+      .default([]),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

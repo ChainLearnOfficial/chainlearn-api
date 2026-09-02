@@ -303,6 +303,8 @@ export async function courseRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => courseController.enrolledUsers(request, reply)
+  );
+
   app.delete<{ Params: { id: string } }>(
     "/:id/enroll",
     {

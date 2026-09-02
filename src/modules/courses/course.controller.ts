@@ -11,7 +11,6 @@ import type {
   ListReviewsQuery,
   CreateReviewBody,
   ListEnrolledUsersQuery,
-  ReorderModulesBody,
 } from "./course.types.js";
 
 export class CourseController {

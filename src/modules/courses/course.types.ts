@@ -284,7 +284,6 @@ export interface CourseReviewsResult {
   totalReviews: number;
 }
 
-export interface EnrolledUserEntry {
 // #340: one row per user enrolled in a course, with their quiz-progress
 // summary for that course. quizCount/averageScore are scoped to quizzes
 // belonging to this course (via quizzes.courseId), non-superseded
@@ -309,7 +308,6 @@ export interface EnrolledUserSummary {
 }
 
 export interface EnrolledUsersResult {
-  users: EnrolledUserEntry[];
   users: EnrolledUserSummary[];
   total: number;
 }

@@ -2623,6 +2623,7 @@ export class CourseService {
 
       return reordered;
     });
+  }
 }
 
 export const courseService = new CourseService();

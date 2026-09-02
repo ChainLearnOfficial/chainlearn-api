@@ -11,6 +11,7 @@ import {
   moduleParamsSchema,
   listEnrolledUsersQuerySchema,
   enrollmentTrendsQuerySchema,
+  reorderModulesSchema,
 } from "./course.types.js";
 
 /** Admin-only course management (#292). Every route requires an admin user. */
@@ -276,6 +277,35 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => adminCourseController.removeModule(request, reply)
+  );
+
+  app.post<{ Params: { id: string }; Body: import("./course.types.js").ReorderModulesBody }>(
+    "/:id/modules/reorder",
+    {
+      preHandler: [
+        validate({ params: courseIdParamsSchema, body: reorderModulesSchema }),
+      ],
+      schema: {
+        description:
+          "Reorder course modules atomically — accepts an ordered array of module IDs (admin only, #374)",
+        tags: ["admin", "courses"],
+        security: [{ bearerAuth: [] }],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+        body: {
+          type: "object",
+          required: ["moduleIds"],
+          properties: {
+            moduleIds: {
+              type: "array",
+              items: { type: "string", minLength: 1, maxLength: 100 },
+              minItems: 1,
+              maxItems: 100,
+            },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => adminCourseController.reorderModules(request, reply)
   );
 
   app.get<{ Params: { id: string } }>(

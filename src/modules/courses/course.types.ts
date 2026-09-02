@@ -410,6 +410,26 @@ export interface CourseReportResult {
   createdAt: Date;
 }
 
+// ─── Enrollment Trends (#391) ───────────────────────────────────────────────
+
+export const enrollmentTrendsQuerySchema = z.object({
+  range: z.enum(["7d", "30d", "90d"]).default("30d"),
+  granularity: z.enum(["daily", "weekly", "monthly"]).default("daily"),
+});
+
+export type EnrollmentTrendsQuery = z.infer<typeof enrollmentTrendsQuerySchema>;
+
+export interface EnrollmentTrendDataPoint {
+  date: string;
+  count: number;
+}
+
+export interface EnrollmentTrendsResult {
+  courseId: string;
+  range: string;
+  granularity: string;
+  trends: EnrollmentTrendDataPoint[];
+  totalEnrollments: number;
 /** One module entry in the syllabus response. */
 export interface SyllabusModule {
   order: number;

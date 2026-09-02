@@ -10,6 +10,7 @@ import {
   updateModuleSchema,
   moduleParamsSchema,
   listEnrolledUsersQuerySchema,
+  enrollmentTrendsQuerySchema,
 } from "./course.types.js";
 
 /** Admin-only course management (#292). Every route requires an admin user. */
@@ -320,5 +321,35 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => adminCourseController.listEnrolledUsers(request, reply)
+  );
+
+  app.get<{
+    Params: { id: string };
+    Querystring: import("./course.types.js").EnrollmentTrendsQuery;
+  }>(
+    "/:id/enrollment-trends",
+    {
+      preHandler: [
+        validate({
+          params: courseIdParamsSchema,
+          querystring: enrollmentTrendsQuerySchema,
+        }),
+      ],
+      schema: {
+        description:
+          "Enrollment trends for a course over time with configurable range (7d/30d/90d) and granularity (daily/weekly/monthly) (admin only, cached 1 hour, #391)",
+        tags: ["admin", "courses"],
+        security: [{ bearerAuth: [] }],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+        querystring: {
+          type: "object",
+          properties: {
+            range: { type: "string", enum: ["7d", "30d", "90d"], default: "30d" },
+            granularity: { type: "string", enum: ["daily", "weekly", "monthly"], default: "daily" },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => adminCourseController.enrollmentTrends(request, reply)
   );
 }

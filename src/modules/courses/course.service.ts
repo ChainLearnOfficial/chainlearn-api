@@ -60,6 +60,8 @@ import type {
   EnrollmentTrendsQuery,
   EnrollmentTrendsResult,
   EnrollmentTrendDataPoint,
+  CourseSyllabus,
+  SyllabusModule,
 } from "./course.types.js";
 
 const POPULAR_COURSES_TTL_SECONDS = 300;
@@ -1934,6 +1936,136 @@ export class CourseService {
     await cacheSet(cacheKeyString, analytics, 3600);
 
     return analytics;
+  }
+
+  /**
+   * Full course syllabus: all modules in order, each with description,
+   * estimated duration, and learning objectives derived from the module
+   * content metadata (#373). Cached for 5 minutes.
+   *
+   * Module data comes from two sources, in priority order:
+   * 1. `courses.courseModules` jsonb — rich metadata (id, title,
+   *    description, estimatedDurationMinutes) set during course authoring
+   * 2. Fallback: derive module IDs from the quizzes table (moduleId
+   *    column), same approach getCourseDetail uses. These have no
+   *    description or duration, so those fields are null.
+   *
+   * Learning objectives are derived from each module's quiz questions if
+   * available — the question text often contains the learning target.
+   * When no quizzes exist for a module, objectives is an empty array.
+   */
+  async getSyllabus(courseId: string): Promise<CourseSyllabus> {
+    const namespace = "courses";
+    const ck = cacheKey(namespace, "syllabus", courseId);
+
+    const cached = await cacheGet<CourseSyllabus>(namespace, ck);
+    if (cached) return cached;
+
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course || !course.isActive) {
+      throw new NotFoundError("Course");
+    }
+
+    // Build ordered module list from courseModules jsonb, or fall back to
+    // quiz-derived module IDs when the rich metadata isn't present.
+    const moduleMetadata = this.normalizeCourseModules(course.courseModules);
+    let syllabusModules: SyllabusModule[];
+
+    if (moduleMetadata.length > 0) {
+      syllabusModules = moduleMetadata.map((m, i) => ({
+        order: i + 1,
+        id: m.id,
+        title: m.title,
+        description: m.description ?? null,
+        estimatedDurationMinutes: m.estimatedDurationMinutes ?? null,
+        learningObjectives: [],
+      }));
+    } else {
+      const moduleRows = await db
+        .select({ moduleId: quizzes.moduleId })
+        .from(quizzes)
+        .where(eq(quizzes.courseId, courseId))
+        .groupBy(quizzes.moduleId)
+        .orderBy(quizzes.moduleId);
+
+      syllabusModules = moduleRows.map((row, i) => ({
+        order: i + 1,
+        id: row.moduleId,
+        title: row.moduleId,
+        description: null,
+        estimatedDurationMinutes: null,
+        learningObjectives: [],
+      }));
+    }
+
+    // Derive learning objectives from quiz questions for each module.
+    // Quiz question prompts represent the concrete skills a module teaches,
+    // making them a reasonable proxy for learning objectives.
+    if (syllabusModules.length > 0) {
+      const moduleIds = syllabusModules.map((m) => m.id);
+      const quizRows = await db
+        .select({
+          moduleId: quizzes.moduleId,
+          questions: quizzes.questions,
+        })
+        .from(quizzes)
+        .where(
+          and(eq(quizzes.courseId, courseId), inArray(quizzes.moduleId, moduleIds)),
+        );
+
+      // Collect question prompts per module (first N questions per module
+      // to keep the objectives list focused).
+      const QUESTIONS_PER_MODULE = 5;
+      const objectivesByModule = new Map<string, string[]>();
+
+      for (const quiz of quizRows) {
+        const existing = objectivesByModule.get(quiz.moduleId) ?? [];
+        const questionArr = Array.isArray(quiz.questions) ? quiz.questions : [];
+
+        for (const q of questionArr) {
+          if (existing.length >= QUESTIONS_PER_MODULE) break;
+          const prompt =
+            typeof q === "object" && q !== null && "prompt" in q
+              ? String((q as Record<string, unknown>).prompt)
+              : typeof q === "string"
+                ? q
+                : null;
+          if (prompt && !existing.includes(prompt)) {
+            existing.push(prompt);
+          }
+        }
+        objectivesByModule.set(quiz.moduleId, existing);
+      }
+
+      // Merge objectives back into the syllabus modules
+      for (const sm of syllabusModules) {
+        sm.learningObjectives = objectivesByModule.get(sm.id) ?? [];
+      }
+    }
+
+    const totalEstimatedDurationMinutes = syllabusModules.reduce(
+      (sum, m) =>
+        m.estimatedDurationMinutes !== null
+          ? sum + m.estimatedDurationMinutes
+          : sum,
+      0,
+    );
+
+    const syllabus: CourseSyllabus = {
+      courseId: course.id,
+      title: course.title,
+      difficulty: course.difficulty,
+      modules: syllabusModules,
+      totalEstimatedDurationMinutes:
+        totalEstimatedDurationMinutes > 0 ? totalEstimatedDurationMinutes : null,
+      generatedAt: new Date(),
+    };
+
+    await cacheSet(ck, syllabus, 300);
+
+    return syllabus;
   }
 
   /**

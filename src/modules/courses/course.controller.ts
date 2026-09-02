@@ -264,6 +264,21 @@ export class CourseController {
 
     reply.status(201).send({ success: true, data: review });
   }
+
+  /**
+   * GET /api/v1/courses/:id/syllabus
+   * Returns the full course syllabus with module descriptions, estimated
+   * duration, and learning objectives (#373). Cached for 5 minutes.
+   */
+  async syllabus(
+    request: FastifyRequest<{ Params: CourseIdParams }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id } = request.params;
+    const syllabus = await courseService.getSyllabus(id);
+
+    reply.send({ success: true, data: syllabus });
+  }
 }
 
 export const courseController = new CourseController();

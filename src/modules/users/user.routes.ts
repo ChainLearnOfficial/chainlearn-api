@@ -106,6 +106,19 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
     (request, reply) => userController.getLearningPath(request, reply)
   );
 
+  app.get(
+    "/me/learning-stats",
+    {
+      schema: {
+        description:
+          "Comprehensive learning statistics: courses completed, quizzes taken, average score, credits, credentials, streak, study time, velocity (cached 5 min, #383)",
+        tags: ["users"],
+        security: [{ bearerAuth: [] }],
+      } as FastifySchema,
+    },
+    (request, reply) => userController.getLearningStats(request, reply)
+  );
+
   app.get<{ Querystring: import("../notifications/notification.types.js").ListNotificationsQuery }>(
     "/me/notifications",
     {

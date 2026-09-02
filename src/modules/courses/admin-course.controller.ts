@@ -10,6 +10,7 @@ import type {
   UpdateModuleBody,
   ModuleParams,
   ListEnrolledUsersQuery,
+  EnrollmentTrendsQuery,
 } from "./course.types.js";
 
 export class AdminCourseController {
@@ -224,6 +225,23 @@ export class AdminCourseController {
         total: result.total,
       },
     });
+  }
+
+  /**
+   * GET /api/v1/admin/courses/:id/enrollment-trends
+   * Enrollment trends for a course over time (#391).
+   */
+  async enrollmentTrends(
+    request: FastifyRequest<{
+      Params: CourseIdParams;
+      Querystring: EnrollmentTrendsQuery;
+    }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id } = request.params;
+    const result = await courseService.getEnrollmentTrends(id, request.query);
+
+    reply.send({ success: true, data: result });
   }
 }
 

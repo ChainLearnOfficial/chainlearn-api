@@ -57,6 +57,9 @@ import type {
   CourseAnalytics,
   EnrollmentTrendPoint,
   ModuleDifficulty,
+  EnrollmentTrendsQuery,
+  EnrollmentTrendsResult,
+  EnrollmentTrendDataPoint,
 } from "./course.types.js";
 
 const POPULAR_COURSES_TTL_SECONDS = 300;
@@ -2018,6 +2021,90 @@ export class CourseService {
     } catch (err) {
       logger.warn({ err, courseId, reportId }, "Failed to notify admins of course report");
     }
+  }
+
+  // ─── Enrollment Trends (#391) ───────────────────────────────────────────
+
+  /**
+   * Enrollment trends for a course over time (#391). Admin endpoint that
+   * returns a time series of enrollment counts at the chosen granularity
+   * (daily/weekly/monthly) within the chosen range (7d/30d/90d). Cached
+   * for 1 hour — matching getCourseAnalytics's TTL since the query shape
+   * is similar (aggregating across all enrollments for a course).
+   */
+  async getEnrollmentTrends(
+    courseId: string,
+    query: EnrollmentTrendsQuery,
+  ): Promise<EnrollmentTrendsResult> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    const namespace = "courses";
+    const ck = cacheKey(
+      namespace,
+      "enrollment-trends",
+      courseId,
+      query.range,
+      query.granularity,
+    );
+    const cached = await cacheGet<EnrollmentTrendsResult>(namespace, ck);
+    if (cached) return cached;
+
+    const intervalMap: Record<string, string> = {
+      "7d": "7 days",
+      "30d": "30 days",
+      "90d": "90 days",
+    };
+    const truncMap: Record<string, string> = {
+      daily: "day",
+      weekly: "week",
+      monthly: "month",
+    };
+
+    const interval = intervalMap[query.range];
+    const trunc = truncMap[query.granularity];
+
+    const [trendRows] = await Promise.all([
+      db
+        .select({
+          date: sql<string>`date_trunc('${sql.raw(trunc)}', ${enrollments.enrolledAt})::date`,
+          count: count(),
+        })
+        .from(enrollments)
+        .where(
+          and(
+            eq(enrollments.courseId, courseId),
+            sql`${enrollments.enrolledAt} >= now() - interval '${sql.raw(interval)}'`,
+          ),
+        )
+        .groupBy(sql`date_trunc('${sql.raw(trunc)}', ${enrollments.enrolledAt})`)
+        .orderBy(sql`date_trunc('${sql.raw(trunc)}', ${enrollments.enrolledAt})`),
+      db
+        .select({ value: count() })
+        .from(enrollments)
+        .where(eq(enrollments.courseId, courseId)),
+    ]);
+
+    const trends: EnrollmentTrendDataPoint[] = trendRows.map((row) => ({
+      date: row.date,
+      count: row.count,
+    }));
+
+    const result: EnrollmentTrendsResult = {
+      courseId,
+      range: query.range,
+      granularity: query.granularity,
+      trends,
+      totalEnrollments: trendRows.reduce((sum, r) => sum + r.count, 0),
+      generatedAt: new Date(),
+    };
+
+    await cacheSet(ck, result, 3600);
+    return result;
   }
 }
 

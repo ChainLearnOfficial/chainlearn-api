@@ -119,3 +119,20 @@ export interface UserDataExport {
     claimedAt: Date;
   }[];
 }
+
+// ─── Learning Stats (#383) ──────────────────────────────────────────────────
+
+/** Comprehensive learning statistics for the authenticated user (#383). */
+export interface LearningStats {
+  coursesCompleted: number;
+  quizzesTaken: number;
+  averageScore: number | null;
+  creditsEarned: number;
+  credentialsEarned: number;
+  /** Current consecutive-day learning streak (1 = active today). */
+  learningStreak: number;
+  /** Estimated total study time in minutes, derived from quiz submissions. */
+  estimatedTotalStudyTimeMinutes: number;
+  /** Quizzes taken in the last 7 days — a simple learning-velocity metric. */
+  learningVelocity: number;
+}

@@ -279,6 +279,56 @@ export class CourseController {
 
     reply.send({ success: true, data: syllabus });
   }
+
+  /**
+   * GET /api/v1/courses/:id/enrollment-status
+   * Detailed enrollment status for the authenticated user in a specific
+   * course (#381).
+   */
+  async enrollmentStatus(
+    request: FastifyRequest<{ Params: CourseIdParams }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id } = request.params;
+    const { authUser } = request as AuthenticatedRequest;
+    const status = await courseService.getEnrollmentStatus(authUser.id, id);
+
+    reply.send({ success: true, data: status });
+  }
+
+  /**
+   * GET /api/v1/courses/:id/progress
+   * The user's detailed progress in a specific course (#385).
+   */
+  async progress(
+    request: FastifyRequest<{ Params: CourseIdParams }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id } = request.params;
+    const { authUser } = request as AuthenticatedRequest;
+    const progress = await courseService.getCourseProgress(authUser.id, id);
+
+    reply.send({ success: true, data: progress });
+  }
+
+  /**
+   * GET /api/v1/courses/:id/modules/:moduleId/quiz-attempts
+   * All quiz attempts for a course module by the authenticated user (#393).
+   */
+  async quizAttempts(
+    request: FastifyRequest<{ Params: { id: string; moduleId: string } }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id, moduleId } = request.params;
+    const { authUser } = request as AuthenticatedRequest;
+    const result = await courseService.getQuizAttempts(
+      authUser.id,
+      id,
+      moduleId,
+    );
+
+    reply.send({ success: true, data: result });
+  }
 }
 
 export const courseController = new CourseController();

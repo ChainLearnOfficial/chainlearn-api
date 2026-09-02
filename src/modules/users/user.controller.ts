@@ -160,6 +160,20 @@ export class UserController {
 
     reply.send({ success: true, data: profile });
   }
+
+  /**
+   * GET /api/v1/users/me/learning-stats
+   * Comprehensive learning statistics for the authenticated user (#383).
+   */
+  async getLearningStats(
+    request: FastifyRequest,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { authUser } = request as AuthenticatedRequest;
+    const stats = await userService.getLearningStats(authUser.id);
+
+    reply.send({ success: true, data: stats });
+  }
 }
 
 export const userController = new UserController();

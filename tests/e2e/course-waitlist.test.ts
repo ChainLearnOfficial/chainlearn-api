@@ -1,5 +1,3 @@
-/// <reference types="vitest" />
-/// <reference types="vitest" />
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildApp } from "../../src/server.js";

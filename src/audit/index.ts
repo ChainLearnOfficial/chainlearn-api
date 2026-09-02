@@ -32,6 +32,7 @@ type AuditEvent =
   | "course.module.created"
   | "course.module.updated"
   | "course.module.deleted"
+  | "course.module.reordered"
   | "quiz.feedback.submitted"
   | "announcement.created"
   | "announcement.updated"

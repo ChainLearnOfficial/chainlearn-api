@@ -11,6 +11,7 @@ import type {
   ModuleParams,
   ListEnrolledUsersQuery,
   EnrollmentTrendsQuery,
+  ReorderModulesBody,
 } from "./course.types.js";
 
 export class AdminCourseController {
@@ -242,6 +243,23 @@ export class AdminCourseController {
     const result = await courseService.getEnrollmentTrends(id, request.query);
 
     reply.send({ success: true, data: result });
+  }
+
+  /**
+   * POST /api/v1/admin/courses/:id/modules/reorder
+   * Reorder course modules atomically (#374).
+   */
+  async reorderModules(
+    request: FastifyRequest<{ Params: CourseIdParams; Body: ReorderModulesBody }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id } = request.params;
+    const modules = await courseService.reorderModules(
+      id,
+      request.body.moduleIds,
+    );
+
+    reply.send({ success: true, data: modules });
   }
 }
 

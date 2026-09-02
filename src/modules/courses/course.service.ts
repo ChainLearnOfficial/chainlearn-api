@@ -62,6 +62,12 @@ import type {
   EnrollmentTrendDataPoint,
   CourseSyllabus,
   SyllabusModule,
+  EnrollmentStatus,
+  EnrollmentModuleProgress,
+  CourseProgress,
+  CourseProgressModule,
+  QuizAttempt,
+  QuizAttemptsResult,
 } from "./course.types.js";
 
 const POPULAR_COURSES_TTL_SECONDS = 300;
@@ -2237,6 +2243,386 @@ export class CourseService {
 
     await cacheSet(ck, result, 3600);
     return result;
+  }
+
+  // ─── Enrollment Status (#381) ───────────────────────────────────────────
+
+  /**
+   * Detailed enrollment status for the current user in a specific course
+   * (#381). Returns isEnrolled, enrolledAt, completedAt, module-by-module
+   * progress, quizCount, and averageScore. Cached 30s per (userId, courseId).
+   * Returns 404 for a non-existent or inactive course.
+   */
+  async getEnrollmentStatus(
+    userId: string,
+    courseId: string,
+  ): Promise<EnrollmentStatus> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course || !course.isActive) {
+      throw new NotFoundError("Course");
+    }
+
+    const namespace = "user";
+    const ck = cacheKey(namespace, "enrollment-status", userId, courseId);
+    const cached = await cacheGet<EnrollmentStatus>(namespace, ck);
+    if (cached) return cached;
+
+    const enrollment = await db.query.enrollments.findFirst({
+      where: and(
+        eq(enrollments.userId, userId),
+        eq(enrollments.courseId, courseId),
+      ),
+    });
+
+    // Build the module list from the course's authored modules definition,
+    // falling back to quiz-derived moduleId groups when no definitions exist.
+    const moduleDefinitions = (course.modules ?? []) as CourseModuleDefinition[];
+
+    let moduleIds: string[];
+    if (moduleDefinitions.length > 0) {
+      moduleIds = moduleDefinitions.map((m) => m.id);
+    } else {
+      const moduleRows = await db
+        .select({ moduleId: quizzes.moduleId })
+        .from(quizzes)
+        .where(eq(quizzes.courseId, courseId))
+        .groupBy(quizzes.moduleId)
+        .orderBy(quizzes.moduleId);
+      moduleIds = moduleRows.map((r) => r.moduleId);
+    }
+
+    const moduleTitleById = new Map(
+      moduleDefinitions.map((m) => [m.id, m.title] as const),
+    );
+
+    // Modules completed by the user (has a non-superseded submission).
+    const completedModuleIds = new Set(
+      moduleIds.length > 0
+        ? (
+            await db
+              .select({ moduleId: quizzes.moduleId })
+              .from(quizSubmissions)
+              .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+              .where(
+                and(
+                  eq(quizzes.courseId, courseId),
+                  eq(quizSubmissions.userId, userId),
+                  eq(quizSubmissions.superseded, false),
+                ),
+              )
+              .groupBy(quizzes.moduleId)
+          ).map((r) => r.moduleId)
+        : [],
+    );
+
+    const moduleProgress: EnrollmentModuleProgress[] = moduleIds.map(
+      (moduleId) => ({
+        moduleId,
+        title: moduleTitleById.get(moduleId) ?? null,
+        completed: completedModuleIds.has(moduleId),
+      }),
+    );
+
+    // Quiz count and average score for this user in this course.
+    const [quizAgg] = await db
+      .select({
+        quizCount: count(),
+        averageScore: sql<number | null>`AVG(${quizSubmissions.score})`,
+      })
+      .from(quizSubmissions)
+      .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+      .where(
+        and(
+          eq(quizzes.courseId, courseId),
+          eq(quizSubmissions.userId, userId),
+          eq(quizSubmissions.superseded, false),
+        ),
+      );
+
+    const result: EnrollmentStatus = {
+      courseId,
+      isEnrolled: !!enrollment,
+      enrolledAt: enrollment?.enrolledAt ?? null,
+      completedAt: enrollment?.completedAt ?? null,
+      moduleProgress,
+      quizCount: quizAgg?.quizCount ?? 0,
+      averageScore:
+        quizAgg?.averageScore != null
+          ? Number(Number(quizAgg.averageScore).toFixed(2))
+          : null,
+    };
+
+    await cacheSet(ck, result, 30);
+    return result;
+  }
+
+  // ─── Course Progress (#385) ─────────────────────────────────────────────
+
+  /**
+   * The user's detailed progress in a specific course (#385): module-by-
+   * module completion, quizzes taken, average score, and estimated
+   * completion percentage. Cached 30s per (userId, courseId).
+   */
+  async getCourseProgress(
+    userId: string,
+    courseId: string,
+  ): Promise<CourseProgress> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course || !course.isActive) {
+      throw new NotFoundError("Course");
+    }
+
+    const namespace = "user";
+    const ck = cacheKey(namespace, "course-progress", userId, courseId);
+    const cached = await cacheGet<CourseProgress>(namespace, ck);
+    if (cached) return cached;
+
+    const moduleDefinitions = (course.modules ?? []) as CourseModuleDefinition[];
+
+    let moduleIds: string[];
+    if (moduleDefinitions.length > 0) {
+      moduleIds = moduleDefinitions.map((m) => m.id);
+    } else {
+      const moduleRows = await db
+        .select({ moduleId: quizzes.moduleId })
+        .from(quizzes)
+        .where(eq(quizzes.courseId, courseId))
+        .groupBy(quizzes.moduleId)
+        .orderBy(quizzes.moduleId);
+      moduleIds = moduleRows.map((r) => r.moduleId);
+    }
+
+    const moduleTitleById = new Map(
+      moduleDefinitions.map((m) => [m.id, m.title] as const),
+    );
+
+    // Completed modules for this user.
+    const completedRows = moduleIds.length
+      ? await db
+          .select({ moduleId: quizzes.moduleId })
+          .from(quizSubmissions)
+          .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+          .where(
+            and(
+              eq(quizzes.courseId, courseId),
+              eq(quizSubmissions.userId, userId),
+              eq(quizSubmissions.superseded, false),
+            ),
+          )
+          .groupBy(quizzes.moduleId)
+      : [];
+    const completedModuleIds = new Set(completedRows.map((r) => r.moduleId));
+
+    const modules: CourseProgressModule[] = moduleIds.map((moduleId, i) => ({
+      moduleId,
+      title: moduleTitleById.get(moduleId) ?? null,
+      order: i + 1,
+      completed: completedModuleIds.has(moduleId),
+    }));
+
+    // Quiz count + average score.
+    const [quizAgg] = await db
+      .select({
+        quizCount: count(),
+        averageScore: sql<number | null>`AVG(${quizSubmissions.score})`,
+      })
+      .from(quizSubmissions)
+      .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+      .where(
+        and(
+          eq(quizzes.courseId, courseId),
+          eq(quizSubmissions.userId, userId),
+          eq(quizSubmissions.superseded, false),
+        ),
+      );
+
+    const totalModules = moduleIds.length;
+    const completedCount = completedModuleIds.size;
+    const completionPercentage =
+      totalModules > 0
+        ? Math.round((completedCount / totalModules) * 100)
+        : 0;
+
+    const result: CourseProgress = {
+      courseId,
+      modules,
+      quizzesTaken: quizAgg?.quizCount ?? 0,
+      averageScore:
+        quizAgg?.averageScore != null
+          ? Number(Number(quizAgg.averageScore).toFixed(2))
+          : null,
+      completedModules: completedCount,
+      totalModules,
+      completionPercentage,
+    };
+
+    await cacheSet(ck, result, 30);
+    return result;
+  }
+
+  // ─── Quiz Attempts (#393) ───────────────────────────────────────────────
+
+  /**
+   * All quiz attempts for a specific course module by the authenticated
+   * user (#393), ordered oldest-first. Returns attempt number, score,
+   * percentage, pass status, and date. Cached 30s per
+   * (userId, courseId, moduleId).
+   */
+  async getQuizAttempts(
+    userId: string,
+    courseId: string,
+    moduleId: string,
+  ): Promise<QuizAttemptsResult> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course || !course.isActive) {
+      throw new NotFoundError("Course");
+    }
+
+    const namespace = "user";
+    const ck = cacheKey(
+      namespace,
+      "quiz-attempts",
+      userId,
+      courseId,
+      moduleId,
+    );
+    const cached = await cacheGet<QuizAttemptsResult>(namespace, ck);
+    if (cached) return cached;
+
+    const rows = await db
+      .select({
+        submissionId: quizSubmissions.id,
+        score: quizSubmissions.score,
+        questions: quizzes.questions,
+        submittedAt: quizSubmissions.submittedAt,
+        superseded: quizSubmissions.superseded,
+      })
+      .from(quizSubmissions)
+      .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+      .where(
+        and(
+          eq(quizzes.courseId, courseId),
+          eq(quizzes.moduleId, moduleId),
+          eq(quizSubmissions.userId, userId),
+        ),
+      )
+      .orderBy(quizSubmissions.submittedAt);
+
+    const attempts: QuizAttempt[] = rows.map((row, i) => {
+      const totalQuestions = Array.isArray(row.questions)
+        ? row.questions.length
+        : 0;
+      const percentage =
+        totalQuestions > 0 && row.score != null
+          ? Math.round((row.score / totalQuestions) * 100)
+          : null;
+      return {
+        attemptNumber: i + 1,
+        submissionId: row.submissionId,
+        score: row.score,
+        percentage,
+        passed:
+          percentage != null ? percentage >= PASSING_PERCENTAGE : false,
+        superseded: row.superseded,
+        date: row.submittedAt,
+      };
+    });
+
+    const result: QuizAttemptsResult = {
+      courseId,
+      moduleId,
+      attempts,
+      totalAttempts: attempts.length,
+    };
+
+    await cacheSet(ck, result, 30);
+    return result;
+  }
+
+  // ─── Admin: Reorder Modules (#374) ──────────────────────────────────────
+
+  /**
+   * Reorder course modules atomically (#374). Accepts an ordered array of
+   * module IDs, validates all IDs belong to the course, and updates the
+   * `order` field on each module definition in courses.modules (jsonb) in
+   * a single transaction. Changes are logged to the audit log.
+   */
+  async reorderModules(
+    courseId: string,
+    moduleIds: string[],
+  ): Promise<CourseModuleDefinition[]> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    const existingModules = (course.modules ?? []) as CourseModuleDefinition[];
+
+    // Validate that the provided IDs exactly match the course's modules —
+    // all IDs must be present, no extras, no missing.
+    const existingIds = new Set(existingModules.map((m) => m.id));
+    const providedIds = new Set(moduleIds);
+
+    if (existingIds.size !== providedIds.size) {
+      throw new ForbiddenError(
+        "Module IDs do not match the course's modules",
+      );
+    }
+
+    for (const id of moduleIds) {
+      if (!existingIds.has(id)) {
+        throw new ForbiddenError(
+          `Module ${id} does not belong to this course`,
+        );
+      }
+    }
+
+    return withLock(`course-modules:${courseId}`, async () => {
+      // Re-fetch inside the lock to avoid a lost update.
+      const [locked] = await db
+        .select()
+        .from(courses)
+        .where(eq(courses.id, courseId));
+
+      if (!locked) {
+        throw new NotFoundError("Course");
+      }
+
+      const currentModules = (locked.modules ?? []) as CourseModuleDefinition[];
+      const moduleById = new Map(currentModules.map((m) => [m.id, m]));
+
+      const reordered: CourseModuleDefinition[] = moduleIds.map((id, i) => {
+        const existing = moduleById.get(id);
+        if (!existing) {
+          throw new ForbiddenError(
+            `Module ${id} does not belong to this course`,
+          );
+        }
+        return { ...existing, order: i };
+      });
+
+      await db
+        .update(courses)
+        .set({ modules: reordered })
+        .where(eq(courses.id, courseId));
+
+      await this.invalidateCourseCaches(courseId);
+      await auditLog("course.module.reordered", {
+        courseId,
+        moduleIds,
+      });
+      logger.info({ courseId, moduleIds }, "Course modules reordered");
+
+      return reordered;
+    });
   }
 }
 

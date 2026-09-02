@@ -284,7 +284,6 @@ export interface CourseReviewsResult {
   totalReviews: number;
 }
 
-export interface EnrolledUserEntry {
 // #340: one row per user enrolled in a course, with their quiz-progress
 // summary for that course. quizCount/averageScore are scoped to quizzes
 // belonging to this course (via quizzes.courseId), non-superseded
@@ -309,7 +308,6 @@ export interface EnrolledUserSummary {
 }
 
 export interface EnrolledUsersResult {
-  users: EnrolledUserEntry[];
   users: EnrolledUserSummary[];
   total: number;
 }
@@ -430,6 +428,8 @@ export interface EnrollmentTrendsResult {
   granularity: string;
   trends: EnrollmentTrendDataPoint[];
   totalEnrollments: number;
+}
+
 /** One module entry in the syllabus response. */
 export interface SyllabusModule {
   order: number;
@@ -449,3 +449,76 @@ export interface CourseSyllabus {
   totalEstimatedDurationMinutes: number | null;
   generatedAt: Date;
 }
+
+// ─── Enrollment Status (#381) ───────────────────────────────────────────────
+
+/** One module's progress entry in the enrollment-status response (#381). */
+export interface EnrollmentModuleProgress {
+  moduleId: string;
+  title: string | null;
+  completed: boolean;
+}
+
+/** Response of GET /api/v1/courses/:id/enrollment-status (#381). */
+export interface EnrollmentStatus {
+  courseId: string;
+  isEnrolled: boolean;
+  enrolledAt: Date | null;
+  completedAt: Date | null;
+  moduleProgress: EnrollmentModuleProgress[];
+  quizCount: number;
+  averageScore: number | null;
+}
+
+// ─── Course Progress (#385) ─────────────────────────────────────────────────
+
+/** One module's progress in the course-progress response (#385). */
+export interface CourseProgressModule {
+  moduleId: string;
+  title: string | null;
+  order: number;
+  completed: boolean;
+}
+
+/** Response of GET /api/v1/courses/:id/progress (#385). */
+export interface CourseProgress {
+  courseId: string;
+  modules: CourseProgressModule[];
+  quizzesTaken: number;
+  averageScore: number | null;
+  completedModules: number;
+  totalModules: number;
+  completionPercentage: number;
+}
+
+// ─── Quiz Attempts (#393) ───────────────────────────────────────────────────
+
+/** One attempt entry in the quiz-attempts response (#393). */
+export interface QuizAttempt {
+  attemptNumber: number;
+  submissionId: string;
+  /** Raw correct-answer count. */
+  score: number | null;
+  /** Score normalized against the quiz's question count (0–100). */
+  percentage: number | null;
+  passed: boolean;
+  /** True if this attempt was superseded by a retry (#295). */
+  superseded: boolean;
+  date: Date;
+}
+
+/** Response of GET /api/v1/courses/:id/modules/:moduleId/quiz-attempts (#393). */
+export interface QuizAttemptsResult {
+  courseId: string;
+  moduleId: string;
+  attempts: QuizAttempt[];
+  totalAttempts: number;
+}
+
+// ─── Admin: Reorder Modules (#374) ──────────────────────────────────────────
+
+export const reorderModulesSchema = z.object({
+  moduleIds: z.array(z.string().min(1).max(100)).min(1).max(100),
+});
+
+export type ReorderModulesBody = z.infer<typeof reorderModulesSchema>;

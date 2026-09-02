@@ -33,6 +33,7 @@ import type {
   UserProfile,
   UserProgress,
   UserDataExport,
+  LearningStats,
 } from "./user.types.js";
 
 export class UserService {
@@ -613,6 +614,135 @@ export class UserService {
     await auditLog("user.data_exported", { userId });
 
     return exportData;
+  }
+
+  // ─── Learning Stats (#383) ─────────────────────────────────────────────
+
+  /**
+   * Comprehensive learning statistics for the authenticated user (#383):
+   * total courses completed, quizzes taken, average score (percentage),
+   * credits earned, credentials earned, learning streak (consecutive days
+   * with at least one submission), estimated total study time, and learning
+   * velocity (quizzes in the last 7 days). Cached for 5 minutes.
+   */
+  async getLearningStats(userId: string): Promise<LearningStats> {
+    const namespace = "user";
+    const ck = cacheKey(namespace, "learning-stats", userId);
+
+    const cached = await cacheGet<LearningStats>(namespace, ck);
+    if (cached) return cached;
+
+    const user = await db.query.users.findFirst({
+      where: eq(users.id, userId),
+    });
+    if (!user) {
+      throw new NotFoundError("User");
+    }
+
+    const [
+      [completedResult],
+      [quizAggResult],
+      [credentialResult],
+      [velocityResult],
+      submissionDateRows,
+    ] = await Promise.all([
+      db
+        .select({ value: count() })
+        .from(enrollments)
+        .where(
+          sql`${enrollments.userId} = ${userId} AND ${enrollments.completedAt} IS NOT NULL`,
+        ),
+      db
+        .select({
+          quizCount: count(),
+          avgScore: sql<number | null>`AVG(${quizSubmissions.score}::numeric / NULLIF(jsonb_array_length(${quizzes.questions}), 0) * 100)`,
+        })
+        .from(quizSubmissions)
+        .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+        .where(
+          and(
+            eq(quizSubmissions.userId, userId),
+            eq(quizSubmissions.superseded, false),
+          ),
+        ),
+      db
+        .select({ value: count() })
+        .from(credentials)
+        .where(
+          and(eq(credentials.userId, userId), eq(credentials.revoked, false)),
+        ),
+      db
+        .select({ value: count() })
+        .from(quizSubmissions)
+        .where(
+          sql`${quizSubmissions.userId} = ${userId} AND ${quizSubmissions.submittedAt} >= now() - interval '7 days'`,
+        ),
+      db
+        .select({
+          date: sql<string>`date_trunc('day', ${quizSubmissions.submittedAt})::date`,
+        })
+        .from(quizSubmissions)
+        .where(eq(quizSubmissions.userId, userId))
+        .groupBy(sql`date_trunc('day', ${quizSubmissions.submittedAt})`)
+        .orderBy(sql`date_trunc('day', ${quizSubmissions.submittedAt}) DESC`),
+    ]);
+
+    // Compute learning streak: consecutive days (ending today or yesterday)
+    // with at least one submission.
+    let learningStreak = 0;
+    if (submissionDateRows.length > 0) {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const yesterday = new Date(today);
+      yesterday.setDate(yesterday.getDate() - 1);
+
+      const dateSet = new Set(
+        submissionDateRows.map((r) => r.date),
+      );
+
+      // Start from today; if no submission today, start from yesterday.
+      let cursor = today;
+      if (!dateSet.has(cursor.toISOString().split("T")[0])) {
+        cursor = yesterday;
+        if (!dateSet.has(cursor.toISOString().split("T")[0])) {
+          learningStreak = 0;
+        } else {
+          // Count backwards from yesterday
+          learningStreak = 0;
+          while (dateSet.has(cursor.toISOString().split("T")[0])) {
+            learningStreak++;
+            cursor.setDate(cursor.getDate() - 1);
+          }
+        }
+      } else {
+        learningStreak = 0;
+        while (dateSet.has(cursor.toISOString().split("T")[0])) {
+          learningStreak++;
+          cursor.setDate(cursor.getDate() - 1);
+        }
+      }
+    }
+
+    // Estimate total study time: ~5 minutes per quiz submission (heuristic).
+    const quizzesTaken = quizAggResult?.quizCount ?? 0;
+    const estimatedTotalStudyTimeMinutes = quizzesTaken * 5;
+
+    const stats: LearningStats = {
+      coursesCompleted: completedResult?.value ?? 0,
+      quizzesTaken,
+      averageScore:
+        quizAggResult?.avgScore != null
+          ? Math.round(Number(quizAggResult.avgScore))
+          : null,
+      creditsEarned: user.credits,
+      credentialsEarned: credentialResult?.value ?? 0,
+      learningStreak,
+      estimatedTotalStudyTimeMinutes,
+      learningVelocity: velocityResult?.value ?? 0,
+    };
+
+    await cacheSet(ck, stats, 300);
+    return stats;
   }
 
   private async deleteLocalAvatar(avatarUrl: string | null): Promise<void> {

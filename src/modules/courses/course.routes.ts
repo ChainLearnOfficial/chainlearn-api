@@ -15,6 +15,8 @@ import {
   createReviewSchema,
   reportCourseSchema,
   listEnrolledUsersQuerySchema,
+  reorderModulesSchema,
+  moduleParamsSchema,
 } from "./course.types.js";
 import { joinWaitlistSchema, leaveWaitlistSchema } from "./waitlist.types.js";
 
@@ -175,6 +177,58 @@ export async function courseRoutes(app: FastifyInstance): Promise<void> {
     (request, reply) => courseController.modules(request, reply)
   );
 
+  app.get<{ Params: { id: string } }>(
+    "/:id/enrollment-status",
+    {
+      preHandler: [authGuard, validate({ params: courseIdParamsSchema })],
+      schema: {
+        description:
+          "Detailed enrollment status for the authenticated user in a specific course (#381)",
+        tags: ["courses"],
+        security: [{ bearerAuth: [] }],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      } as FastifySchema,
+    },
+    (request, reply) => courseController.enrollmentStatus(request, reply)
+  );
+
+  app.get<{ Params: { id: string } }>(
+    "/:id/progress",
+    {
+      preHandler: [authGuard, validate({ params: courseIdParamsSchema })],
+      schema: {
+        description:
+          "The authenticated user's detailed progress in a specific course (#385)",
+        tags: ["courses"],
+        security: [{ bearerAuth: [] }],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      } as FastifySchema,
+    },
+    (request, reply) => courseController.progress(request, reply)
+  );
+
+  app.get<{ Params: { id: string; moduleId: string } }>(
+    "/:id/modules/:moduleId/quiz-attempts",
+    {
+      preHandler: [authGuard, validate({ params: moduleParamsSchema })],
+      schema: {
+        description:
+          "All quiz attempts for a specific course module by the authenticated user, ordered oldest-first (#393)",
+        tags: ["courses"],
+        security: [{ bearerAuth: [] }],
+        params: {
+          type: "object",
+          required: ["id", "moduleId"],
+          properties: {
+            id: { type: "string", format: "uuid" },
+            moduleId: { type: "string", minLength: 1, maxLength: 100 },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => courseController.quizAttempts(request, reply)
+  );
+
   app.post<{ Params: { id: string }; Querystring: import("./course.types.js").EnrollCourseQuery }>(
     "/:id/enroll",
     {
@@ -249,6 +303,8 @@ export async function courseRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => courseController.enrolledUsers(request, reply)
+  );
+
   app.delete<{ Params: { id: string } }>(
     "/:id/enroll",
     {

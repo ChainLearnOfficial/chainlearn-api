@@ -409,3 +409,23 @@ export interface CourseReportResult {
   status: string;
   createdAt: Date;
 }
+
+/** One module entry in the syllabus response. */
+export interface SyllabusModule {
+  order: number;
+  id: string;
+  title: string;
+  description: string | null;
+  estimatedDurationMinutes: number | null;
+  learningObjectives: string[];
+}
+
+/** Response of GET /api/v1/courses/:id/syllabus (#373). */
+export interface CourseSyllabus {
+  courseId: string;
+  title: string;
+  difficulty: string;
+  modules: SyllabusModule[];
+  totalEstimatedDurationMinutes: number | null;
+  generatedAt: Date;
+}

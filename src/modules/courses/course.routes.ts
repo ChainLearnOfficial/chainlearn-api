@@ -149,6 +149,19 @@ export async function courseRoutes(app: FastifyInstance): Promise<void> {
   );
 
   app.get<{ Params: { id: string } }>(
+    "/:id/syllabus",
+    {
+      preHandler: [validate({ params: courseIdParamsSchema })],
+      schema: {
+        description: "Get the full course syllabus with module descriptions, estimated duration, and learning objectives (#373)",
+        tags: ["courses"],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      } as FastifySchema,
+    },
+    (request, reply) => courseController.syllabus(request, reply)
+  );
+
+  app.get<{ Params: { id: string } }>(
     "/:id/modules",
     {
       preHandler: [authGuard, validate({ params: courseIdParamsSchema })],

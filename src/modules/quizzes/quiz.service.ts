@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { eq, and } from "drizzle-orm";
+import { eq, and, sql } from "drizzle-orm";
 import { db } from "../../config/database.js";
 import { quizzes, quizSubmissions, quizFeedback, enrollments } from "../../database/schema.js";
 import {
@@ -934,6 +934,64 @@ export class QuizService {
       ...(correctFeedback && { correctFeedback }),
       ...(incorrectFeedback && { incorrectFeedback }),
     }));
+  }
+
+  /**
+   * Delete a quiz together with all of its submissions, in one DB
+   * transaction (#414). Foreign-key cascades already remove submissions and
+   * feedback when the quiz row goes away, but the transaction makes the
+   * whole delete atomic and lets us count the submissions first for the
+   * audit entry — a plain cascade delete would leave no trace of how many
+   * attempts were destroyed.
+   */
+  async deleteQuizByAdmin(courseId: string, moduleId: string, quizId: string): Promise<{
+    deletedSubmissions: number;
+  }> {
+    return withLock(`quiz-delete:${quizId}`, async () => {
+      const result = await db.transaction(async (tx) => {
+        const [quiz] = await tx
+          .select()
+          .from(quizzes)
+          .where(eq(quizzes.id, quizId));
+
+        if (!quiz) {
+          throw new NotFoundError("Quiz");
+        }
+        if (quiz.courseId !== courseId || quiz.moduleId !== moduleId) {
+          throw new NotFoundError("Quiz not in this course/module");
+        }
+
+        const [submissionCount] = await tx
+          .select({ value: sql<number>`count(*)`.mapWith(Number) })
+          .from(quizSubmissions)
+          .where(eq(quizSubmissions.quizId, quizId));
+
+        await tx.delete(quizzes).where(eq(quizzes.id, quizId));
+
+        return { deletedSubmissions: submissionCount?.value ?? 0 };
+      });
+
+      await auditLog("quiz.deleted_by_admin", {
+        courseId,
+        moduleId,
+        quizId,
+        total: result.deletedSubmissions,
+      });
+      logger.info(
+        { courseId, moduleId, quizId, deletedSubmissions: result.deletedSubmissions },
+        "Quiz deleted by admin"
+      );
+
+      // Cached per-module/per-user keys can't be enumerated ahead of time —
+      // every submitter's progress/stats may embed this quiz. Invalidate the
+      // aggregate stats cache (course-scoped and global) and let the 30s/60s
+      // per-user keys age out on their own, same as retryQuiz does.
+      await cacheInvalidatePattern(cacheKeyPattern("quizzes", "stats"));
+      await cacheDel(cacheKey("quizzes", "stats", courseId));
+      await cacheDel(cacheKey("quizzes", "stats", "all"));
+
+      return result;
+    });
   }
 }
 

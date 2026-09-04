@@ -380,6 +380,28 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
         },
       } as FastifySchema,
     },
-    (request, reply) => adminCourseController.enrollmentTrends(request, reply)
+    (request, reply) => adminCourseController.enrollmentTrends(request, reply),
+  );
+
+  app.delete<{ Params: { id: string; moduleId: string; quizId: string } }>(
+    "/:id/modules/:moduleId/quizzes/:quizId",
+    {
+      schema: {
+        description:
+          "Delete a quiz and all its submissions atomically (admin only, #414)",
+        tags: ["admin", "courses"],
+        security: [{ bearerAuth: [] }],
+        params: {
+          type: "object",
+          required: ["id", "moduleId", "quizId"],
+          properties: {
+            id: { type: "string", format: "uuid" },
+            moduleId: { type: "string", minLength: 1, maxLength: 100 },
+            quizId: { type: "string", format: "uuid" },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => adminCourseController.deleteQuiz(request, reply)
   );
 }

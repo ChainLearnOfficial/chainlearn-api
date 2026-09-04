@@ -17,6 +17,7 @@ import {
 import { withLock } from "../../utils/lock.js";
 import { invokeContract } from "../../stellar/transactions.js";
 import { createMintAuthorization } from "../../stellar/signatures.js";
+import { stellarClient } from "../../stellar/client.js";
 import { config } from "../../config/index.js";
 import { logger } from "../../utils/logger.js";
 import crypto from "node:crypto";
@@ -25,6 +26,8 @@ import type {
   BatchMintResultItem,
   CredentialListItem,
   MintResult,
+  AdminUserCredentialItem,
+  AdminCredentialVerification,
 } from "./credential.types.js";
 import { auditLog } from "../../audit/index.js";
 import {
@@ -273,6 +276,79 @@ export class CredentialService {
     await cacheSet(cacheKeyString, rows, 60);
 
     return rows;
+  }
+
+  /**
+   * All credentials for a user, joined with course titles and each mint
+   * transaction verified against Stellar Horizon so admins see the live
+   * on-chain state instead of trusting the stored hash (#410). Cached for
+   * 30s — the per-credential Horizon calls make uncached loads expensive,
+   * while 30s matches the read-frequency of a support/verification flow
+   * without going meaningfully stale.
+   */
+  async getAdminUserCredentials(userId: string): Promise<AdminUserCredentialItem[]> {
+    const namespace = "credentials";
+    const cacheKeyString = cacheKey(namespace, "admin-list", userId);
+
+    const cached = await cacheGet<AdminUserCredentialItem[]>(
+      namespace,
+      cacheKeyString,
+    );
+    if (cached) return cached;
+
+    // Reuse the user-facing list() join shape — same table relationships,
+    // same column set — but do NOT cache-share a key with it: the admin view
+    // is a different consumer with a different TTL (30s vs 60s).
+    const rows = await db
+      .select({
+        id: credentials.id,
+        score: credentials.score,
+        nftAssetCode: credentials.nftAssetCode,
+        mintTxHash: credentials.mintTxHash,
+        revoked: credentials.revoked,
+        mintedAt: credentials.mintedAt,
+        courseTitle: courses.title,
+      })
+      .from(credentials)
+      .innerJoin(courses, eq(credentials.courseId, courses.id))
+      .where(eq(credentials.userId, userId))
+      .orderBy(desc(credentials.mintedAt));
+
+    const items: AdminUserCredentialItem[] = await Promise.all(
+      rows.map(async (row): Promise<AdminUserCredentialItem> => {
+        let verification: AdminCredentialVerification;
+        if (!row.mintTxHash) {
+          verification = { kind: "none", status: "unknown" };
+        } else if (row.mintTxHash === "pending_indexer_confirmation") {
+          // Written by the bad-seq recovery path in mint(); nothing to
+          // look up on Horizon yet — same convention as reward getTransactions.
+          verification = { kind: "on_chain", status: "pending", ledger: null, confirmations: null };
+        } else {
+          const v = await stellarClient.getHorizonTransaction(row.mintTxHash);
+          verification = {
+            kind: "on_chain",
+            status: v.status,
+            ledger: v.ledger,
+            confirmations: v.confirmations,
+          };
+        }
+
+        return {
+          id: row.id,
+          courseTitle: row.courseTitle,
+          score: row.score,
+          nftAssetCode: row.nftAssetCode,
+          mintTxHash: row.mintTxHash,
+          revoked: row.revoked,
+          mintedAt: row.mintedAt,
+          verification,
+        };
+      }),
+    );
+
+    await cacheSet(cacheKeyString, items, 30);
+
+    return items;
   }
 }
 

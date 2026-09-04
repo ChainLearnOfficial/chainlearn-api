@@ -25,3 +25,12 @@ export interface AdminUserSummary {
   // were cleared".
   deletedAt: Date | null;
 }
+
+// ─── Admin user credentials listing (#410) ─────────────────────────────────
+
+// Param shape shared with /:id/ban and /:id/activity — kept local (not
+// zod-validated) to mirror the existing admin-users routes, which validate
+// only where a body/query exists.
+export interface UserIdParams {
+  id: string;
+}

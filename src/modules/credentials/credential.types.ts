@@ -54,3 +54,28 @@ export interface BatchMintResultItem {
     message: string;
   };
 }
+
+export interface AdminUserCredentialItem {
+  id: string;
+  courseTitle: string;
+  score: number;
+  nftAssetCode: string | null;
+  mintTxHash: string | null;
+  revoked: boolean;
+  mintedAt: Date;
+  verification:
+    | { kind: "none"; status: "not_minted" | "unknown" }
+    | { kind: "on_chain"; status: "confirmed" | "pending" | "failed"; ledger: number | null; confirmations: number | null };
+}
+
+// ─── Admin: user credentials listing (#410) ────────────────────────────────
+
+// Verification state resolved per credential in getAdminUserCredentials:
+// "not_minted" for rows with no mint tx yet, otherwise the live Horizon
+// verification of the stored mint tx hash. Keep in sync with the union on
+// AdminUserCredentialItem above.
+export type AdminCredentialVerification =
+  AdminUserCredentialItem["verification"];
+
+// Body/route schemas for #410 live in admin.types.ts (admin_users params use
+// the plain :id param shape shared by the module).

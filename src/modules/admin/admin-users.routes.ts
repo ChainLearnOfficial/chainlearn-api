@@ -67,4 +67,24 @@ export async function adminUsersRoutes(app: FastifyInstance): Promise<void> {
     },
     (request, reply) => adminUsersController.getActivity(request, reply),
   );
+
+  app.get<{ Params: { id: string } }>(
+    "/:id/credentials",
+    {
+      schema: {
+        description:
+          "Get all credentials for a user, each verified against Stellar Horizon (admin only, cached 30s, #410)",
+        tags: ["admin", "users"],
+        security: [{ bearerAuth: [] }],
+        params: {
+          type: "object",
+          required: ["id"],
+          properties: {
+            id: { type: "string", format: "uuid" },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => adminUsersController.getCredentials(request, reply),
+  );
 }

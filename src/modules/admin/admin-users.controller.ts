@@ -1,6 +1,7 @@
 import type { FastifyRequest, FastifyReply } from "fastify";
 import { adminUsersService } from "./admin-users.service.js";
 import type { ListUsersQuery } from "./admin.types.js";
+import { credentialService } from "../credentials/credential.service.js";
 
 export class AdminUsersController {
   /**
@@ -54,6 +55,23 @@ export class AdminUsersController {
     reply.send({
       success: true,
       data: activities,
+    });
+  }
+
+  /**
+   * GET /api/v1/admin/users/:id/credentials
+   * All credentials for a user with live on-chain verification (#410).
+   */
+  async getCredentials(
+    request: FastifyRequest<{ Params: { id: string } }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id } = request.params;
+    const credentials = await credentialService.getAdminUserCredentials(id);
+
+    reply.send({
+      success: true,
+      data: credentials,
     });
   }
 }

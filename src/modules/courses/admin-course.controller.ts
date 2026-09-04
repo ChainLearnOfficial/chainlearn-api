@@ -1,5 +1,6 @@
 import type { FastifyRequest, FastifyReply } from "fastify";
 import { courseService } from "./course.service.js";
+import { quizService } from "../quizzes/quiz.service.js";
 import { ValidationError } from "../../utils/errors.js";
 import { importCourseSchema } from "./course.types.js";
 import type {
@@ -260,6 +261,25 @@ export class AdminCourseController {
     );
 
     reply.send({ success: true, data: modules });
+  }
+
+  /**
+   * DELETE /api/v1/admin/courses/:id/modules/:moduleId/quizzes/:quizId
+   * Delete a quiz and all its submissions atomically (#414).
+   */
+  async deleteQuiz(
+    request: FastifyRequest<{
+      Params: { id: string; moduleId: string; quizId: string };
+    }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id, moduleId, quizId } = request.params;
+    const result = await quizService.deleteQuizByAdmin(id, moduleId, quizId);
+
+    reply.send({
+      success: true,
+      data: { deletedSubmissions: result.deletedSubmissions },
+    });
   }
 }
 

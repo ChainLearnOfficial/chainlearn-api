@@ -34,6 +34,7 @@ type AuditEvent =
   | "course.module.deleted"
   | "course.module.reordered"
   | "quiz.feedback.submitted"
+  | "quiz.deleted_by_admin"
   | "announcement.created"
   | "announcement.updated"
   | "announcement.deleted"
@@ -44,6 +45,7 @@ type AuditEvent =
 
 interface AuditFields {
   userId?: string;
+  quizId?: string;
   submissionId?: string;
   credentialId?: string;
   courseId?: string;

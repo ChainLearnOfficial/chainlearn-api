@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, type Mock } from "vitest";
 
 vi.mock("../../../src/config/stellar.js", () => ({
   getPlatformKeypair: vi.fn(() => mockKeypair),
@@ -58,6 +58,13 @@ import { stellarClient } from "../../../src/stellar/client.js";
 import { sequenceCache } from "../../../src/stellar/sequence-cache.js";
 import * as StellarSdk from "@stellar/stellar-sdk";
 
+// `StellarSdk.rpc.Api.isSimulationError` is declared as a *type-predicate*
+// function (`sim is SimulateTransactionErrorResponse`), which a bare
+// `vi.fn()` can never satisfy no matter how it is configured. Alias the
+// namespace to a plain spy holder once, here, rather than casting at each
+// assignment below.
+const mockApi = StellarSdk.rpc.Api as unknown as { isSimulationError: Mock };
+
 describe("Stellar Transactions", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -69,7 +76,7 @@ describe("Stellar Transactions", () => {
       mockSoroban.simulateTransaction.mockResolvedValue({
         results: [{ xdr: "result" }],
       });
-      StellarSdk.rpc.Api.isSimulationError = vi.fn().mockReturnValue(false);
+      mockApi.isSimulationError = vi.fn().mockReturnValue(false);
       stellarClient.submitTransaction = vi.fn().mockResolvedValue({ hash: "tx-hash" });
 
       const validContractId = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
@@ -85,7 +92,7 @@ describe("Stellar Transactions", () => {
       mockSoroban.simulateTransaction.mockResolvedValue({
         results: [{ xdr: "result" }],
       });
-      StellarSdk.rpc.Api.isSimulationError = vi.fn().mockReturnValue(false);
+      mockApi.isSimulationError = vi.fn().mockReturnValue(false);
       
       stellarClient.submitTransaction = vi.fn().mockImplementation(() => {
         attempts++;

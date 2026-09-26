@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, type Mock } from "vitest";
 import * as StellarSdk from "@stellar/stellar-sdk";
 
 vi.mock("ioredis", () => ({
@@ -42,6 +42,26 @@ import { redis } from "../../../src/config/redis.js";
 
 const mockDb = vi.mocked(db);
 const mockRedis = vi.mocked(redis);
+
+// Drizzle's relational `db.query.users.findFirst` is a generic builder function
+// rather than a `Mock`, so `vi.mocked()` can't hand it spy methods and
+// `.mockResolvedValue(...)` doesn't typecheck on it. Alias it to a plain spy
+// once, here, instead of casting at each call site.
+const mockFindFirstUser = mockDb.query.users.findFirst as unknown as Mock;
+
+// Drizzle's `PgInsertBuilder` carries a pile of `undefined`-typed "unavailable
+// in this mode" members, so a purpose-built fake can never satisfy it
+// structurally. This fake intentionally models only the
+// `.values().onConflictDoUpdate().returning()` subset the auth service walks.
+function fakeUserUpsertBuilder(row: Record<string, unknown>): any {
+  return {
+    values: vi.fn().mockReturnValue({
+      onConflictDoUpdate: vi.fn().mockReturnValue({
+        returning: vi.fn().mockResolvedValue([row]),
+      }),
+    }),
+  };
+}
 
 /**
  * Builds a syntactically valid, unsigned SEP-10-style challenge envelope
@@ -345,20 +365,14 @@ describe("AuthService - SEP-10 Verification", () => {
       const challengeId = "test-challenge-id";
       const nonce = mockStoredChallenge(stellarAddress);
 
-      mockDb.query.users.findFirst.mockResolvedValue(null);
-      mockDb.insert.mockReturnValue({
-        values: vi.fn().mockReturnValue({
-          onConflictDoUpdate: vi.fn().mockReturnValue({
-            returning: vi.fn().mockResolvedValue([
-              {
-                id: "user-1",
-                stellarAddress,
-                displayName: null,
-              },
-            ]),
-          }),
-        }),
-      });
+      mockFindFirstUser.mockResolvedValue(null);
+      mockDb.insert.mockReturnValue(
+        fakeUserUpsertBuilder({
+          id: "user-1",
+          stellarAddress,
+          displayName: null,
+        })
+      );
 
       const account = new StellarSdk.Account(stellarAddress, "0");
       const transaction = new StellarSdk.TransactionBuilder(account, {
@@ -397,24 +411,18 @@ describe("AuthService - SEP-10 Verification", () => {
       const challengeId = "test-challenge-id";
       const nonce = mockStoredChallenge(stellarAddress);
 
-      mockDb.query.users.findFirst.mockResolvedValue({
+      mockFindFirstUser.mockResolvedValue({
         id: "existing-user",
         stellarAddress,
         displayName: "Test User",
       });
-      mockDb.insert.mockReturnValue({
-        values: vi.fn().mockReturnValue({
-          onConflictDoUpdate: vi.fn().mockReturnValue({
-            returning: vi.fn().mockResolvedValue([
-              {
-                id: "existing-user",
-                stellarAddress,
-                displayName: "Test User",
-              },
-            ]),
-          }),
-        }),
-      });
+      mockDb.insert.mockReturnValue(
+        fakeUserUpsertBuilder({
+          id: "existing-user",
+          stellarAddress,
+          displayName: "Test User",
+        })
+      );
 
       const account = new StellarSdk.Account(stellarAddress, "0");
       const transaction = new StellarSdk.TransactionBuilder(account, {
@@ -451,21 +459,15 @@ describe("AuthService - SEP-10 Verification", () => {
       const nonce = mockStoredChallenge(stellarAddress);
 
       // Simulate both requests seeing no user initially
-      mockDb.query.users.findFirst.mockResolvedValue(null);
+      mockFindFirstUser.mockResolvedValue(null);
       // But onConflictDoUpdate handles the race atomically
-      mockDb.insert.mockReturnValue({
-        values: vi.fn().mockReturnValue({
-          onConflictDoUpdate: vi.fn().mockReturnValue({
-            returning: vi.fn().mockResolvedValue([
-              {
-                id: "user-1",
-                stellarAddress,
-                displayName: null,
-              },
-            ]),
-          }),
-        }),
-      });
+      mockDb.insert.mockReturnValue(
+        fakeUserUpsertBuilder({
+          id: "user-1",
+          stellarAddress,
+          displayName: null,
+        })
+      );
 
       const account = new StellarSdk.Account(stellarAddress, "0");
       const transaction = new StellarSdk.TransactionBuilder(account, {

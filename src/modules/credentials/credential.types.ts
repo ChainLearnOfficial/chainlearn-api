@@ -72,3 +72,24 @@ export interface BatchMintResultItem {
     message: string;
   };
 }
+
+/** Result of GET /api/v1/courses/:id/completion-certificate (#387).
+ *  `pdf` is the rendered document; the remaining fields describe it and are
+ *  used for the response's Content-Disposition filename and metadata. */
+export interface CompletionCertificate {
+  pdf: Buffer;
+  /** Stable per (user, course), printed on the document. */
+  certificateId: string;
+  userName: string;
+  stellarAddress: string;
+  courseId: string;
+  courseTitle: string;
+  courseDifficulty: string;
+  /** ISO date (YYYY-MM-DD) the course was completed. */
+  completedOn: string;
+  /** e.g. "4 of 4". */
+  modulesCompleted: string;
+  onChainVerificationUrl: string | null;
+  /** True when the PDF was served from cache rather than re-rendered. */
+  cached: boolean;
+}

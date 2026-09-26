@@ -17,6 +17,34 @@ const READ_TIMEOUT_MS = 10_000;
 const WRITE_TIMEOUT_MS = 30_000;
 
 /**
+ * Read the ledger sequence number out of a Horizon transaction's `ledger`
+ * field.
+ *
+ * Horizon returns this as a plain number, but @stellar/stellar-sdk v13
+ * declares `TransactionRecord["ledger"]` as `CallFunction<LedgerRecord>`
+ * (a lazy-loader function) rather than the number it actually sends, so the
+ * declared type is unusable for arithmetic. Normalize through `unknown`
+ * rather than casting to `number`: that would silence the compiler while
+ * leaving a `() => Promise<...>` at runtime, and `latestLedger - NaN` is
+ * exactly the kind of silent corruption this function exists to prevent.
+ *
+ * Returns null for anything that isn't a usable sequence number, so callers
+ * degrade to "confirmations unknown" instead of reporting a wrong count.
+ */
+function toLedgerSequence(ledger: unknown): number | null {
+  if (typeof ledger === "number" && Number.isFinite(ledger)) return ledger;
+  if (
+    typeof ledger === "object" &&
+    ledger !== null &&
+    "sequence" in ledger &&
+    typeof (ledger as { sequence: unknown }).sequence === "number"
+  ) {
+    return (ledger as { sequence: number }).sequence;
+  }
+  return null;
+}
+
+/**
  * Core Stellar client wrapping Horizon + Soroban RPC interactions.
  * All external calls are protected by circuit breaker, retry, and timeout.
  */
@@ -196,7 +224,7 @@ export class StellarClient {
     }
 
     if (!tx.successful) {
-      return { status: "failed", ledger: tx.ledger, confirmations: null };
+      return { status: "failed", ledger: toLedgerSequence(tx.ledger), confirmations: null };
     }
 
     let confirmations: number | null = null;
@@ -205,15 +233,16 @@ export class StellarClient {
         this.horizon.ledgers().order("desc").limit(1).call(),
         READ_TIMEOUT_MS
       );
-      const latestSequence = latestLedgers.records[0]?.sequence;
-      if (typeof latestSequence === "number") {
-        confirmations = Math.max(latestSequence - tx.ledger + 1, 0);
+      const latestSequence = toLedgerSequence(latestLedgers.records[0]?.sequence);
+      const txLedger = toLedgerSequence(tx.ledger);
+      if (latestSequence !== null && txLedger !== null) {
+        confirmations = Math.max(latestSequence - txLedger + 1, 0);
       }
     } catch (err) {
       logger.warn({ err, txHash }, "Failed to fetch latest ledger for confirmation count");
     }
 
-    return { status: "confirmed", ledger: tx.ledger, confirmations };
+    return { status: "confirmed", ledger: toLedgerSequence(tx.ledger), confirmations };
   }
 
   /** Check Soroban RPC health by calling getLatestLedger. */

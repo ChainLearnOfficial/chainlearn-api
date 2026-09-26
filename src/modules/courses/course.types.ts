@@ -175,6 +175,17 @@ export type PopularCoursesQuery = z.infer<typeof popularCoursesQuerySchema>;
 export type EnrollCourseQuery = z.infer<typeof enrollCourseQuerySchema>;
 export type BatchEnrollBody = z.infer<typeof batchEnrollSchema>;
 export type ShareCodeParams = z.infer<typeof shareCodeParamsSchema>;
+
+/** One course's outcome in a POST /courses/enroll/batch response (#346).
+ * Enrollments are attempted independently, so one failure (course archived,
+ * waitlist full, already enrolled) doesn't roll back the rest. */
+export interface BatchEnrollEntry {
+  courseId: string;
+  success: boolean;
+  message?: string;
+  /** True when the request was instead queued on the course's waitlist. */
+  waitlisted?: boolean;
+}
 export type CreateCourseBody = z.infer<typeof createCourseSchema>;
 /**
  * Body of POST /admin/courses/:id/draft (#376): the same editable fields as an
@@ -203,7 +214,6 @@ export type ListReviewsQuery = z.infer<typeof listReviewsQuerySchema>;
 export type ListEnrolledUsersQuery = z.infer<typeof listEnrolledUsersQuerySchema>;
 export type CreateReviewBody = z.infer<typeof createReviewSchema>;
 export type ReportCourseBody = z.infer<typeof reportCourseSchema>;
-export type ListEnrolledUsersQuery = z.infer<typeof listEnrolledUsersQuerySchema>;
 
 export interface CourseSummary {
   id: string;
@@ -486,6 +496,7 @@ export interface EnrollmentTrendsResult {
   granularity: string;
   trends: EnrollmentTrendDataPoint[];
   totalEnrollments: number;
+  generatedAt: Date;
 }
 
 /** One module entry in the syllabus response. */
@@ -506,6 +517,66 @@ export interface CourseSyllabus {
   modules: SyllabusModule[];
   totalEstimatedDurationMinutes: number | null;
   generatedAt: Date;
+}
+
+// ─── Publish Readiness Check (#384) ─────────────────────────────────────────
+
+/**
+ * Which part of the course a publish-readiness issue is about. Values are
+ * stable strings so a client can group or localize the issues it renders.
+ */
+export type PublishCheckField =
+  | "title"
+  | "description"
+  | "difficulty"
+  | "modules"
+  | "moduleContent"
+  | "quizzes";
+
+/**
+ * `blocking` issues are exactly what publishCourse() refuses to publish
+ * over — so `ready: true` on a publish-check guarantees the subsequent
+ * publish succeeds. `advisory` issues are real quality gaps that don't stop
+ * a course going live (currently only missing module content) and are
+ * reported so creators can see them without being forced to fix them.
+ */
+export type PublishCheckSeverity = "blocking" | "advisory";
+
+/** One unmet publish requirement (#384). */
+export interface PublishCheckIssue {
+  field: PublishCheckField;
+  severity: PublishCheckSeverity;
+  /** What is missing, phrased so a creator can act on it directly. */
+  message: string;
+  /** Set when the issue is about one specific module. */
+  moduleId?: string;
+  moduleTitle?: string;
+}
+
+/** One requirement the check evaluated, satisfied or not (#384). The
+ * readiness score is computed from these, so the number is always
+ * explainable from the response itself. */
+export interface PublishCheckRequirement {
+  /** Stable identifier, e.g. "title" or "module:<id>:quizzes". */
+  key: string;
+  label: string;
+  satisfied: boolean;
+  severity: PublishCheckSeverity;
+}
+
+/** Response of POST /api/v1/admin/courses/:id/publish-check (#384).
+ * Non-destructive — nothing in the course is modified by the check. */
+export interface PublishCheckResult {
+  courseId: string;
+  /** True when `issues` contains no blocking entry — i.e. publishing now
+   * would succeed. */
+  ready: boolean;
+  /** 0–100, the share of requirements satisfied (blocking and advisory
+   * combined). Rounded to the nearest whole percent. */
+  readinessScore: number;
+  requirements: PublishCheckRequirement[];
+  issues: PublishCheckIssue[];
+  checkedAt: Date;
 }
 
 // ─── Enrollment Status (#381) ───────────────────────────────────────────────

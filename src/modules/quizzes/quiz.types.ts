@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { sanitizeText } from "../../utils/sanitize.js";
+
 // ─── Constants ──────────────────────────────────────────────────────────────
 
 // Single source of truth for the quiz passing threshold. Used by both
@@ -79,6 +81,121 @@ export const quizFeedbackSummaryQuerySchema = z.object({
   questionId: z.string().min(1).max(100).optional(),
 });
 
+// ─── Admin: Manual Quiz Authoring (#388) ─────────────────────────────────────
+
+/** Smallest workable number of choices for a multiple-choice question. */
+export const MIN_QUIZ_OPTIONS = 2;
+/** Upper bound on choices per question. Capped well below
+ *  submitQuizSchema's static max(20) so a hand-authored question can never
+ *  exceed what a submitted answer index can address. */
+export const MAX_QUIZ_OPTIONS = 10;
+
+/**
+ * One hand-authored question (#388). Matches the shape QuizService stores
+ * after AI generation, minus the shuffle bookkeeping (see the note on
+ * `original*` in quiz.service.ts) — an author's order *is* the final order.
+ *
+ * Text, options and feedback are HTML-stripped on the way in. They are
+ * rendered back to learners inside quiz feedback strings, so storing raw
+ * admin-supplied markup would be a stored-XSS vector for every client that
+ * renders them.
+ */
+export const authoredQuestionSchema = z
+  .object({
+    id: z
+      .string()
+      .trim()
+      .min(1, "Question id is required")
+      .max(100)
+      .transform(sanitizeText),
+    // `.trim()` before `.min()` on every string below: the length check has
+    // to see the trimmed value, or a whitespace-only field passes `.min(1)`
+    // and only becomes empty *after* the sanitizing transform, storing a
+    // blank question. Sanitizing strips markup but does not trim.
+    text: z
+      .string()
+      .trim()
+      .min(1, "Question text is required")
+      .max(2000)
+      .transform(sanitizeText),
+    options: z
+      .array(
+        z
+          .string()
+          .trim()
+          .min(1, "Options cannot be blank")
+          .max(500)
+          .transform(sanitizeText),
+      )
+      .min(MIN_QUIZ_OPTIONS, `A question needs at least ${MIN_QUIZ_OPTIONS} options`)
+      .max(MAX_QUIZ_OPTIONS, `A question can have at most ${MAX_QUIZ_OPTIONS} options`),
+    correctIndex: z.coerce
+      .number()
+      .int("correctIndex must be a whole number")
+      .min(0, "correctIndex cannot be negative"),
+    // Blank feedback is treated as absent rather than rejected: an authoring
+    // form naturally submits "" for an optional field the author left empty,
+    // and a 400 for that would be noise. Storing "" instead would put an
+    // empty string into the learner's feedback text.
+    correctFeedback: z.preprocess(
+      (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+      z.string().max(2000).transform(sanitizeText).optional(),
+    ),
+    incorrectFeedback: z.preprocess(
+      (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+      z.string().max(2000).transform(sanitizeText).optional(),
+    ),
+  })
+  .superRefine((question, ctx) => {
+    // Can't be a field rule: it depends on options.length.
+    if (question.correctIndex >= question.options.length) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["correctIndex"],
+        message: `correctIndex ${question.correctIndex} is out of range — this question has ${question.options.length} options (valid indexes 0-${question.options.length - 1})`,
+      });
+    }
+  });
+
+/** A whole hand-authored quiz. Question ids must be unique within a quiz:
+ *  QuizService.submitQuiz resolves a submitted answer to a question with
+ *  `questions.find(q => q.id === answer.questionId)`, so a duplicate id
+ *  would silently make the second copy unanswerable and permanently score
+ *  as "not answered". */
+export const authoredQuizSchema = z
+  .object({
+    questions: z
+      .array(authoredQuestionSchema)
+      .min(1, "A quiz needs at least one question")
+      .max(50, "Too many questions"),
+  })
+  .superRefine((quiz, ctx) => {
+    const seen = new Map<string, number>();
+    quiz.questions.forEach((question, index) => {
+      const first = seen.get(question.id);
+      if (first !== undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["questions", index, "id"],
+          message: `Duplicate question id "${question.id}" (also used by question ${first + 1}) — every question needs a unique id`,
+        });
+        return;
+      }
+      seen.set(question.id, index);
+    });
+  });
+
+/** Route params for the admin quiz list/create endpoints (#388). */
+export const adminQuizModuleParamsSchema = z.object({
+  id: z.string().uuid("Invalid course ID"),
+  moduleId: z.string().min(1).max(100),
+});
+
+/** Route params for a single admin quiz (#388). */
+export const adminQuizParamsSchema = adminQuizModuleParamsSchema.extend({
+  quizId: z.string().uuid("Invalid quiz ID"),
+});
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 export type GenerateQuizBody = z.infer<typeof generateQuizSchema>;
@@ -144,4 +261,53 @@ export interface QuizFeedbackSummaryEntry {
   questionId: string;
   total: number;
   counts: Record<(typeof QUIZ_FEEDBACK_TYPES)[number], number>;
+}
+
+// ─── Admin Quiz Types (#388) ────────────────────────────────────────────────
+
+/** A question as an admin sees it. Unlike QuizQuestion, this includes
+ *  `correctIndex` — the admin's whole job is authoring the right answer, and
+ *  this is an admin-only route. Never send this shape to a learner. */
+export interface AdminQuizQuestion {
+  id: string;
+  text: string;
+  options: string[];
+  correctIndex: number;
+  correctFeedback?: string;
+  incorrectFeedback?: string;
+}
+
+/** A quiz row as the admin quiz endpoints return it (#388). */
+export interface AdminQuiz {
+  id: string;
+  courseId: string;
+  moduleId: string;
+  questions: AdminQuizQuestion[];
+  questionCount: number;
+  /** The user the AI generated this quiz for, or null for a hand-authored
+   *  course-wide quiz. */
+  generatedFor: string | null;
+  /** How many learners have submitted this quiz. Surfaced so an admin can
+   *  see what deleting it would destroy — quiz_submissions cascades. */
+  submissionCount: number;
+  createdAt: Date;
+}
+
+/** One validated hand-authored question, post-sanitization — the exact shape
+ *  written to `quizzes.questions`. */
+export type AuthoredQuestion = z.infer<typeof authoredQuestionSchema>;
+export type AuthoredQuizBody = z.infer<typeof authoredQuizSchema>;
+export type AdminQuizModuleParams = z.infer<typeof adminQuizModuleParamsSchema>;
+export type AdminQuizParams = z.infer<typeof adminQuizParamsSchema>;
+
+/** Result of DELETE on an admin quiz (#388). `submissionsDeleted` is
+ *  reported explicitly because quiz_submissions rows cascade, and those
+ *  rows are what reward history is read from. */
+export interface AdminQuizDeleteResult {
+  quizId: string;
+  courseId: string;
+  moduleId: string;
+  submissionsDeleted: number;
+  claimedRewardsDeleted: number;
+  deletedAt: Date;
 }

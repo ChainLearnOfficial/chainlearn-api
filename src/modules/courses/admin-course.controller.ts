@@ -161,6 +161,22 @@ export class AdminCourseController {
   }
 
   /**
+   * POST /api/v1/admin/courses/:id/publish-check
+   * Report whether a course is ready to publish, with the list of missing
+   * requirements and a readiness score (#384). Non-destructive — the course
+   * is not modified, so this is safe to call repeatedly while authoring.
+   */
+  async publishCheck(
+    request: FastifyRequest<{ Params: CourseIdParams }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id } = request.params;
+    const check = await courseService.getPublishCheck(id);
+
+    reply.send({ success: true, data: check });
+  }
+
+  /**
    * POST /api/admin/courses/:id/duplicate
    * Duplicate a course (metadata, modules, quizzes) into a new draft course.
    */

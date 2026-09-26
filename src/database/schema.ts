@@ -37,6 +37,11 @@ export const users = pgTable(
     language: varchar("language", { length: 10 }).default("en"),
     credits: integer("credits").notNull().default(0),
     isAdmin: boolean("is_admin").notNull().default(false),
+    // Set by AdminUsersService.banUser (#226). A non-null bannedAt makes
+    // authGuard reject the user with 403 before any route handler runs, so a
+    // ban takes effect on the next request without needing to revoke tokens.
+    bannedAt: timestamp("banned_at", { withTimezone: true }),
+    banReason: text("ban_reason"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -87,6 +92,11 @@ export const courses = pgTable(
     // True while the course is a saved draft (#376). Tracked separately from
     // isActive: a draft is never active, and publishing clears this flag.
     isDraft: boolean("is_draft").notNull().default(false),
+    // Set by CourseService.archiveCourse (#358) when the course is hidden
+    // from listings. Distinguishes a deliberate archive from a course that
+    // was merely never published or was soft-deleted (both just isActive =
+    // false). Null for courses that were never archived.
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
     // 0–100 accessibility score for the course's authored content (#326),
     // recomputed on every create/update. Null until first written. Advisory
     // only — a low score never blocks saving the course.
@@ -112,6 +122,36 @@ export const courses = pgTable(
       table.isActive,
       sql`${table.createdAt} DESC`
     ),
+  ]
+);
+
+// ─── Course Shares (referral links) ─────────────────────────────────────────
+
+export const courseShares = pgTable(
+  "course_shares",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    courseId: uuid("course_id")
+      .notNull()
+      .references(() => courses.id, { onDelete: "cascade" }),
+    // Short token embedded in the shareable URL. Unique so a code can be
+    // resolved to exactly one (user, course) pair.
+    referralCode: varchar("referral_code", { length: 16 }).notNull().unique(),
+    clickCount: integer("click_count").notNull().default(0),
+    enrollmentCount: integer("enrollment_count").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_course_shares_user_course").on(
+      table.userId,
+      table.courseId
+    ),
+    index("idx_course_shares_referral_code").on(table.referralCode),
   ]
 );
 
@@ -248,6 +288,90 @@ export const quizFeedback = pgTable(
     check(
       "chk_quiz_feedback_type",
       sql`type IN ('unclear', 'wrong', 'other')`
+    ),
+  ]
+);
+
+// ─── Course Reviews / Ratings ───────────────────────────────────────────────
+
+export const courseReviews = pgTable(
+  "course_reviews",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    courseId: uuid("course_id")
+      .notNull()
+      .references(() => courses.id, { onDelete: "cascade" }),
+    rating: integer("rating").notNull(),
+    reviewText: text("review_text"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_course_reviews_user_course").on(
+      table.userId,
+      table.courseId
+    ),
+    index("idx_course_reviews_course_id").on(table.courseId),
+    // Rating is a 1–5 star value; the DB rejects anything outside that
+    // range so a bad write can't skew a course's average rating.
+    check("chk_course_reviews_rating", sql`rating >= 1 AND rating <= 5`),
+  ]
+);
+
+// ─── Notifications ──────────────────────────────────────────────────────────
+
+export const notifications = pgTable(
+  "notifications",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    type: varchar("type", { length: 50 }).notNull(),
+    title: varchar("title", { length: 255 }).notNull(),
+    message: text("message").notNull(),
+    read: boolean("read").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("idx_notifications_user_created").on(
+      table.userId,
+      sql`${table.createdAt} DESC`
+    ),
+    index("idx_notifications_user_read").on(table.userId, table.read),
+  ]
+);
+
+// ─── Announcements ──────────────────────────────────────────────────────────
+
+export const announcements = pgTable(
+  "announcements",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    title: varchar("title", { length: 255 }).notNull(),
+    message: text("message").notNull(),
+    priority: varchar("priority", { length: 20 }).notNull().default("normal"),
+    active: boolean("active").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+  },
+  (table) => [
+    // Matches the public listing's access pattern (WHERE active = true AND
+    // (expires_at IS NULL OR expires_at > now()) ORDER BY created_at DESC).
+    index("idx_announcements_active_created").on(
+      table.active,
+      sql`${table.createdAt} DESC`
     ),
   ]
 );

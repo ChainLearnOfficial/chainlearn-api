@@ -13,6 +13,12 @@ import {
   listEnrolledUsersQuerySchema,
   enrollmentTrendsQuerySchema,
   reorderModulesSchema,
+  cloneCourseSchema,
+  moduleContentParamsSchema,
+  contentParamsSchema,
+  createContentSchema,
+  updateContentSchema,
+  reorderContentSchema,
 } from "./course.types.js";
 
 /** Admin-only course management (#292). Every route requires an admin user. */
@@ -225,7 +231,7 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
     (request, reply) => adminCourseController.publish(request, reply)
   );
 
-  app.post<{ Params: { id: string } }>(
+  app.post<{ Params: { id: string }; Body?: import("./course.types.js").CloneCourseBody }>(
     "/:id/duplicate",
     {
       preHandler: [validate({ params: courseIdParamsSchema })],
@@ -238,6 +244,27 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => adminCourseController.duplicate(request, reply)
+  );
+
+  app.post<{ Params: { id: string }; Body: import("./course.types.js").CloneCourseBody }>(
+    "/:id/clone",
+    {
+      preHandler: [validate({ params: courseIdParamsSchema, body: cloneCourseSchema })],
+      schema: {
+        description:
+          "Clone a course including all content, modules, and quizzes into a new draft course (admin only, #378)",
+        tags: ["admin", "courses"],
+        security: [{ bearerAuth: [] }],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+        body: {
+          type: "object",
+          properties: {
+            title: { type: "string", minLength: 1, maxLength: 255 },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => adminCourseController.clone(request, reply)
   );
 
   app.post<{
@@ -350,6 +377,156 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => adminCourseController.reorderModules(request, reply)
+  );
+
+  app.get<{ Params: { id: string; moduleId: string } }>(
+    "/:id/modules/:moduleId/content",
+    {
+      preHandler: [validate({ params: moduleContentParamsSchema })],
+      schema: {
+        description: "List content items within a module (admin only, #382)",
+        tags: ["admin", "courses"],
+        security: [{ bearerAuth: [] }],
+        params: {
+          type: "object",
+          required: ["id", "moduleId"],
+          properties: {
+            id: { type: "string", format: "uuid" },
+            moduleId: { type: "string", minLength: 1, maxLength: 100 },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => adminCourseController.listContent(request, reply)
+  );
+
+  app.post<{
+    Params: { id: string; moduleId: string };
+    Body: import("./course.types.js").CreateContentBody;
+  }>(
+    "/:id/modules/:moduleId/content",
+    {
+      preHandler: [
+        validate({ params: moduleContentParamsSchema, body: createContentSchema }),
+      ],
+      schema: {
+        description: "Create a content item within a module (admin only, #382)",
+        tags: ["admin", "courses"],
+        security: [{ bearerAuth: [] }],
+        params: {
+          type: "object",
+          required: ["id", "moduleId"],
+          properties: {
+            id: { type: "string", format: "uuid" },
+            moduleId: { type: "string", minLength: 1, maxLength: 100 },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => adminCourseController.createContent(request, reply)
+  );
+
+  app.put<{
+    Params: { id: string; moduleId: string; contentId: string };
+    Body: import("./course.types.js").UpdateContentBody;
+  }>(
+    "/:id/modules/:moduleId/content/:contentId",
+    {
+      preHandler: [
+        validate({ params: contentParamsSchema, body: updateContentSchema }),
+      ],
+      schema: {
+        description: "Update a content item within a module (admin only, #382)",
+        tags: ["admin", "courses"],
+        security: [{ bearerAuth: [] }],
+        params: {
+          type: "object",
+          required: ["id", "moduleId", "contentId"],
+          properties: {
+            id: { type: "string", format: "uuid" },
+            moduleId: { type: "string", minLength: 1, maxLength: 100 },
+            contentId: { type: "string", format: "uuid" },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => adminCourseController.updateContent(request, reply)
+  );
+
+  app.delete<{ Params: { id: string; moduleId: string; contentId: string } }>(
+    "/:id/modules/:moduleId/content/:contentId",
+    {
+      preHandler: [validate({ params: contentParamsSchema })],
+      schema: {
+        description: "Delete a content item within a module (admin only, #382)",
+        tags: ["admin", "courses"],
+        security: [{ bearerAuth: [] }],
+        params: {
+          type: "object",
+          required: ["id", "moduleId", "contentId"],
+          properties: {
+            id: { type: "string", format: "uuid" },
+            moduleId: { type: "string", minLength: 1, maxLength: 100 },
+            contentId: { type: "string", format: "uuid" },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => adminCourseController.deleteContent(request, reply)
+  );
+
+  app.post<{
+    Params: { id: string; moduleId: string };
+    Body: import("./course.types.js").ReorderContentBody;
+  }>(
+    "/:id/modules/:moduleId/content/reorder",
+    {
+      preHandler: [
+        validate({ params: moduleContentParamsSchema, body: reorderContentSchema }),
+      ],
+      schema: {
+        description:
+          "Reorder content items within a module atomically (admin only, #382)",
+        tags: ["admin", "courses"],
+        security: [{ bearerAuth: [] }],
+        params: {
+          type: "object",
+          required: ["id", "moduleId"],
+          properties: {
+            id: { type: "string", format: "uuid" },
+            moduleId: { type: "string", minLength: 1, maxLength: 100 },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => adminCourseController.reorderContent(request, reply)
+  );
+
+  app.put<{
+    Params: { id: string; moduleId: string };
+    Body: import("./course.types.js").ReorderContentBody;
+  }>(
+    "/:id/modules/:moduleId/content/reorder",
+    {
+      preHandler: [
+        validate({ params: moduleContentParamsSchema, body: reorderContentSchema }),
+      ],
+      schema: {
+        description:
+          "Reorder content items within a module atomically (admin only, #382)",
+        tags: ["admin", "courses"],
+        security: [{ bearerAuth: [] }],
+        params: {
+          type: "object",
+          required: ["id", "moduleId"],
+          properties: {
+            id: { type: "string", format: "uuid" },
+            moduleId: { type: "string", minLength: 1, maxLength: 100 },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => adminCourseController.reorderContent(request, reply)
   );
 
   app.get<{ Params: { id: string } }>(

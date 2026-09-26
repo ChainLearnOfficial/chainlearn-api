@@ -2,7 +2,6 @@ import type { FastifyInstance, FastifySchema } from "fastify";
 import { courseController } from "./course.controller.js";
 import { authGuard, adminGuard, optionalAuth } from "../../middleware/auth.js";
 import { waitlistController } from "./waitlist.controller.js";
-import { authGuard, optionalAuth } from "../../middleware/auth.js";
 import { validate } from "../../middleware/validation.js";
 import {
   listCoursesSchema,

@@ -20,6 +20,10 @@ export const batchMintCredentialSchema = z.object({
     .max(20, "Too many submissions"),
 });
 
+export const certificateIdParamsSchema = z.object({
+  id: z.string().uuid("Invalid credential ID"),
+});
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 export type MintCredentialBody = z.infer<typeof mintCredentialSchema>;
@@ -42,6 +46,20 @@ export interface CredentialListItem {
   mintTxHash: string | null;
   revoked: boolean;
   mintedAt: Date;
+}
+
+/** A earned certificate with its verification and download links (#371). */
+export interface CertificateItem {
+  credentialId: string;
+  courseId: string;
+  courseTitle: string;
+  score: number;
+  issuedAt: Date;
+  nftAssetCode: string | null;
+  nftIssuer: string | null;
+  /** Public explorer link to the on-chain mint transaction, or null when none. */
+  verificationUrl: string | null;
+  downloadUrl: string;
 }
 
 export interface BatchMintResultItem {

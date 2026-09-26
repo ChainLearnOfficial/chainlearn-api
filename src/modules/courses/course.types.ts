@@ -176,6 +176,25 @@ export type EnrollCourseQuery = z.infer<typeof enrollCourseQuerySchema>;
 export type BatchEnrollBody = z.infer<typeof batchEnrollSchema>;
 export type ShareCodeParams = z.infer<typeof shareCodeParamsSchema>;
 export type CreateCourseBody = z.infer<typeof createCourseSchema>;
+/**
+ * Body of POST /admin/courses/:id/draft (#376): the same editable fields as an
+ * update, minus `isActive` — a draft is never published by saving it.
+ */
+export const draftCourseSchema = z
+  .object({
+    title: z.string().min(1).max(255).optional(),
+    description: z.string().min(1).optional(),
+    difficulty: z.enum(["beginner", "intermediate", "advanced"]).optional(),
+    tags: z.array(z.string().min(1).max(50)).max(20).optional(),
+    courseModules: z.array(courseModuleSchema).max(100).optional(),
+    contentHash: z.string().max(64).optional(),
+    prerequisites: prerequisitesSchema.optional(),
+  })
+  .refine((data) => Object.keys(data).length > 0, {
+    message: "At least one field must be provided",
+  });
+
+export type DraftCourseBody = z.infer<typeof draftCourseSchema>;
 export type UpdateCourseBody = z.infer<typeof updateCourseSchema>;
 export type CreateModuleBody = z.infer<typeof createModuleSchema>;
 export type UpdateModuleBody = z.infer<typeof updateModuleSchema>;
@@ -327,6 +346,8 @@ export interface AdminCourse {
   courseModules: CourseModuleMetadata[];
   contentHash: string | null;
   isActive: boolean;
+  /** True while the course is a saved, unpublished draft (#376). */
+  isDraft: boolean;
   modules: CourseModuleDefinition[];
   /** 0–100 accessibility score for the authored content (#326). */
   accessibilityScore: number | null;
@@ -396,6 +417,43 @@ export interface CourseAnalytics {
   };
   /** Modules ordered by average score ascending — lowest first. */
   moduleDifficulty: ModuleDifficulty[];
+  generatedAt: Date;
+}
+
+/** One module's row in the engagement report (#377). */
+export interface ModuleEngagement {
+  moduleId: string;
+  title: string | null;
+  /** Distinct users with a quiz submission for this module. */
+  learnersReached: number;
+  /** Percentage of the previous stage's learners who did not reach this module. */
+  dropOffRate: number;
+  averageScore: number | null;
+  /** Percentage of this module's learners who retook its quiz. */
+  quizRetakeRate: number;
+}
+
+export interface EngagementTrendPoint {
+  /** Start of the week (YYYY-MM-DD). */
+  week: string;
+  enrollments: number;
+  completions: number;
+}
+
+/** Response of GET /api/v1/admin/courses/:id/engagement (#377). */
+export interface CourseEngagement {
+  courseId: string;
+  totalEnrollments: number;
+  /** Percentage (0-100) of enrollments that completed. */
+  completionRate: number;
+  averageTimeToCompleteHours: number | null;
+  /** Percentage of quiz-taking learners who retook at least one quiz. */
+  quizRetakeRate: number;
+  modules: ModuleEngagement[];
+  /** The module where the largest share of learners dropped off, if any. */
+  biggestDropOff: { moduleId: string; title: string | null; dropOffRate: number } | null;
+  /** Enrollments and completions per week for the last 12 weeks. */
+  trends: EngagementTrendPoint[];
   generatedAt: Date;
 }
 

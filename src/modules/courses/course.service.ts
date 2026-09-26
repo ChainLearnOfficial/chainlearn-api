@@ -55,6 +55,9 @@ import type {
   ReportCourseBody,
   CourseReportResult,
   CourseAnalytics,
+  CourseEngagement,
+  DraftCourseBody,
+  ModuleEngagement,
   EnrollmentTrendPoint,
   ModuleDifficulty,
   EnrollmentTrendsQuery,
@@ -1563,6 +1566,7 @@ export class CourseService {
       courseModules: this.normalizeCourseModules(row.courseModules),
       contentHash: row.contentHash,
       isActive: row.isActive,
+      isDraft: row.isDraft,
       modules: (row.modules ?? []) as CourseModuleDefinition[],
       accessibilityScore: row.accessibilityScore,
       prerequisites: row.prerequisites ?? [],
@@ -1628,9 +1632,13 @@ export class CourseService {
       ? { ...data, prerequisites: data.prerequisites.filter((id) => id !== courseId) }
       : data;
 
+    // Publishing (isActive = true) ends the draft state (#376).
+    const values =
+      sanitized.isActive === true ? { ...sanitized, isDraft: false } : sanitized;
+
     const [course] = await db
       .update(courses)
-      .set(sanitized)
+      .set(values)
       .where(eq(courses.id, courseId))
       .returning();
 
@@ -1641,6 +1649,37 @@ export class CourseService {
     await this.invalidateCourseCaches(courseId);
     await auditLog("course.updated", { courseId });
     logger.info({ courseId }, "Course updated");
+
+    return this.toAdminCourse(course);
+  }
+
+  /**
+   * Saves course content as a draft (#376): applies the supplied fields and
+   * marks the course `isDraft = true, isActive = false`, so it is hidden from
+   * users while it is worked on. It can be saved any number of times, and is
+   * published by setting `isActive = true` (which clears the draft flag).
+   */
+  async saveDraft(
+    courseId: string,
+    data: DraftCourseBody,
+  ): Promise<AdminCourse> {
+    const sanitized = data.prerequisites
+      ? { ...data, prerequisites: data.prerequisites.filter((id) => id !== courseId) }
+      : data;
+
+    const [course] = await db
+      .update(courses)
+      .set({ ...sanitized, isDraft: true, isActive: false })
+      .where(eq(courses.id, courseId))
+      .returning();
+
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    await this.invalidateCourseCaches(courseId);
+    await auditLog("course.draft_saved", { courseId });
+    logger.info({ courseId }, "Course saved as draft");
 
     return this.toAdminCourse(course);
   }
@@ -1942,6 +1981,165 @@ export class CourseService {
     await cacheSet(cacheKeyString, analytics, 3600);
 
     return analytics;
+  }
+
+  /**
+   * Engagement metrics for a course (#377): completion rate, average time to
+   * complete, per-module drop-off / average score / quiz retake rate, the
+   * module with the largest drop-off, and weekly enrollment/completion trends.
+   * Cached for 1 hour.
+   *
+   * A learner "reaches" a module once they have a quiz submission for it.
+   * Drop-off for a module is the share of the previous stage's learners who
+   * never reached it (the first module is measured against enrollments).
+   * A retake is a superseded submission (see quiz retry).
+   */
+  async getCourseEngagement(courseId: string): Promise<CourseEngagement> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    const namespace = "courses";
+    const cacheKeyString = cacheKey(namespace, "engagement", courseId);
+    const cached = await cacheGet<CourseEngagement>(namespace, cacheKeyString);
+    if (cached) return cached;
+
+    const [[totals], moduleRows, [retakes], enrollTrend, completeTrend] = await Promise.all([
+      db
+        .select({
+          totalEnrollments: count(),
+          completed: sql<number>`COUNT(*) FILTER (WHERE ${enrollments.completedAt} IS NOT NULL)`.mapWith(Number),
+          avgCompletionHours: sql<string | null>`AVG(EXTRACT(EPOCH FROM (${enrollments.completedAt} - ${enrollments.enrolledAt})) / 3600.0) FILTER (WHERE ${enrollments.completedAt} IS NOT NULL)`,
+        })
+        .from(enrollments)
+        .where(eq(enrollments.courseId, courseId)),
+
+      db
+        .select({
+          moduleId: quizzes.moduleId,
+          learners: sql<number>`COUNT(DISTINCT ${quizSubmissions.userId})`.mapWith(Number),
+          retakers: sql<number>`COUNT(DISTINCT ${quizSubmissions.userId}) FILTER (WHERE ${quizSubmissions.superseded} = true)`.mapWith(Number),
+          avgScorePercent: sql<string | null>`AVG(${quizSubmissions.score}::numeric / NULLIF(jsonb_array_length(${quizzes.questions}), 0) * 100) FILTER (WHERE ${quizSubmissions.superseded} = false)`,
+        })
+        .from(quizSubmissions)
+        .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+        .where(eq(quizzes.courseId, courseId))
+        .groupBy(quizzes.moduleId),
+
+      db
+        .select({
+          learners: sql<number>`COUNT(DISTINCT ${quizSubmissions.userId})`.mapWith(Number),
+          retakers: sql<number>`COUNT(DISTINCT ${quizSubmissions.userId}) FILTER (WHERE ${quizSubmissions.superseded} = true)`.mapWith(Number),
+        })
+        .from(quizSubmissions)
+        .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+        .where(eq(quizzes.courseId, courseId)),
+
+      db
+        .select({
+          week: sql<string>`date_trunc('week', ${enrollments.enrolledAt})::date`,
+          count: count(),
+        })
+        .from(enrollments)
+        .where(
+          and(
+            eq(enrollments.courseId, courseId),
+            sql`${enrollments.enrolledAt} >= now() - interval '12 weeks'`,
+          ),
+        )
+        .groupBy(sql`date_trunc('week', ${enrollments.enrolledAt})`),
+
+      db
+        .select({
+          week: sql<string>`date_trunc('week', ${enrollments.completedAt})::date`,
+          count: count(),
+        })
+        .from(enrollments)
+        .where(
+          and(
+            eq(enrollments.courseId, courseId),
+            sql`${enrollments.completedAt} >= now() - interval '12 weeks'`,
+          ),
+        )
+        .groupBy(sql`date_trunc('week', ${enrollments.completedAt})`),
+    ]);
+
+    const pct = (part: number, whole: number): number =>
+      whole > 0 ? Math.round((part / whole) * 100) : 0;
+
+    const totalEnrollments = totals?.totalEnrollments ?? 0;
+    const completed = totals?.completed ?? 0;
+
+    // Order modules by their authored definition, then any others.
+    const moduleDefinitions = (course.modules ?? []) as CourseModuleDefinition[];
+    const orderById = new Map(moduleDefinitions.map((m, i) => [m.id, i]));
+    const titleById = new Map(moduleDefinitions.map((m) => [m.id, m.title]));
+    const orderedRows = [...moduleRows].sort(
+      (a, b) =>
+        (orderById.get(a.moduleId) ?? Number.MAX_SAFE_INTEGER) -
+        (orderById.get(b.moduleId) ?? Number.MAX_SAFE_INTEGER),
+    );
+
+    let previous = totalEnrollments;
+    const modules: ModuleEngagement[] = orderedRows.map((row) => {
+      const dropOffRate = previous > 0 ? Math.max(0, pct(previous - row.learners, previous)) : 0;
+      previous = row.learners;
+      return {
+        moduleId: row.moduleId,
+        title: titleById.get(row.moduleId) ?? null,
+        learnersReached: row.learners,
+        dropOffRate,
+        averageScore:
+          row.avgScorePercent !== null && row.avgScorePercent !== undefined
+            ? Math.round(Number(row.avgScorePercent))
+            : null,
+        quizRetakeRate: pct(row.retakers, row.learners),
+      };
+    });
+
+    const worst = modules.reduce<ModuleEngagement | null>(
+      (best, m) => (m.dropOffRate > (best?.dropOffRate ?? 0) ? m : best),
+      null,
+    );
+
+    // Weekly buckets for the last 12 weeks, merged from both series.
+    const weeks = new Map<string, { enrollments: number; completions: number }>();
+    for (const row of enrollTrend) {
+      weeks.set(row.week, { enrollments: row.count, completions: 0 });
+    }
+    for (const row of completeTrend) {
+      const entry = weeks.get(row.week) ?? { enrollments: 0, completions: 0 };
+      entry.completions = row.count;
+      weeks.set(row.week, entry);
+    }
+    const trends = [...weeks.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([week, value]) => ({ week, ...value }));
+
+    const engagement: CourseEngagement = {
+      courseId,
+      totalEnrollments,
+      completionRate: pct(completed, totalEnrollments),
+      averageTimeToCompleteHours:
+        totals?.avgCompletionHours !== null && totals?.avgCompletionHours !== undefined
+          ? Math.round(Number(totals.avgCompletionHours) * 10) / 10
+          : null,
+      quizRetakeRate: pct(retakes?.retakers ?? 0, retakes?.learners ?? 0),
+      modules,
+      biggestDropOff:
+        worst && worst.dropOffRate > 0
+          ? { moduleId: worst.moduleId, title: worst.title, dropOffRate: worst.dropOffRate }
+          : null,
+      trends,
+      generatedAt: new Date(),
+    };
+
+    await cacheSet(cacheKeyString, engagement, 3600);
+
+    return engagement;
   }
 
   /**

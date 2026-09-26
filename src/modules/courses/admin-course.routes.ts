@@ -5,6 +5,7 @@ import { validate } from "../../middleware/validation.js";
 import {
   createCourseSchema,
   updateCourseSchema,
+  draftCourseSchema,
   courseIdParamsSchema,
   createModuleSchema,
   updateModuleSchema,
@@ -135,6 +136,49 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => adminCourseController.update(request, reply)
+  );
+
+  app.post<{
+    Params: { id: string };
+    Body: import("./course.types.js").DraftCourseBody;
+  }>(
+    "/:id/draft",
+    {
+      preHandler: [
+        validate({ params: courseIdParamsSchema, body: draftCourseSchema }),
+      ],
+      schema: {
+        description:
+          "Save course content as a draft without publishing (admin only). The course is hidden from users and can be saved repeatedly; publish it by setting isActive to true.",
+        tags: ["admin", "courses"],
+        security: [{ bearerAuth: [] }],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+        body: {
+          type: "object",
+          properties: {
+            title: { type: "string", minLength: 1, maxLength: 255 },
+            description: { type: "string", minLength: 1 },
+            difficulty: {
+              type: "string",
+              enum: ["beginner", "intermediate", "advanced"],
+            },
+            tags: {
+              type: "array",
+              items: { type: "string", minLength: 1, maxLength: 50 },
+              maxItems: 20,
+            },
+            courseModules: { type: "array", maxItems: 100 },
+            contentHash: { type: "string", maxLength: 64 },
+            prerequisites: {
+              type: "array",
+              items: { type: "string", format: "uuid" },
+              maxItems: 20,
+            },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => adminCourseController.saveDraft(request, reply)
   );
 
   app.delete<{ Params: { id: string } }>(
@@ -321,6 +365,21 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => adminCourseController.analytics(request, reply)
+  );
+
+  app.get<{ Params: { id: string } }>(
+    "/:id/engagement",
+    {
+      preHandler: [validate({ params: courseIdParamsSchema })],
+      schema: {
+        description:
+          "Course engagement metrics: completion rate, average time to complete, per-module drop-off, average score and quiz retake rate, the biggest drop-off point, and weekly enrollment/completion trends (admin only, cached 1 hour)",
+        tags: ["admin", "courses"],
+        security: [{ bearerAuth: [] }],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      } as FastifySchema,
+    },
+    (request, reply) => adminCourseController.engagement(request, reply)
   );
 
   app.get<{

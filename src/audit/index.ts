@@ -17,6 +17,7 @@ type AuditEvent =
   | "course.referral_enrolled"
   | "course.created"
   | "course.updated"
+  | "course.draft_saved"
   | "course.deleted"
   | "course.published"
   | "course.duplicated"

@@ -103,6 +103,43 @@ export class CredentialController {
 
     reply.send({ success: true, data: creds });
   }
+
+  /**
+   * GET /api/v1/users/me/certificates
+   * The authenticated user's earned certificates with download and
+   * verification URLs (#371).
+   */
+  async certificates(
+    request: FastifyRequest,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { authUser } = request as AuthenticatedRequest;
+    const certificates = await credentialService.listCertificates(authUser.id);
+
+    reply.send({ success: true, data: certificates });
+  }
+
+  /**
+   * GET /api/v1/credentials/:id/certificate
+   * Download one certificate as a JSON document (#371).
+   */
+  async downloadCertificate(
+    request: FastifyRequest<{ Params: { id: string } }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { authUser } = request as AuthenticatedRequest;
+    const certificate = await credentialService.getCertificate(
+      authUser.id,
+      request.params.id
+    );
+
+    reply
+      .header(
+        "Content-Disposition",
+        `attachment; filename="certificate-${certificate.credentialId}.json"`
+      )
+      .send({ success: true, data: certificate });
+  }
 }
 
 export const credentialController = new CredentialController();

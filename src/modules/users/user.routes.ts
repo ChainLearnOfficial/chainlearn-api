@@ -5,6 +5,7 @@ import { validate } from "../../middleware/validation.js";
 import { activityQuerySchema, updateProfileSchema } from "./user.types.js";
 import { config } from "../../config/index.js";
 import { notificationController } from "../notifications/notification.controller.js";
+import { credentialController } from "../credentials/credential.controller.js";
 import {
   listNotificationsQuerySchema,
   notificationIdParamsSchema,
@@ -92,6 +93,32 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => userController.getProgress(request, reply)
+  );
+
+  app.get(
+    "/me/certificates",
+    {
+      schema: {
+        description:
+          "Earned certificates with credential ID, course title, score, issuance date, verification URL and download URL, newest first (cached 5 min)",
+        tags: ["users"],
+        security: [{ bearerAuth: [] }],
+      } as FastifySchema,
+    },
+    (request, reply) => credentialController.certificates(request, reply)
+  );
+
+  app.get(
+    "/me/recommendations",
+    {
+      schema: {
+        description:
+          "Personalized course recommendations based on completed and enrolled courses, quiz scores, learning goal, pace and what similar learners took. Each includes a confidence score and reasons (cached per user for 1 hour)",
+        tags: ["users"],
+        security: [{ bearerAuth: [] }],
+      } as FastifySchema,
+    },
+    (request, reply) => userController.getRecommendations(request, reply)
   );
 
   app.get(

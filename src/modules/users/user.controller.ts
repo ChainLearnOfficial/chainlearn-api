@@ -87,6 +87,20 @@ export class UserController {
   }
 
   /**
+   * GET /api/v1/users/me/recommendations
+   * Personalized course recommendations with confidence scores (#375).
+   */
+  async getRecommendations(
+    request: FastifyRequest,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { authUser } = request as AuthenticatedRequest;
+    const recommendations = await userService.getRecommendations(authUser.id);
+
+    reply.send({ success: true, data: recommendations });
+  }
+
+  /**
    * GET /api/users/me/export
    * GDPR data export — returns all of the user's data as a downloadable
    * JSON file (closes #350).

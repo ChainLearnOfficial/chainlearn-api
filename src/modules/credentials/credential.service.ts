@@ -21,7 +21,12 @@ import { config } from "../../config/index.js";
 import { logger } from "../../utils/logger.js";
 import crypto from "node:crypto";
 import StellarSdk from "@stellar/stellar-sdk";
+import {
+  buildCertificateDownloadUrl,
+  buildVerificationUrl,
+} from "./certificate.js";
 import type {
+  CertificateItem,
   BatchMintResultItem,
   CredentialListItem,
   MintResult,
@@ -193,6 +198,7 @@ export class CredentialService {
 
       await cacheDel(cacheKey("user", "progress", userId));
       await cacheDel(cacheKey("credentials", "list", userId));
+      await cacheDel(cacheKey("credentials", "certificates", userId));
       await cacheInvalidatePattern(cacheKey("user", "activity", userId, "*"));
 
       return {
@@ -239,6 +245,54 @@ export class CredentialService {
     }
 
     return results;
+  }
+
+  /**
+   * The user's earned (non-revoked) certificates with verification and
+   * download links, newest first (#371). Cached for 5 minutes.
+   */
+  async listCertificates(userId: string): Promise<CertificateItem[]> {
+    const namespace = "credentials";
+    const cacheKeyString = cacheKey(namespace, "certificates", userId);
+
+    const cached = await cacheGet<CertificateItem[]>(namespace, cacheKeyString);
+    if (cached) return cached;
+
+    const rows = await db
+      .select({
+        credentialId: credentials.id,
+        courseId: credentials.courseId,
+        courseTitle: courses.title,
+        score: credentials.score,
+        issuedAt: credentials.mintedAt,
+        nftAssetCode: credentials.nftAssetCode,
+        nftIssuer: credentials.nftIssuer,
+        mintTxHash: credentials.mintTxHash,
+      })
+      .from(credentials)
+      .innerJoin(courses, eq(credentials.courseId, courses.id))
+      .where(and(eq(credentials.userId, userId), eq(credentials.revoked, false)))
+      .orderBy(desc(credentials.mintedAt));
+
+    const certificates = rows.map(({ mintTxHash, ...row }) => ({
+      ...row,
+      verificationUrl: buildVerificationUrl(config.STELLAR_NETWORK, mintTxHash),
+      downloadUrl: buildCertificateDownloadUrl(config.PUBLIC_BASE_URL, row.credentialId),
+    }));
+
+    await cacheSet(cacheKeyString, certificates, 300);
+
+    return certificates;
+  }
+
+  /** One of the user's certificates, for the download endpoint (#371). */
+  async getCertificate(userId: string, credentialId: string): Promise<CertificateItem> {
+    const certificates = await this.listCertificates(userId);
+    const certificate = certificates.find((c) => c.credentialId === credentialId);
+    if (!certificate) {
+      throw new NotFoundError("Credential");
+    }
+    return certificate;
   }
 
   /**

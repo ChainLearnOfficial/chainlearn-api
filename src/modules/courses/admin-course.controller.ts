@@ -6,6 +6,7 @@ import type {
   CourseIdParams,
   CreateCourseBody,
   UpdateCourseBody,
+  DraftCourseBody,
   CreateModuleBody,
   UpdateModuleBody,
   ModuleParams,
@@ -129,6 +130,34 @@ export class AdminCourseController {
     const course = await courseService.publishCourse(id);
 
     reply.send({ success: true, data: course });
+  }
+
+  /**
+   * POST /api/v1/admin/courses/:id/draft
+   * Save course content as a draft without publishing it (#376).
+   */
+  async saveDraft(
+    request: FastifyRequest<{ Params: CourseIdParams; Body: DraftCourseBody }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id } = request.params;
+    const course = await courseService.saveDraft(id, request.body);
+
+    reply.send({ success: true, data: course });
+  }
+
+  /**
+   * GET /api/v1/admin/courses/:id/engagement
+   * Detailed engagement metrics for a course (#377).
+   */
+  async engagement(
+    request: FastifyRequest<{ Params: CourseIdParams }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id } = request.params;
+    const engagement = await courseService.getCourseEngagement(id);
+
+    reply.send({ success: true, data: engagement });
   }
 
   /**

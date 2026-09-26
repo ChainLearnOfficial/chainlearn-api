@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { eq, count, sql, desc, and, lt, isNull, type SQL } from "drizzle-orm";
+import { eq, count, sql, desc, and, lt, isNull, inArray, ne, notInArray, type SQL } from "drizzle-orm";
 import type { AnyPgColumn } from "drizzle-orm/pg-core";
 import { db } from "../../config/database.js";
 import {
@@ -24,6 +24,12 @@ import {
   cacheKey,
   cacheKeyPattern,
 } from "../../cache/index.js";
+import {
+  DIFFICULTY_ORDER,
+  rankCourses,
+  type CandidateCourse,
+  type ScoredCourse,
+} from "./recommendations.js";
 import type {
   ActivityQuery,
   AvatarUpload,
@@ -486,6 +492,138 @@ export class UserService {
         }
       }
     }
+
+    return recommendations;
+  }
+
+  /**
+   * Personalized course recommendations (#375), cached per user for 1 hour.
+   *
+   * Signals: completed and enrolled courses (tag interests and level reached),
+   * quiz scores, the user's learning goal and background, their pace
+   * preference, and what learners who took the same courses also enrolled in
+   * (collaborative). Each recommendation carries a 0-1 confidence and the
+   * reasons behind it; see ./recommendations.ts for the scoring.
+   */
+  async getRecommendations(userId: string): Promise<ScoredCourse[]> {
+    const namespace = "user";
+    const cacheKeyString = cacheKey(namespace, "recommendations", userId);
+
+    const cached = await cacheGet<ScoredCourse[]>(namespace, cacheKeyString);
+    if (cached) return cached;
+
+    const user = await db.query.users.findFirst({ where: eq(users.id, userId) });
+    if (!user) {
+      throw new NotFoundError("User");
+    }
+
+    const myEnrollments = await db
+      .select({ courseId: enrollments.courseId, completedAt: enrollments.completedAt })
+      .from(enrollments)
+      .where(eq(enrollments.userId, userId));
+    const completedRows = await db
+      .select({ courseId: credentials.courseId })
+      .from(credentials)
+      .where(eq(credentials.userId, userId));
+
+    const myCourseIds = [
+      ...new Set([...myEnrollments.map((e) => e.courseId), ...completedRows.map((c) => c.courseId)]),
+    ];
+    const completedIds = new Set([
+      ...myEnrollments.filter((e) => e.completedAt !== null).map((e) => e.courseId),
+      ...completedRows.map((c) => c.courseId),
+    ]);
+
+    const myCourses =
+      myCourseIds.length > 0
+        ? await db
+            .select({ id: courses.id, tags: courses.tags, difficulty: courses.difficulty })
+            .from(courses)
+            .where(inArray(courses.id, myCourseIds))
+        : [];
+
+    const [scoreRow] = await db
+      .select({
+        avgScorePercent: sql<string | null>`AVG(${quizSubmissions.score}::numeric / NULLIF(jsonb_array_length(${quizzes.questions}), 0) * 100)`,
+      })
+      .from(quizSubmissions)
+      .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+      .where(and(eq(quizSubmissions.userId, userId), eq(quizSubmissions.superseded, false)));
+
+    let highestCompletedLevel = -1;
+    for (const course of myCourses) {
+      if (completedIds.has(course.id)) {
+        highestCompletedLevel = Math.max(
+          highestCompletedLevel,
+          DIFFICULTY_ORDER.indexOf(course.difficulty as (typeof DIFFICULTY_ORDER)[number]),
+        );
+      }
+    }
+
+    // Collaborative signal: courses the user's peers (other learners who took
+    // any of the same courses) enrolled in.
+    const peerEnrollmentCounts = new Map<string, number>();
+    if (myCourseIds.length > 0) {
+      const peers = await db
+        .selectDistinct({ userId: enrollments.userId })
+        .from(enrollments)
+        .where(and(inArray(enrollments.courseId, myCourseIds), ne(enrollments.userId, userId)))
+        .limit(500);
+      if (peers.length > 0) {
+        const rows = await db
+          .select({
+            courseId: enrollments.courseId,
+            peers: sql<number>`COUNT(DISTINCT ${enrollments.userId})`.mapWith(Number),
+          })
+          .from(enrollments)
+          .where(
+            and(
+              inArray(enrollments.userId, peers.map((p) => p.userId)),
+              notInArray(enrollments.courseId, myCourseIds),
+            ),
+          )
+          .groupBy(enrollments.courseId);
+        for (const row of rows) peerEnrollmentCounts.set(row.courseId, row.peers);
+      }
+    }
+
+    const candidateRows = await db
+      .select({
+        id: courses.id,
+        title: courses.title,
+        description: courses.description,
+        difficulty: courses.difficulty,
+        tags: courses.tags,
+      })
+      .from(courses)
+      .where(
+        and(
+          eq(courses.isActive, true),
+          myCourseIds.length > 0 ? notInArray(courses.id, myCourseIds) : undefined,
+        ),
+      );
+    const candidates: CandidateCourse[] = candidateRows.map((row) => ({
+      ...row,
+      tags: row.tags ?? [],
+      peerEnrollments: peerEnrollmentCounts.get(row.id) ?? 0,
+    }));
+
+    const recommendations = rankCourses(
+      {
+        learningGoal: user.learningGoal,
+        background: user.background,
+        pace: user.pace,
+        interestTags: myCourses.flatMap((c) => c.tags ?? []),
+        highestCompletedLevel,
+        averageScorePercent:
+          scoreRow?.avgScorePercent !== null && scoreRow?.avgScorePercent !== undefined
+            ? Number(scoreRow.avgScorePercent)
+            : null,
+      },
+      candidates,
+    );
+
+    await cacheSet(cacheKeyString, recommendations, 3600);
 
     return recommendations;
   }

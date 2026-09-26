@@ -84,6 +84,9 @@ export const courses = pgTable(
       .notNull()
       .default([]),
     isActive: boolean("is_active").notNull().default(true),
+    // True while the course is a saved draft (#376). Tracked separately from
+    // isActive: a draft is never active, and publishing clears this flag.
+    isDraft: boolean("is_draft").notNull().default(false),
     // 0–100 accessibility score for the course's authored content (#326),
     // recomputed on every create/update. Null until first written. Advisory
     // only — a low score never blocks saving the course.

@@ -1,9 +1,13 @@
+import { eq, and, count, desc, inArray, ilike, or, isNull, ne, sql } from "drizzle-orm";
 import { eq, and, count, desc, asc, inArray, ilike, or, isNull, ne, sql } from "drizzle-orm";
 import crypto from "node:crypto";
 import QRCode from "qrcode";
 import { db } from "../../config/database.js";
 import {
   courses,
+  courseReviews,
+  courseShares,
+  credentials,
   enrollments,
   quizzes,
   quizSubmissions,
@@ -18,10 +22,17 @@ import {
   type ModuleContentPayload,
 } from "../../database/schema.js";
 import { config } from "../../config/index.js";
-import { NotFoundError, ConflictError, ForbiddenError } from "../../utils/errors.js";
+import {
+  NotFoundError,
+  ConflictError,
+  ForbiddenError,
+  ValidationError,
+  AppError,
+} from "../../utils/errors.js";
 import { withLock } from "../../utils/lock.js";
 import { logger } from "../../utils/logger.js";
 import { getOnChainContentHash } from "../../stellar/progress-tracker.js";
+import { checkAccessibility } from "./accessibility.js";
 import { PASSING_PERCENTAGE } from "../quizzes/quiz.types.js";
 import { auditLog } from "../../audit/index.js";
 import { dispatchWebhook } from "../../services/webhook-dispatcher.js";
@@ -42,6 +53,8 @@ import type {
   CourseStats,
   AdminCourse,
   AdminCourseWithAccessibility,
+  CourseShareLink,
+  ResolvedShareLink,
   CreateCourseBody,
   CourseModule,
   CourseModuleMetadata,
@@ -62,6 +75,7 @@ import type {
   ImportCourseResult,
   ListEnrolledUsersQuery,
   EnrolledUsersResult,
+  BatchEnrollEntry,
   ReportCourseBody,
   CourseReportResult,
   CourseAnalytics,
@@ -75,6 +89,10 @@ import type {
   EnrollmentTrendDataPoint,
   CourseSyllabus,
   SyllabusModule,
+  PublishCheckResult,
+  PublishCheckIssue,
+  PublishCheckRequirement,
+  PublishCheckSeverity,
   EnrollmentStatus,
   EnrollmentModuleProgress,
   CourseProgress,
@@ -700,6 +718,57 @@ export class CourseService {
     // should never extend how long the enrollment lock for this drop is
     // held.
     await this.notifyNextWaitlisted(courseId);
+  }
+
+  /**
+   * Enroll the user in several courses at once (#346). Each course is
+   * attempted independently and its outcome reported separately: an archived
+   * course, an existing enrollment, or a hit on the MAX_ENROLLMENTS cap
+   * fails only that entry rather than aborting the whole request, which is
+   * what a "save these N courses" client needs.
+   *
+   * Sequential rather than concurrent on purpose — enroll() takes a
+   * per-(user, course) lock and counts the user's *current* active
+   * enrollments against MAX_ENROLLMENTS, so overlapping calls would race the
+   * cap check and let a user exceed it.
+   *
+   * A duplicate courseId in the request is collapsed to its first
+   * occurrence: retrying it would only ever produce an "Already enrolled"
+   * failure, which is noise rather than information.
+   */
+  async batchEnroll(
+    userId: string,
+    courseIds: string[],
+  ): Promise<BatchEnrollEntry[]> {
+    const results: BatchEnrollEntry[] = [];
+    const seen = new Set<string>();
+
+    for (const courseId of courseIds) {
+      if (seen.has(courseId)) continue;
+      seen.add(courseId);
+
+      try {
+        const { contentHashMismatch } = await this.enroll(userId, courseId);
+        results.push({
+          courseId,
+          success: true,
+          message: contentHashMismatch
+            ? "Enrolled, but the course content hash does not match the on-chain version"
+            : "Enrolled successfully",
+        });
+      } catch (err) {
+        results.push({
+          courseId,
+          success: false,
+          message:
+            err instanceof AppError
+              ? err.message
+              : "Failed to enroll in this course",
+        });
+      }
+    }
+
+    return results;
   }
 
   /**
@@ -1488,7 +1557,50 @@ export class CourseService {
     };
   }
 
+  /**
+   * The free-text fields accessibility rules are run over (#326). The
+   * course's own description plus every module description — module titles
+   * are short labels that can't contain markup, so including them would only
+   * add noise.
+   */
+  private courseContentFields(row: {
+    description: string | null;
+    courseModules?: unknown;
+    modules?: unknown;
+  }): Record<string, string | null> {
+    const fields: Record<string, string | null> = {
+      description: row.description,
+    };
+
+    const modules = [
+      ...this.normalizeCourseModules(
+        (row.courseModules as never) ?? null,
+      ),
+      ...(((row.modules ?? []) as CourseModuleDefinition[]) || []),
+    ];
+    modules.forEach((module, i) => {
+      if (module.description) {
+        fields[`module:${i}:${module.id}`] = module.description;
+      }
+    });
+
+    return fields;
+  }
+
   async createCourse(data: CreateCourseBody): Promise<AdminCourse> {
+    // Score the authored content before the insert so the stored
+    // accessibility_score reflects what was actually submitted (#326).
+    const accessibility = checkAccessibility({
+      description: data.description,
+      ...(data.courseModules ?? []).reduce<Record<string, string | null>>(
+        (acc, module, i) => {
+          if (module.description) {
+            acc[`module:${i}:${module.id}`] = module.description;
+          }
+          return acc;
+        },
+        {},
+      ),
     const accessibility = checkAccessibility({
       title: data.title,
       description: data.description,
@@ -1544,6 +1656,16 @@ export class CourseService {
   async updateCourse(
     courseId: string,
     data: UpdateCourseBody,
+  ): Promise<AdminCourseWithAccessibility> {
+    const [existing] = await db
+      .select()
+      .from(courses)
+      .where(eq(courses.id, courseId));
+
+    if (!existing) {
+      throw new NotFoundError("Course");
+    }
+
   ): Promise<AdminCourse> {
     // A course can't be its own prerequisite.
     const sanitized = data.prerequisites
@@ -1554,9 +1676,23 @@ export class CourseService {
     const values =
       sanitized.isActive === true ? { ...sanitized, isDraft: false } : sanitized;
 
+    // Score accessibility over the *merged* content (fields the caller is
+    // updating plus everything they're leaving alone) so the stored score
+    // always describes the course as it now stands (#326). Computed before
+    // the write so the score and the content land in the same statement.
+    const merged = {
+      description: values.description ?? existing.description,
+      courseModules: values.courseModules ?? existing.courseModules,
+      // `modules` isn't part of UpdateCourseBody — module definitions are
+      // only ever changed through create/update/deleteModule, which score
+      // accessibility on their own.
+      modules: existing.modules,
+    };
+    const accessibility = checkAccessibility(this.courseContentFields(merged));
+
     const [course] = await db
       .update(courses)
-      .set(values)
+      .set({ ...values, accessibilityScore: accessibility.score })
       .where(eq(courses.id, courseId))
       .returning();
 
@@ -1568,7 +1704,7 @@ export class CourseService {
     await auditLog("course.updated", { courseId });
     logger.info({ courseId }, "Course updated");
 
-    return this.toAdminCourse(course);
+    return { ...this.toAdminCourse(course), accessibility };
   }
 
   /**
@@ -1620,6 +1756,22 @@ export class CourseService {
   }
 
   /**
+   * Archive a course (#358): hides it from public listings while preserving
+   * its data and its enrolled users' access. Distinct from `deleteCourse`
+   * because it records *when* the course was archived, so an archived course
+   * can be told apart from one that was merely never published (both just
+   * have isActive = false).
+   *
+   * Re-archiving an already-archived course is a no-op on archivedAt rather
+   * than resetting it, so the timestamp keeps meaning "first archived".
+   */
+  async archiveCourse(courseId: string): Promise<AdminCourse> {
+    const [course] = await db
+      .update(courses)
+      .set({
+        isActive: false,
+        archivedAt: sql`COALESCE(${courses.archivedAt}, NOW())`,
+      })
    * Archive a course: hides it from public listings while preserving data (#358).
    */
   async archiveCourse(courseId: string): Promise<void> {
@@ -1636,6 +1788,200 @@ export class CourseService {
     await this.invalidateCourseCaches(courseId);
     await auditLog("course.archived", { courseId });
     logger.info({ courseId }, "Course archived");
+
+    return this.toAdminCourse(course);
+  }
+
+  /**
+   * Evaluate whether a course has everything it needs to go live (#384).
+   *
+   * Purely a read — it never writes to the course. Used both by the
+   * publish-check endpoint and by publishCourse(), so the issues an admin is
+   * shown beforehand are exactly the ones that will block the publish.
+   *
+   * Blocking: title, description, difficulty, at least one module, and at
+   * least one non-empty quiz per module. Quizzes are matched against the
+   * admin-defined `modules` structure (#304) rather than the other way
+   * around, because a learner walks the module list — a quiz hanging off a
+   * moduleId that isn't in it is unreachable content, not a passed check.
+   *
+   * Advisory: a module with no description. There's no separate content
+   * table in this schema, so a module's description *is* its content; a
+   * module without one still publishes today, so this is surfaced as a
+   * warning rather than a hard stop.
+   */
+  private async evaluatePublishReadiness(
+    courseId: string,
+  ): Promise<PublishCheckResult> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    const requirements: PublishCheckRequirement[] = [];
+    const issues: PublishCheckIssue[] = [];
+
+    const addRequirement = (
+      key: string,
+      label: string,
+      satisfied: boolean,
+      severity: PublishCheckSeverity,
+      onFail: () => PublishCheckIssue,
+    ) => {
+      requirements.push({ key, label, satisfied, severity });
+      if (!satisfied) issues.push(onFail());
+    };
+
+    addRequirement(
+      "title",
+      "Course has a title",
+      !!course.title?.trim(),
+      "blocking",
+      () => ({
+        field: "title",
+        severity: "blocking",
+        message: "Course is missing a title.",
+      }),
+    );
+
+    addRequirement(
+      "description",
+      "Course has a description",
+      !!course.description?.trim(),
+      "blocking",
+      () => ({
+        field: "description",
+        severity: "blocking",
+        message: "Course is missing a description.",
+      }),
+    );
+
+    addRequirement(
+      "difficulty",
+      "Course has a difficulty level",
+      !!course.difficulty?.trim(),
+      "blocking",
+      () => ({
+        field: "difficulty",
+        severity: "blocking",
+        message: "Course is missing a difficulty level.",
+      }),
+    );
+
+    const modules = (course.modules ?? []) as CourseModuleDefinition[];
+
+    addRequirement(
+      "modules",
+      "Course has at least one module",
+      modules.length > 0,
+      "blocking",
+      () => ({
+        field: "modules",
+        severity: "blocking",
+        message:
+          "Course has no modules — add at least one before publishing.",
+      }),
+    );
+
+    if (modules.length > 0) {
+      // One query for every quiz on the course, grouped by module. Doing it
+      // per module would issue len(modules) round trips for a check that's
+      // on an admin's publish path.
+      const quizRows = await db
+        .select({
+          moduleId: quizzes.moduleId,
+          questionCount: sql<number>`jsonb_array_length(${quizzes.questions})`,
+        })
+        .from(quizzes)
+        .where(eq(quizzes.courseId, courseId))
+        .groupBy(quizzes.moduleId);
+
+      const questionsByModule = new Map<string, number>();
+      for (const row of quizRows) {
+        questionsByModule.set(
+          row.moduleId,
+          (questionsByModule.get(row.moduleId) ?? 0) + (row.questionCount ?? 0),
+        );
+      }
+
+      for (const module of modules) {
+        const moduleLabel = `Module "${module.title}"`;
+
+        addRequirement(
+          `module:${module.id}:content`,
+          `${moduleLabel} has content`,
+          !!module.description?.trim(),
+          "advisory",
+          () => ({
+            field: "moduleContent",
+            severity: "advisory",
+            message: `${moduleLabel} has no description. Learners will see an empty module — this does not block publishing.`,
+            moduleId: module.id,
+            moduleTitle: module.title,
+          }),
+        );
+
+        const questionCount = questionsByModule.get(module.id) ?? 0;
+        addRequirement(
+          `module:${module.id}:quizzes`,
+          `${moduleLabel} has a quiz`,
+          questionCount > 0,
+          "blocking",
+          () => ({
+            field: "quizzes",
+            severity: "blocking",
+            message: `${moduleLabel} has no quiz. Create one, or the course cannot be published.`,
+            moduleId: module.id,
+            moduleTitle: module.title,
+          }),
+        );
+      }
+    }
+
+    // A course with no modules has a "0 of 1" style denominator, not a
+    // divide-by-zero — the three field checks above still stand on their own.
+    const satisfied = requirements.filter((r) => r.satisfied).length;
+    const readinessScore =
+      requirements.length === 0
+        ? 0
+        : Math.round((satisfied / requirements.length) * 100);
+
+    return {
+      courseId,
+      ready: !issues.some((issue) => issue.severity === "blocking"),
+      readinessScore,
+      requirements,
+      issues,
+      checkedAt: new Date(),
+    };
+  }
+
+  /**
+   * Run the publish-readiness check on its own, without publishing
+   * anything (#384). Non-destructive by construction — it only reads.
+   */
+  async getPublishCheck(courseId: string): Promise<PublishCheckResult> {
+    return this.evaluatePublishReadiness(courseId);
+  }
+
+  /**
+   * Publish a course (isActive = true) after validating it has the content
+   * required to go live. Shares evaluatePublishReadiness() with the
+   * publish-check endpoint, so the two can never disagree: any blocking
+   * issue reported by publish-check is exactly what makes this throw.
+   * Publishing also clears the draft flag (#376).
+   */
+  async publishCourse(courseId: string): Promise<AdminCourseWithAccessibility> {
+    const check = await this.evaluatePublishReadiness(courseId);
+
+    if (!check.ready) {
+      throw new ValidationError({
+        requirements: check.issues
+          .filter((issue) => issue.severity === "blocking")
+          .map((issue) => issue.message),
+      });
   }
 
   /**
@@ -1653,6 +1999,14 @@ export class CourseService {
 
     const [published] = await db
       .update(courses)
+      .set({ isActive: true, isDraft: false, archivedAt: null })
+      .where(eq(courses.id, courseId))
+      .returning();
+
+    if (!published) {
+      throw new NotFoundError("Course");
+    }
+
       .set({ isActive: true, isDraft: false })
       .where(eq(courses.id, courseId))
       .returning();
@@ -1661,6 +2015,89 @@ export class CourseService {
     await auditLog("course.published", { courseId });
     logger.info({ courseId }, "Course published");
 
+    const accessibility = checkAccessibility(
+      this.courseContentFields(published),
+    );
+
+    return { ...this.toAdminCourse(published), accessibility };
+  }
+
+  /**
+   * Duplicate a course — its metadata, module definitions, and quizzes — into
+   * a brand new *draft*. The copy starts unpublished and unpublished-by-flag
+   * (isActive = false, isDraft = true) so a duplicate can be reviewed and
+   * edited before it goes live, and so a duplicate never doubles a course's
+   * live enrollments. Quizzes are copied verbatim, including their question
+   * order and correct answers; the AI-generated `generatedFor` attribution is
+   * dropped since it names the user the original was generated for.
+   */
+  async duplicateCourse(courseId: string): Promise<AdminCourse> {
+    return withLock(`course-duplicate:${courseId}`, async () => {
+      const source = await db.query.courses.findFirst({
+        where: eq(courses.id, courseId),
+      });
+      if (!source) {
+        throw new NotFoundError("Course");
+      }
+
+      return db.transaction(async (tx) => {
+        const [copy] = await tx
+          .insert(courses)
+          .values({
+            title: `${source.title} (Copy)`,
+            description: source.description,
+            difficulty: source.difficulty,
+            tags: source.tags ?? [],
+            courseModules: source.courseModules,
+            contentHash: source.contentHash,
+            // The copy gets fresh IDs, so the original's prerequisite IDs
+            // are meaningless here. Copying them verbatim would point the
+            // draft at unrelated courses.
+            prerequisites: [],
+            modules: (source.modules ?? []) as CourseModuleDefinition[],
+            isActive: false,
+            isDraft: true,
+            accessibilityScore: source.accessibilityScore,
+          })
+          .returning();
+
+        const sourceQuizzes = await tx
+          .select({
+            moduleId: quizzes.moduleId,
+            questions: quizzes.questions,
+            createdAt: quizzes.createdAt,
+          })
+          .from(quizzes)
+          .where(eq(quizzes.courseId, courseId));
+
+        if (sourceQuizzes.length > 0) {
+          await tx.insert(quizzes).values(
+            sourceQuizzes.map((quiz) => ({
+              courseId: copy.id,
+              moduleId: quiz.moduleId,
+              questions: quiz.questions,
+              // `generatedFor` is intentionally not copied: it records which
+              // user the AI generated the quiz for, which says nothing about
+              // the duplicated copy.
+              createdAt: quiz.createdAt,
+            })),
+          );
+        }
+
+        await auditLog("course.duplicated", {
+          courseId,
+          sourceCourseId: courseId,
+          moduleCount: (source.modules ?? []).length,
+          quizCount: sourceQuizzes.length,
+        });
+        logger.info(
+          { sourceCourseId: courseId, newCourseId: copy.id },
+          "Course duplicated",
+        );
+
+        return this.toAdminCourse(copy);
+      });
+    });
     return this.toAdminCourse(published);
   }
 

@@ -9,6 +9,17 @@ vi.mock("../../../src/config/index.js", () => ({
 
 import { rateLimitOptions, authRateLimit } from "../../../src/middleware/rate-limit.js";
 
+// `@fastify/rate-limit` types `rateLimitOptions()` as the user-augmentable — and
+// by default empty — `FastifyRateLimitOptions` interface, so the fields under
+// test are invisible to the type checker. Widen to the surface exercised here.
+const rateLimitOptionsUnderTest = () =>
+  rateLimitOptions() as unknown as {
+    max: number;
+    timeWindow: number;
+    keyGenerator: (request: any) => string;
+    errorResponseBuilder: (request: any, context: any) => object;
+  };
+
 describe("Rate Limit Middleware", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -16,7 +27,7 @@ describe("Rate Limit Middleware", () => {
 
   describe("rateLimitOptions", () => {
     it("should return default rate limit config", () => {
-      const options = rateLimitOptions();
+      const options = rateLimitOptionsUnderTest();
 
       expect(options.max).toBe(100);
       expect(options.timeWindow).toBe(60000);
@@ -25,7 +36,7 @@ describe("Rate Limit Middleware", () => {
     });
 
     it("should generate key from authenticated user id", () => {
-      const options = rateLimitOptions();
+      const options = rateLimitOptionsUnderTest();
       const mockRequest: any = {
         authUser: { id: "user-123" },
         ip: "192.168.1.1",
@@ -37,7 +48,7 @@ describe("Rate Limit Middleware", () => {
     });
 
     it("should fall back to IP when user not authenticated", () => {
-      const options = rateLimitOptions();
+      const options = rateLimitOptionsUnderTest();
       const mockRequest: any = {
         ip: "192.168.1.1",
       };
@@ -48,7 +59,7 @@ describe("Rate Limit Middleware", () => {
     });
 
     it("should build error response", () => {
-      const options = rateLimitOptions();
+      const options = rateLimitOptionsUnderTest();
       const mockRequest: any = {};
       const context = { after: 5000 };
 

@@ -1,6 +1,11 @@
 import type { FastifyRequest, FastifyReply } from "fastify";
 import { adminUsersService } from "./admin-users.service.js";
-import type { ListUsersQuery } from "./admin.types.js";
+import type { AuthenticatedRequest } from "../../middleware/auth.js";
+import type {
+  GrantCreditsBody,
+  ListUsersQuery,
+  UserIdParams,
+} from "./admin.types.js";
 
 export class AdminUsersController {
   /**
@@ -38,6 +43,30 @@ export class AdminUsersController {
     await adminUsersService.banUser(id, reason);
 
     reply.send({ success: true, message: "User banned successfully" });
+  }
+
+  /**
+   * POST /api/v1/admin/users/:id/credits/grant
+   * Grant credits to a user, with a reason and an optional reference
+   * (#386). Audit-logged, including the admin who performed it.
+   */
+  async grantCredits(
+    request: FastifyRequest<{ Params: UserIdParams; Body: GrantCreditsBody }>,
+    reply: FastifyReply,
+  ): Promise<void> {
+    const { id } = request.params;
+    const { amount, reason, reference } = request.body;
+    const actorId = (request as AuthenticatedRequest).authUser.id;
+
+    const result = await adminUsersService.grantCredits(
+      id,
+      amount,
+      reason,
+      reference,
+      actorId,
+    );
+
+    reply.send({ success: true, data: result });
   }
 
   /**

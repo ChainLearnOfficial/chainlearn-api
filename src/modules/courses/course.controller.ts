@@ -1,5 +1,6 @@
 import type { FastifyRequest, FastifyReply } from "fastify";
 import { courseService } from "./course.service.js";
+import { credentialService } from "../credentials/credential.service.js";
 import type { AuthenticatedRequest } from "../../middleware/auth.js";
 import type {
   ListCoursesQuery,
@@ -11,6 +12,8 @@ import type {
   ListReviewsQuery,
   CreateReviewBody,
   ListEnrolledUsersQuery,
+  BatchEnrollBody,
+  BatchEnrollEntry,
 } from "./course.types.js";
 
 export class CourseController {
@@ -294,6 +297,114 @@ export class CourseController {
     const status = await courseService.getEnrollmentStatus(authUser.id, id);
 
     reply.send({ success: true, data: status });
+  }
+
+  /**
+   * GET /api/v1/courses/:id/prerequisites
+   * A course's prerequisite courses with the caller's completion status
+   * per prerequisite (#369). `optionalAuth`, so an anonymous caller still
+   * gets the list — every entry simply reads completed: false.
+   * Restored here — collateral damage of the upstream merge described on
+   * leaderboard() below.
+   */
+  async prerequisites(
+    request: FastifyRequest<{ Params: CourseIdParams }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id } = request.params;
+    const userId = (request as AuthenticatedRequest).authUser?.id ?? null;
+    const result = await courseService.getCoursePrerequisites(id, userId);
+
+    reply.send({ success: true, data: result });
+  }
+
+  /**
+   * POST /api/v1/courses/enroll/batch
+   * Enroll in several courses at once (#346). Each course reports its own
+   * outcome, so a partial failure (already enrolled, archived course,
+   * enrollment cap reached) doesn't roll back the ones that succeeded.
+   */
+  async batchEnroll(
+    request: FastifyRequest<{ Body: BatchEnrollBody }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { authUser } = request as AuthenticatedRequest;
+    const results = await courseService.batchEnroll(
+      authUser.id,
+      request.body.courseIds,
+    );
+
+    reply.send({ success: true, data: results });
+  }
+
+  /**
+   * POST /api/v1/courses/:id/share
+   * The caller's stable referral link for a course, with a QR code (#325).
+   */
+  async share(
+    request: FastifyRequest<{ Params: CourseIdParams }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id } = request.params;
+    const { authUser } = request as AuthenticatedRequest;
+    const link = await courseService.createShareLink(authUser.id, id);
+
+    reply.send({ success: true, data: link });
+  }
+
+  /**
+   * GET /api/v1/courses/shared/:code
+   * Resolve a referral code to its course, counting the click (#325).
+   * Public route — opening the link is the call, so `optionalAuth` only
+   * exists to avoid counting the sharer against their own click count.
+   */
+  async resolveShare(
+    request: FastifyRequest<{ Params: ShareCodeParams }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const viewerId = (request as AuthenticatedRequest).authUser?.id ?? null;
+    const resolved = await courseService.resolveShareLink(
+      request.params.code,
+      viewerId,
+    );
+
+    reply.send({ success: true, data: resolved });
+  }
+
+  /**
+   * GET /api/v1/courses/:id/completion-certificate
+   * Download a PDF certificate for a course the caller has completed (#387).
+   * The traditional certificate — separate from the on-chain NFT credential,
+   * and a 404 if the course isn't complete for this user.
+   *
+   * The handler lives here but the work is done by CredentialService: the
+   * route is scoped to a course, but a certificate is a credential, so its
+   * rules live with the rest of the credential logic rather than being split
+   * across two modules.
+   */
+  async completionCertificate(
+    request: FastifyRequest<{ Params: CourseIdParams }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id } = request.params;
+    const { authUser } = request as AuthenticatedRequest;
+    const certificate = await credentialService.getCompletionCertificate(
+      authUser.id,
+      id
+    );
+
+    reply
+      .header(
+        "Content-Type",
+        "application/pdf"
+      )
+      .header(
+        "Content-Disposition",
+        `attachment; filename="chainlearn-certificate-${certificate.certificateId}.pdf"`
+      )
+      .header("Content-Length", certificate.pdf.length)
+      .header("X-Cache", certificate.cached ? "HIT" : "MISS")
+      .send(certificate.pdf);
   }
 
   /**

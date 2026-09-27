@@ -6,6 +6,10 @@ vi.mock("../../../src/utils/logger.js", () => ({
 
 import { registry, httpRequestsTotal, httpRequestDurationSeconds } from "../../../src/metrics/index.js";
 
+// prom-client's `Counter`/`Histogram` typings omit the `name` field even though
+// the metric instances carry it at runtime, so read it through a widened type.
+const metricName = (metric: unknown): string => (metric as { name: string }).name;
+
 describe("Metrics", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -14,12 +18,12 @@ describe("Metrics", () => {
 
   it("should have httpRequestsTotal counter", () => {
     expect(httpRequestsTotal).toBeDefined();
-    expect(httpRequestsTotal.name).toBe("http_requests_total");
+    expect(metricName(httpRequestsTotal)).toBe("http_requests_total");
   });
 
   it("should have httpRequestDurationSeconds histogram", () => {
     expect(httpRequestDurationSeconds).toBeDefined();
-    expect(httpRequestDurationSeconds.name).toBe("http_request_duration_seconds");
+    expect(metricName(httpRequestDurationSeconds)).toBe("http_request_duration_seconds");
   });
 
   it("should increment request counter", () => {

@@ -70,3 +70,22 @@ export interface RewardTransaction {
   confirmationCount: number | null;
   submittedAt: Date;
 }
+
+/** One row of GET /api/v1/rewards/pending (#327) — a reward claim that
+ * hasn't landed yet, either sitting in the retry queue or waiting on
+ * indexer confirmation. */
+export interface PendingRewardItem {
+  submissionId: string;
+  courseTitle: string;
+  amount: number;
+  /** `queued` = waiting in the retry processor's queue.
+   * `awaiting_confirmation` = the Stellar tx was submitted but the sequence
+   * error left it unconfirmed, so credits land once it indexes. */
+  status: "queued" | "awaiting_confirmation";
+  /** 1-based place in the retry queue, or null when not queued. */
+  queuePosition: number | null;
+  /** Rough seconds until the retry processor reaches this claim. Null when
+   * not queued. */
+  estimatedProcessingSeconds: number | null;
+  submittedAt: Date;
+}

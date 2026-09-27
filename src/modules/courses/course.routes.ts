@@ -206,6 +206,22 @@ export async function courseRoutes(app: FastifyInstance): Promise<void> {
     (request, reply) => courseController.progress(request, reply)
   );
 
+  app.get<{ Params: { id: string } }>(
+    "/:id/completion-certificate",
+    {
+      preHandler: [authGuard, validate({ params: courseIdParamsSchema })],
+      schema: {
+        description:
+          "Download a PDF certificate of completion for a course the caller has finished — a traditional certificate, separate from the on-chain NFT credential. Returns 404 unless every module of the course has a non-superseded quiz submission from the caller. The rendered PDF is cached, so repeated downloads are cheap (#387)",
+        tags: ["courses", "credentials"],
+        security: [{ bearerAuth: [] }],
+        produces: ["application/pdf"],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      } as FastifySchema,
+    },
+    (request, reply) => courseController.completionCertificate(request, reply)
+  );
+
   app.get<{ Params: { id: string; moduleId: string } }>(
     "/:id/modules/:moduleId/quiz-attempts",
     {
@@ -316,20 +332,6 @@ export async function courseRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => courseController.dropEnrollment(request, reply)
-  );
-
-  app.get<{ Params: { id: string } }>(
-    "/:id/prerequisites",
-    {
-      preHandler: [optionalAuth, validate({ params: courseIdParamsSchema })],
-      schema: {
-        description:
-          "Get a course's prerequisite courses, with the caller's completion status per prerequisite (#369)",
-        tags: ["courses"],
-        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
-      } as FastifySchema,
-    },
-    (request, reply) => courseController.prerequisites(request, reply)
   );
 
   app.get<{ Params: { id: string }; Querystring: import("./course.types.js").ListReviewsQuery }>(

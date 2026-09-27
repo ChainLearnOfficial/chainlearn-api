@@ -36,6 +36,9 @@ type AuditEvent =
   | "course.module.updated"
   | "course.module.deleted"
   | "course.module.reordered"
+  | "course.quiz.created"
+  | "course.quiz.updated"
+  | "course.quiz.deleted"
   | "course.module.content.created"
   | "course.module.content.updated"
   | "course.module.content.deleted"
@@ -45,6 +48,7 @@ type AuditEvent =
   | "badge.deleted"
   | "badge.awarded"
   | "quiz.feedback.submitted"
+  | "credits.granted"
   | "announcement.created"
   | "announcement.updated"
   | "announcement.deleted"
@@ -60,6 +64,8 @@ interface AuditFields {
   courseId?: string;
   moduleId?: string;
   moduleIds?: string[];
+  quizId?: string;
+  questionCount?: number;
   contentId?: string;
   contentIds?: string[];
   badgeId?: string;
@@ -88,8 +94,17 @@ interface AuditFields {
   rating?: number;
   sourceCourseId?: string;
   moduleCount?: number;
+  quizCount?: number;
   announcementId?: string;
   priority?: string;
+  /** Set by POST /admin/users/:id/credits/grant (#386) — why the credits
+   * were granted, plus the operator-supplied promotion/external reference. */
+  reason?: string;
+  reference?: string;
+  actorId?: string;
+  creditsBefore?: number;
+  creditsAfter?: number;
+  reportId?: string;
 }
 
 export async function auditLog(event: AuditEvent, fields: AuditFields): Promise<void> {

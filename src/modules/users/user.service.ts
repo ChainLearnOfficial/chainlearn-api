@@ -731,6 +731,7 @@ export class UserService {
         id: user.id,
         stellarAddress: user.stellarAddress,
         displayName: user.displayName,
+        avatarUrl: user.avatarUrl,
         avatarUrl: user.avatarUrl ?? null,
         background: user.background,
         learningGoal: user.learningGoal,

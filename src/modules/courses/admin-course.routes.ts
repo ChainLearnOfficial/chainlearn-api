@@ -78,7 +78,7 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
         },
       } as FastifySchema,
     },
-    (request, reply) => adminCourseController.create(request, reply)
+    (request, reply) => adminCourseController.create(request, reply),
   );
 
   app.post(
@@ -92,7 +92,7 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
         consumes: ["multipart/form-data"],
       } as FastifySchema,
     },
-    (request, reply) => adminCourseController.import(request, reply)
+    (request, reply) => adminCourseController.import(request, reply),
   );
 
   app.put<{
@@ -108,7 +108,11 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
         description: "Update a course (admin only)",
         tags: ["admin", "courses"],
         security: [{ bearerAuth: [] }],
-        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+        params: {
+          type: "object",
+          required: ["id"],
+          properties: { id: { type: "string", format: "uuid" } },
+        },
         body: {
           type: "object",
           properties: {
@@ -147,7 +151,7 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
         },
       } as FastifySchema,
     },
-    (request, reply) => adminCourseController.update(request, reply)
+    (request, reply) => adminCourseController.update(request, reply),
   );
 
   app.post<{
@@ -164,7 +168,11 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
           "Save course content as a draft without publishing (admin only). The course is hidden from users and can be saved repeatedly; publish it by setting isActive to true.",
         tags: ["admin", "courses"],
         security: [{ bearerAuth: [] }],
-        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+        params: {
+          type: "object",
+          required: ["id"],
+          properties: { id: { type: "string", format: "uuid" } },
+        },
         body: {
           type: "object",
           properties: {
@@ -190,7 +198,7 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
         },
       } as FastifySchema,
     },
-    (request, reply) => adminCourseController.saveDraft(request, reply)
+    (request, reply) => adminCourseController.saveDraft(request, reply),
   );
 
   app.delete<{ Params: { id: string } }>(
@@ -201,10 +209,14 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
         description: "Soft-delete a course (admin only)",
         tags: ["admin", "courses"],
         security: [{ bearerAuth: [] }],
-        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+        params: {
+          type: "object",
+          required: ["id"],
+          properties: { id: { type: "string", format: "uuid" } },
+        },
       } as FastifySchema,
     },
-    (request, reply) => adminCourseController.remove(request, reply)
+    (request, reply) => adminCourseController.remove(request, reply),
   );
 
   app.post<{ Params: { id: string } }>(
@@ -216,10 +228,14 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
           "Archive a course: hides it from public listings while preserving data and enrolled users' access (admin only)",
         tags: ["admin", "courses"],
         security: [{ bearerAuth: [] }],
-        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+        params: {
+          type: "object",
+          required: ["id"],
+          properties: { id: { type: "string", format: "uuid" } },
+        },
       } as FastifySchema,
     },
-    (request, reply) => adminCourseController.archive(request, reply)
+    (request, reply) => adminCourseController.archive(request, reply),
   );
 
   app.post<{ Params: { id: string } }>(
@@ -231,10 +247,14 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
           "Publish a course after validating required content (title, description, difficulty, modules, and a quiz per module) is present (admin only)",
         tags: ["admin", "courses"],
         security: [{ bearerAuth: [] }],
-        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+        params: {
+          type: "object",
+          required: ["id"],
+          properties: { id: { type: "string", format: "uuid" } },
+        },
       } as FastifySchema,
     },
-    (request, reply) => adminCourseController.publish(request, reply)
+    (request, reply) => adminCourseController.publish(request, reply),
   );
 
   app.post<{ Params: { id: string } }>(
@@ -246,14 +266,20 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
           "Check whether a course is ready to publish: returns every unmet requirement (blocking issues that would stop a publish, plus advisory ones that wouldn't) and a 0-100 readiness score. Non-destructive — the course is not modified (admin only, #384)",
         tags: ["admin", "courses"],
         security: [{ bearerAuth: [] }],
-        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+        params: {
+          type: "object",
+          required: ["id"],
+          properties: { id: { type: "string", format: "uuid" } },
+        },
       } as FastifySchema,
     },
-    (request, reply) => adminCourseController.publishCheck(request, reply)
+    (request, reply) => adminCourseController.publishCheck(request, reply),
   );
 
-  app.post<{ Params: { id: string } }>(
-  app.post<{ Params: { id: string }; Body?: import("./course.types.js").CloneCourseBody }>(
+  app.post<{
+    Params: { id: string };
+    Body?: import("./course.types.js").CloneCourseBody;
+  }>(
     "/:id/duplicate",
     {
       preHandler: [validate({ params: courseIdParamsSchema })],
@@ -262,22 +288,35 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
           "Duplicate a course, its modules, and quizzes into a new draft course (admin only)",
         tags: ["admin", "courses"],
         security: [{ bearerAuth: [] }],
-        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+        params: {
+          type: "object",
+          required: ["id"],
+          properties: { id: { type: "string", format: "uuid" } },
+        },
       } as FastifySchema,
     },
-    (request, reply) => adminCourseController.duplicate(request, reply)
+    (request, reply) => adminCourseController.duplicate(request, reply),
   );
 
-  app.post<{ Params: { id: string }; Body: import("./course.types.js").CloneCourseBody }>(
+  app.post<{
+    Params: { id: string };
+    Body: import("./course.types.js").CloneCourseBody;
+  }>(
     "/:id/clone",
     {
-      preHandler: [validate({ params: courseIdParamsSchema, body: cloneCourseSchema })],
+      preHandler: [
+        validate({ params: courseIdParamsSchema, body: cloneCourseSchema }),
+      ],
       schema: {
         description:
           "Clone a course including all content, modules, and quizzes into a new draft course (admin only, #378)",
         tags: ["admin", "courses"],
         security: [{ bearerAuth: [] }],
-        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+        params: {
+          type: "object",
+          required: ["id"],
+          properties: { id: { type: "string", format: "uuid" } },
+        },
         body: {
           type: "object",
           properties: {
@@ -286,7 +325,7 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
         },
       } as FastifySchema,
     },
-    (request, reply) => adminCourseController.clone(request, reply)
+    (request, reply) => adminCourseController.clone(request, reply),
   );
 
   app.post<{
@@ -302,7 +341,11 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
         description: "Create a course module definition (admin only)",
         tags: ["admin", "courses"],
         security: [{ bearerAuth: [] }],
-        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+        params: {
+          type: "object",
+          required: ["id"],
+          properties: { id: { type: "string", format: "uuid" } },
+        },
         body: {
           type: "object",
           required: ["title"],
@@ -314,7 +357,7 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
         },
       } as FastifySchema,
     },
-    (request, reply) => adminCourseController.createModule(request, reply)
+    (request, reply) => adminCourseController.createModule(request, reply),
   );
 
   app.put<{
@@ -348,7 +391,7 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
         },
       } as FastifySchema,
     },
-    (request, reply) => adminCourseController.updateModule(request, reply)
+    (request, reply) => adminCourseController.updateModule(request, reply),
   );
 
   app.delete<{ Params: { id: string; moduleId: string } }>(
@@ -356,7 +399,8 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
     {
       preHandler: [validate({ params: moduleParamsSchema })],
       schema: {
-        description: "Delete a course module definition and its quizzes (admin only)",
+        description:
+          "Delete a course module definition and its quizzes (admin only)",
         tags: ["admin", "courses"],
         security: [{ bearerAuth: [] }],
         params: {
@@ -369,10 +413,13 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
         },
       } as FastifySchema,
     },
-    (request, reply) => adminCourseController.removeModule(request, reply)
+    (request, reply) => adminCourseController.removeModule(request, reply),
   );
 
-  app.post<{ Params: { id: string }; Body: import("./course.types.js").ReorderModulesBody }>(
+  app.post<{
+    Params: { id: string };
+    Body: import("./course.types.js").ReorderModulesBody;
+  }>(
     "/:id/modules/reorder",
     {
       preHandler: [
@@ -383,7 +430,11 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
           "Reorder course modules atomically — accepts an ordered array of module IDs (admin only, #374)",
         tags: ["admin", "courses"],
         security: [{ bearerAuth: [] }],
-        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+        params: {
+          type: "object",
+          required: ["id"],
+          properties: { id: { type: "string", format: "uuid" } },
+        },
         body: {
           type: "object",
           required: ["moduleIds"],
@@ -398,7 +449,7 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
         },
       } as FastifySchema,
     },
-    (request, reply) => adminCourseController.reorderModules(request, reply)
+    (request, reply) => adminCourseController.reorderModules(request, reply),
   );
 
   // ─── Module Quiz Authoring (#388) ───────────────────────────────────────
@@ -411,6 +462,20 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
         description:
           "List every quiz on a course module, including correct answers and submission counts (admin only, #388)",
         tags: ["admin", "courses", "quizzes"],
+        security: [{ bearerAuth: [] }],
+        params: {
+          type: "object",
+          required: ["id", "moduleId"],
+          properties: {
+            id: { type: "string", format: "uuid" },
+            moduleId: { type: "string", minLength: 1, maxLength: 100 },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => quizController.listModuleQuizzes(request, reply),
+  );
+
   app.get<{ Params: { id: string; moduleId: string } }>(
     "/:id/modules/:moduleId/content",
     {
@@ -429,8 +494,7 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
         },
       } as FastifySchema,
     },
-    (request, reply) => quizController.listModuleQuizzes(request, reply)
-    (request, reply) => adminCourseController.listContent(request, reply)
+    (request, reply) => adminCourseController.listContent(request, reply),
   );
 
   app.post<{
@@ -440,22 +504,15 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
     "/:id/modules/:moduleId/quizzes",
     {
       preHandler: [
-        validate({ params: adminQuizModuleParamsSchema, body: authoredQuizSchema }),
+        validate({
+          params: adminQuizModuleParamsSchema,
+          body: authoredQuizSchema,
+        }),
       ],
       schema: {
         description:
           "Create a hand-authored quiz for a course module. Each question needs a unique id, text, 2-10 options, and a correctIndex within the options range. The quiz is course-wide (unlike AI-generated ones, which belong to a single learner). Questions are stored in the order given and are not shuffled (admin only, #388)",
         tags: ["admin", "courses", "quizzes"],
-    Body: import("./course.types.js").CreateContentBody;
-  }>(
-    "/:id/modules/:moduleId/content",
-    {
-      preHandler: [
-        validate({ params: moduleContentParamsSchema, body: createContentSchema }),
-      ],
-      schema: {
-        description: "Create a content item within a module (admin only, #382)",
-        tags: ["admin", "courses"],
         security: [{ bearerAuth: [] }],
         params: {
           type: "object",
@@ -479,7 +536,46 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
         },
       } as FastifySchema,
     },
-    (request, reply) => quizController.createModuleQuiz(request, reply)
+    (request, reply) => quizController.createModuleQuiz(request, reply),
+  );
+
+  app.post<{
+    Params: { id: string; moduleId: string };
+    Body: import("./course.types.js").CreateContentBody;
+  }>(
+    "/:id/modules/:moduleId/content",
+    {
+      preHandler: [
+        validate({
+          params: moduleContentParamsSchema,
+          body: createContentSchema,
+        }),
+      ],
+      schema: {
+        description: "Create a content item within a module (admin only, #382)",
+        tags: ["admin", "courses"],
+        security: [{ bearerAuth: [] }],
+        params: {
+          type: "object",
+          required: ["id", "moduleId"],
+          properties: {
+            id: { type: "string", format: "uuid" },
+            moduleId: { type: "string", minLength: 1, maxLength: 100 },
+          },
+        },
+        body: {
+          type: "object",
+          required: ["title"],
+          properties: {
+            title: { type: "string", minLength: 1 },
+            content: { type: "string" },
+            contentType: { type: "string" },
+            videoUrl: { type: "string" },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => adminCourseController.createContent(request, reply),
   );
 
   app.put<{
@@ -515,9 +611,11 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
               maxItems: 50,
               items: { type: "object" },
             },
+          },
+        },
       } as FastifySchema,
     },
-    (request, reply) => adminCourseController.createContent(request, reply)
+    (request, reply) => quizController.updateModuleQuiz(request, reply),
   );
 
   app.put<{
@@ -544,7 +642,30 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
         },
       } as FastifySchema,
     },
-    (request, reply) => adminCourseController.updateContent(request, reply)
+    (request, reply) => adminCourseController.updateContent(request, reply),
+  );
+
+  app.delete<{ Params: { id: string; moduleId: string; quizId: string } }>(
+    "/:id/modules/:moduleId/quizzes/:quizId",
+    {
+      preHandler: [validate({ params: adminQuizParamsSchema })],
+      schema: {
+        description:
+          "Delete a quiz. Destructive: quiz_submissions cascade, so any learner submissions — including ones whose rewards have already been claimed — are removed too. The response reports how many submissions and claimed rewards were destroyed (admin only, #388)",
+        tags: ["admin", "courses", "quizzes"],
+        security: [{ bearerAuth: [] }],
+        params: {
+          type: "object",
+          required: ["id", "moduleId", "quizId"],
+          properties: {
+            id: { type: "string", format: "uuid" },
+            moduleId: { type: "string", minLength: 1, maxLength: 100 },
+            quizId: { type: "string", format: "uuid" },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => quizController.deleteModuleQuiz(request, reply),
   );
 
   app.delete<{ Params: { id: string; moduleId: string; contentId: string } }>(
@@ -566,26 +687,7 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
         },
       } as FastifySchema,
     },
-    (request, reply) => quizController.updateModuleQuiz(request, reply)
-  );
-
-  app.delete<{ Params: { id: string; moduleId: string; quizId: string } }>(
-    "/:id/modules/:moduleId/quizzes/:quizId",
-    {
-      preHandler: [validate({ params: adminQuizParamsSchema })],
-      schema: {
-        description:
-          "Delete a quiz. Destructive: quiz_submissions cascade, so any learner submissions — including ones whose rewards have already been claimed — are removed too. The response reports how many submissions and claimed rewards were destroyed (admin only, #388)",
-        tags: ["admin", "courses", "quizzes"],
-        security: [{ bearerAuth: [] }],
-        params: {
-          type: "object",
-          required: ["id", "moduleId", "quizId"],
-          properties: {
-            id: { type: "string", format: "uuid" },
-            moduleId: { type: "string", minLength: 1, maxLength: 100 },
-            quizId: { type: "string", format: "uuid" },
-    (request, reply) => adminCourseController.deleteContent(request, reply)
+    (request, reply) => adminCourseController.deleteContent(request, reply),
   );
 
   app.post<{
@@ -595,7 +697,10 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
     "/:id/modules/:moduleId/content/reorder",
     {
       preHandler: [
-        validate({ params: moduleContentParamsSchema, body: reorderContentSchema }),
+        validate({
+          params: moduleContentParamsSchema,
+          body: reorderContentSchema,
+        }),
       ],
       schema: {
         description:
@@ -612,35 +717,7 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
         },
       } as FastifySchema,
     },
-    (request, reply) => adminCourseController.reorderContent(request, reply)
-  );
-
-  app.put<{
-    Params: { id: string; moduleId: string };
-    Body: import("./course.types.js").ReorderContentBody;
-  }>(
-    "/:id/modules/:moduleId/content/reorder",
-    {
-      preHandler: [
-        validate({ params: moduleContentParamsSchema, body: reorderContentSchema }),
-      ],
-      schema: {
-        description:
-          "Reorder content items within a module atomically (admin only, #382)",
-        tags: ["admin", "courses"],
-        security: [{ bearerAuth: [] }],
-        params: {
-          type: "object",
-          required: ["id", "moduleId"],
-          properties: {
-            id: { type: "string", format: "uuid" },
-            moduleId: { type: "string", minLength: 1, maxLength: 100 },
-          },
-        },
-      } as FastifySchema,
-    },
-    (request, reply) => quizController.deleteModuleQuiz(request, reply)
-    (request, reply) => adminCourseController.reorderContent(request, reply)
+    (request, reply) => adminCourseController.reorderContent(request, reply),
   );
 
   app.get<{ Params: { id: string } }>(
@@ -652,10 +729,14 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
           "Detailed course analytics: enrollment trends (daily/weekly), completion rate, average time-to-complete, average quiz score, and modules with the lowest average score (admin only, cached 1 hour)",
         tags: ["admin", "courses"],
         security: [{ bearerAuth: [] }],
-        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+        params: {
+          type: "object",
+          required: ["id"],
+          properties: { id: { type: "string", format: "uuid" } },
+        },
       } as FastifySchema,
     },
-    (request, reply) => adminCourseController.analytics(request, reply)
+    (request, reply) => adminCourseController.analytics(request, reply),
   );
 
   app.get<{ Params: { id: string } }>(
@@ -667,10 +748,14 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
           "Course engagement metrics: completion rate, average time to complete, per-module drop-off, average score and quiz retake rate, the biggest drop-off point, and weekly enrollment/completion trends (admin only, cached 1 hour)",
         tags: ["admin", "courses"],
         security: [{ bearerAuth: [] }],
-        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+        params: {
+          type: "object",
+          required: ["id"],
+          properties: { id: { type: "string", format: "uuid" } },
+        },
       } as FastifySchema,
     },
-    (request, reply) => adminCourseController.engagement(request, reply)
+    (request, reply) => adminCourseController.engagement(request, reply),
   );
 
   app.get<{
@@ -690,7 +775,11 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
           "List a course's enrolled users (paginated) with their quiz progress (admin only)",
         tags: ["admin", "courses"],
         security: [{ bearerAuth: [] }],
-        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+        params: {
+          type: "object",
+          required: ["id"],
+          properties: { id: { type: "string", format: "uuid" } },
+        },
         querystring: {
           type: "object",
           properties: {
@@ -700,7 +789,7 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
         },
       } as FastifySchema,
     },
-    (request, reply) => adminCourseController.listEnrolledUsers(request, reply)
+    (request, reply) => adminCourseController.listEnrolledUsers(request, reply),
   );
 
   app.get<{
@@ -720,16 +809,28 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
           "Enrollment trends for a course over time with configurable range (7d/30d/90d) and granularity (daily/weekly/monthly) (admin only, cached 1 hour, #391)",
         tags: ["admin", "courses"],
         security: [{ bearerAuth: [] }],
-        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+        params: {
+          type: "object",
+          required: ["id"],
+          properties: { id: { type: "string", format: "uuid" } },
+        },
         querystring: {
           type: "object",
           properties: {
-            range: { type: "string", enum: ["7d", "30d", "90d"], default: "30d" },
-            granularity: { type: "string", enum: ["daily", "weekly", "monthly"], default: "daily" },
+            range: {
+              type: "string",
+              enum: ["7d", "30d", "90d"],
+              default: "30d",
+            },
+            granularity: {
+              type: "string",
+              enum: ["daily", "weekly", "monthly"],
+              default: "daily",
+            },
           },
         },
       } as FastifySchema,
     },
-    (request, reply) => adminCourseController.enrollmentTrends(request, reply)
+    (request, reply) => adminCourseController.enrollmentTrends(request, reply),
   );
 }

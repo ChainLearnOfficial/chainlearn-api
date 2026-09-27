@@ -1601,9 +1601,6 @@ export class CourseService {
         },
         {},
       ),
-    const accessibility = checkAccessibility({
-      title: data.title,
-      description: data.description,
     });
 
     const [course] = await db

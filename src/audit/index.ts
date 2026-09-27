@@ -21,6 +21,7 @@ type AuditEvent =
   | "course.deleted"
   | "course.published"
   | "course.duplicated"
+  | "course.cloned"
   | "course.reviewed"
   | "course.reported"
   | "course.imported"
@@ -38,6 +39,14 @@ type AuditEvent =
   | "course.quiz.created"
   | "course.quiz.updated"
   | "course.quiz.deleted"
+  | "course.module.content.created"
+  | "course.module.content.updated"
+  | "course.module.content.deleted"
+  | "course.module.content.reordered"
+  | "badge.created"
+  | "badge.updated"
+  | "badge.deleted"
+  | "badge.awarded"
   | "quiz.feedback.submitted"
   | "credits.granted"
   | "announcement.created"
@@ -57,6 +66,13 @@ interface AuditFields {
   moduleIds?: string[];
   quizId?: string;
   questionCount?: number;
+  contentId?: string;
+  contentIds?: string[];
+  badgeId?: string;
+  badgeType?: string;
+  badgeName?: string;
+  reportId?: string;
+  reason?: string;
   txHash?: string | null;
   amount?: number;
   score?: number;

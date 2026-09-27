@@ -13,6 +13,11 @@ import type {
   ListEnrolledUsersQuery,
   EnrollmentTrendsQuery,
   ReorderModulesBody,
+  CloneCourseBody,
+  ContentParams,
+  CreateContentBody,
+  UpdateContentBody,
+  ReorderContentBody,
 } from "./course.types.js";
 
 export class AdminCourseController {
@@ -181,11 +186,25 @@ export class AdminCourseController {
    * Duplicate a course (metadata, modules, quizzes) into a new draft course.
    */
   async duplicate(
-    request: FastifyRequest<{ Params: CourseIdParams }>,
+    request: FastifyRequest<{ Params: CourseIdParams; Body?: CloneCourseBody }>,
     reply: FastifyReply
   ): Promise<void> {
     const { id } = request.params;
-    const course = await courseService.duplicateCourse(id);
+    const course = await courseService.cloneCourse(id, request.body?.title);
+
+    reply.status(201).send({ success: true, data: course });
+  }
+
+  /**
+   * POST /api/v1/admin/courses/:id/clone
+   * Clone a course (metadata, modules, content, quizzes) into a new draft course (#378).
+   */
+  async clone(
+    request: FastifyRequest<{ Params: CourseIdParams; Body?: CloneCourseBody }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id } = request.params;
+    const course = await courseService.cloneCourse(id, request.body?.title);
 
     reply.status(201).send({ success: true, data: course });
   }
@@ -305,6 +324,80 @@ export class AdminCourseController {
     );
 
     reply.send({ success: true, data: modules });
+  }
+
+  /**
+   * GET /api/v1/admin/courses/:id/modules/:moduleId/content
+   * List content items within a module (#382).
+   */
+  async listContent(
+    request: FastifyRequest<{ Params: ModuleParams }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id, moduleId } = request.params;
+    const items = await courseService.listModuleContent(id, moduleId);
+
+    reply.send({ success: true, data: items });
+  }
+
+  /**
+   * POST /api/v1/admin/courses/:id/modules/:moduleId/content
+   * Create a content item within a module (#382).
+   */
+  async createContent(
+    request: FastifyRequest<{ Params: ModuleParams; Body: CreateContentBody }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id, moduleId } = request.params;
+    const item = await courseService.createModuleContent(id, moduleId, request.body);
+
+    reply.status(201).send({ success: true, data: item });
+  }
+
+  /**
+   * PUT /api/v1/admin/courses/:id/modules/:moduleId/content/:contentId
+   * Update a content item within a module (#382).
+   */
+  async updateContent(
+    request: FastifyRequest<{ Params: ContentParams; Body: UpdateContentBody }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id, moduleId, contentId } = request.params;
+    const item = await courseService.updateModuleContent(id, moduleId, contentId, request.body);
+
+    reply.send({ success: true, data: item });
+  }
+
+  /**
+   * DELETE /api/v1/admin/courses/:id/modules/:moduleId/content/:contentId
+   * Delete a content item within a module (#382).
+   */
+  async deleteContent(
+    request: FastifyRequest<{ Params: ContentParams }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id, moduleId, contentId } = request.params;
+    await courseService.deleteModuleContent(id, moduleId, contentId);
+
+    reply.send({ success: true, message: "Content item deleted" });
+  }
+
+  /**
+   * POST/PUT /api/v1/admin/courses/:id/modules/:moduleId/content/reorder
+   * Reorder content items within a module (#382).
+   */
+  async reorderContent(
+    request: FastifyRequest<{ Params: ModuleParams; Body: ReorderContentBody }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id, moduleId } = request.params;
+    const items = await courseService.reorderModuleContent(
+      id,
+      moduleId,
+      request.body.contentIds
+    );
+
+    reply.send({ success: true, data: items });
   }
 }
 

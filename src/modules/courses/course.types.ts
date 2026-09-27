@@ -215,6 +215,103 @@ export type ListEnrolledUsersQuery = z.infer<typeof listEnrolledUsersQuerySchema
 export type CreateReviewBody = z.infer<typeof createReviewSchema>;
 export type ReportCourseBody = z.infer<typeof reportCourseSchema>;
 
+export const cloneCourseSchema = z.object({
+  title: z.string().min(1).max(255).optional(),
+});
+export type CloneCourseBody = z.infer<typeof cloneCourseSchema>;
+
+export const contentParamsSchema = z.object({
+  id: z.string().uuid(),
+  moduleId: z.string().min(1).max(100),
+  contentId: z.string().uuid(),
+});
+export type ContentParams = z.infer<typeof contentParamsSchema>;
+
+export const moduleContentParamsSchema = z.object({
+  id: z.string().uuid(),
+  moduleId: z.string().min(1).max(100),
+});
+export type ModuleContentParams = z.infer<typeof moduleContentParamsSchema>;
+
+export const createContentSchema = z.discriminatedUnion("type", [
+  z.object({
+    title: z.string().min(1).max(255),
+    type: z.literal("text"),
+    content: z.object({
+      body: z.string().min(1),
+    }),
+    orderIndex: z.number().int().min(0).optional(),
+  }),
+  z.object({
+    title: z.string().min(1).max(255),
+    type: z.literal("video"),
+    content: z.object({
+      videoUrl: z.string().url(),
+      durationSeconds: z.number().int().min(1).optional(),
+      transcript: z.string().optional(),
+    }),
+    orderIndex: z.number().int().min(0).optional(),
+  }),
+  z.object({
+    title: z.string().min(1).max(255),
+    type: z.literal("quiz"),
+    content: z.object({
+      quizId: z.string().uuid().optional(),
+      questions: z.array(z.object({
+        id: z.string().min(1),
+        text: z.string().min(1),
+        options: z.array(z.string().min(1)).min(2),
+        correctIndex: z.number().int().min(0),
+        explanation: z.string().optional(),
+      })).optional(),
+    }).refine((c) => Boolean(c.quizId || (c.questions && c.questions.length > 0)), {
+      message: "Quiz content must provide quizId or questions",
+    }),
+    orderIndex: z.number().int().min(0).optional(),
+  }),
+  z.object({
+    title: z.string().min(1).max(255),
+    type: z.literal("exercise"),
+    content: z.object({
+      instructions: z.string().min(1),
+      starterCode: z.string().optional(),
+      solution: z.string().optional(),
+      language: z.string().optional(),
+    }),
+    orderIndex: z.number().int().min(0).optional(),
+  }),
+]);
+export type CreateContentBody = z.infer<typeof createContentSchema>;
+
+export const updateContentSchema = z.object({
+  title: z.string().min(1).max(255).optional(),
+  type: z.enum(["text", "video", "quiz", "exercise"]).optional(),
+  content: z.record(z.unknown()).optional(),
+  orderIndex: z.number().int().min(0).optional(),
+});
+export type UpdateContentBody = z.infer<typeof updateContentSchema>;
+
+export const reorderContentSchema = z.object({
+  contentIds: z.array(z.string().uuid()).min(1).max(100),
+});
+export type ReorderContentBody = z.infer<typeof reorderContentSchema>;
+
+export interface ModuleContentItem {
+  id: string;
+  courseId: string;
+  moduleId: string;
+  title: string;
+  type: "text" | "video" | "quiz" | "exercise";
+  content: Record<string, unknown>;
+  orderIndex: number;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface AdminCourseWithAccessibility extends AdminCourse {
+  accessibilityWarnings?: import("./accessibility.js").AccessibilityWarning[];
+}
+
 export interface CourseSummary {
   id: string;
   title: string;

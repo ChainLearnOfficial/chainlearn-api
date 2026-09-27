@@ -1,4 +1,5 @@
 import { eq, and, count, desc, inArray, ilike, or, isNull, ne, sql } from "drizzle-orm";
+import { eq, and, count, desc, asc, inArray, ilike, or, isNull, ne, sql } from "drizzle-orm";
 import crypto from "node:crypto";
 import QRCode from "qrcode";
 import { db } from "../../config/database.js";
@@ -11,9 +12,14 @@ import {
   quizzes,
   quizSubmissions,
   users,
+  credentials,
   courseReports,
   notifications,
+  courseShares,
+  courseReviews,
+  moduleContent,
   type CourseModuleDefinition,
+  type ModuleContentPayload,
 } from "../../database/schema.js";
 import { config } from "../../config/index.js";
 import {
@@ -31,6 +37,7 @@ import { PASSING_PERCENTAGE } from "../quizzes/quiz.types.js";
 import { auditLog } from "../../audit/index.js";
 import { dispatchWebhook } from "../../services/webhook-dispatcher.js";
 import { waitlistService } from "./waitlist.service.js";
+import { checkAccessibility } from "./accessibility.js";
 import {
   cacheGet,
   cacheSet,
@@ -54,6 +61,8 @@ import type {
   UpdateCourseBody,
   CourseModuleWithProgress,
   CourseLeaderboardEntry,
+  CourseShareLink,
+  ResolvedShareLink,
   CreateModuleBody,
   UpdateModuleBody,
   ListReviewsQuery,
@@ -90,6 +99,9 @@ import type {
   CourseProgressModule,
   QuizAttempt,
   QuizAttemptsResult,
+  CreateContentBody,
+  UpdateContentBody,
+  ModuleContentItem,
 } from "./course.types.js";
 
 const POPULAR_COURSES_TTL_SECONDS = 300;
@@ -1589,6 +1601,9 @@ export class CourseService {
         },
         {},
       ),
+    const accessibility = checkAccessibility({
+      title: data.title,
+      description: data.description,
     });
 
     const [course] = await db
@@ -1651,6 +1666,7 @@ export class CourseService {
       throw new NotFoundError("Course");
     }
 
+  ): Promise<AdminCourse> {
     // A course can't be its own prerequisite.
     const sanitized = data.prerequisites
       ? { ...data, prerequisites: data.prerequisites.filter((id) => id !== courseId) }
@@ -1756,6 +1772,12 @@ export class CourseService {
         isActive: false,
         archivedAt: sql`COALESCE(${courses.archivedAt}, NOW())`,
       })
+   * Archive a course: hides it from public listings while preserving data (#358).
+   */
+  async archiveCourse(courseId: string): Promise<void> {
+    const [course] = await db
+      .update(courses)
+      .set({ isActive: false })
       .where(eq(courses.id, courseId))
       .returning();
 
@@ -1960,6 +1982,19 @@ export class CourseService {
           .filter((issue) => issue.severity === "blocking")
           .map((issue) => issue.message),
       });
+  }
+
+  /**
+   * Publish a course: validates required content and sets isActive = true, isDraft = false.
+   */
+  async publishCourse(courseId: string): Promise<AdminCourse> {
+    const [existing] = await db
+      .select()
+      .from(courses)
+      .where(eq(courses.id, courseId));
+
+    if (!existing) {
+      throw new NotFoundError("Course");
     }
 
     const [published] = await db
@@ -1971,6 +2006,10 @@ export class CourseService {
     if (!published) {
       throw new NotFoundError("Course");
     }
+
+      .set({ isActive: true, isDraft: false })
+      .where(eq(courses.id, courseId))
+      .returning();
 
     await this.invalidateCourseCaches(courseId);
     await auditLog("course.published", { courseId });
@@ -2059,6 +2098,7 @@ export class CourseService {
         return this.toAdminCourse(copy);
       });
     });
+    return this.toAdminCourse(published);
   }
 
   private normalizeCourseModules(
@@ -3180,6 +3220,399 @@ export class CourseService {
       logger.info({ courseId, moduleIds }, "Course modules reordered");
 
       return reordered;
+    });
+  }
+
+  // ─── Admin: Clone Course (#378) ─────────────────────────────────────────
+
+  /**
+   * Deep-copies a course including metadata, modules, module content, and quizzes (#378).
+   * Creates a new course row with isDraft=true, isActive=false, generating new unique UUIDs
+   * for the course, modules, module content, and quizzes. The original course is unchanged.
+   * Cloned course action is logged to the audit log.
+   */
+  async cloneCourse(
+    courseId: string,
+    customTitle?: string,
+  ): Promise<AdminCourse> {
+    const [original] = await db
+      .select()
+      .from(courses)
+      .where(eq(courses.id, courseId));
+
+    if (!original) {
+      throw new NotFoundError("Course");
+    }
+
+    const title = customTitle || `${original.title} (Clone)`;
+    const newCourseId = crypto.randomUUID();
+
+    // Map old moduleId -> new moduleId
+    const moduleIdMap = new Map<string, string>();
+
+    const originalModules = (original.modules ?? []) as CourseModuleDefinition[];
+    const clonedModules: CourseModuleDefinition[] = originalModules.map((m) => {
+      const newModId = crypto.randomUUID();
+      moduleIdMap.set(m.id, newModId);
+      return {
+        id: newModId,
+        title: m.title,
+        description: m.description,
+        order: m.order,
+      };
+    });
+
+    const originalCourseModules = (original.courseModules ?? []) as Array<{
+      id: string;
+      title: string;
+      description?: string;
+      estimatedDurationMinutes?: number;
+    }>;
+    const clonedCourseModules = originalCourseModules.map((cm) => ({
+      ...cm,
+      id: moduleIdMap.get(cm.id) ?? crypto.randomUUID(),
+    }));
+
+    // 1. Insert new course row
+    const [newCourse] = await db
+      .insert(courses)
+      .values({
+        id: newCourseId,
+        title,
+        description: original.description,
+        difficulty: original.difficulty,
+        tags: original.tags,
+        courseModules: clonedCourseModules,
+        modules: clonedModules,
+        contentHash: null,
+        accessibilityScore: original.accessibilityScore,
+        prerequisites: original.prerequisites ?? [],
+        isActive: false,
+        isDraft: true,
+      })
+      .returning();
+
+    // 2. Clone module content items if any
+    const existingContentRows = await db
+      .select()
+      .from(moduleContent)
+      .where(eq(moduleContent.courseId, courseId));
+
+    if (existingContentRows.length > 0) {
+      const contentToInsert = existingContentRows.map((c) => ({
+        id: crypto.randomUUID(),
+        courseId: newCourseId,
+        moduleId: moduleIdMap.get(c.moduleId) ?? c.moduleId,
+        title: c.title,
+        type: c.type,
+        content: c.content,
+        orderIndex: c.orderIndex,
+      }));
+      await db.insert(moduleContent).values(contentToInsert);
+    }
+
+    // 3. Clone quizzes
+    const existingQuizzes = await db
+      .select()
+      .from(quizzes)
+      .where(eq(quizzes.courseId, courseId));
+
+    if (existingQuizzes.length > 0) {
+      const quizzesToInsert = existingQuizzes.map((q) => ({
+        id: crypto.randomUUID(),
+        courseId: newCourseId,
+        moduleId: moduleIdMap.get(q.moduleId) ?? q.moduleId,
+        questions: q.questions,
+        generatedFor: null,
+      }));
+      await db.insert(quizzes).values(quizzesToInsert);
+    }
+
+    await this.invalidateCourseCaches(newCourseId);
+    await auditLog("course.cloned", {
+      courseId: newCourseId,
+      sourceCourseId: courseId,
+    });
+    logger.info(
+      { newCourseId, sourceCourseId: courseId },
+      "Course cloned successfully",
+    );
+
+    return this.toAdminCourse(newCourse);
+  }
+
+  /**
+   * Alias for cloneCourse (#378 / duplicate route compatibility).
+   */
+  async duplicateCourse(courseId: string): Promise<AdminCourse> {
+    return this.cloneCourse(courseId);
+  }
+
+  // ─── Admin: Module Content CRUD & Reorder (#382) ─────────────────────────
+
+  private toModuleContentItem(row: typeof moduleContent.$inferSelect): ModuleContentItem {
+    return {
+      id: row.id,
+      courseId: row.courseId,
+      moduleId: row.moduleId,
+      title: row.title,
+      type: row.type as "text" | "video" | "quiz" | "exercise",
+      content: (row.content ?? {}) as Record<string, unknown>,
+      orderIndex: row.orderIndex,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    };
+  }
+
+  /**
+   * List all content items for a specific module ordered by orderIndex (#382).
+   */
+  async listModuleContent(
+    courseId: string,
+    moduleId: string,
+  ): Promise<ModuleContentItem[]> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    const rows = await db
+      .select()
+      .from(moduleContent)
+      .where(
+        and(
+          eq(moduleContent.courseId, courseId),
+          eq(moduleContent.moduleId, moduleId),
+        ),
+      )
+      .orderBy(asc(moduleContent.orderIndex), asc(moduleContent.createdAt));
+
+    return rows.map((r) => this.toModuleContentItem(r));
+  }
+
+  /**
+   * Create a new content item within a module (#382).
+   */
+  async createModuleContent(
+    courseId: string,
+    moduleId: string,
+    data: CreateContentBody,
+  ): Promise<ModuleContentItem> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    return withLock(`module-content:${courseId}:${moduleId}`, async () => {
+      let orderIndex = data.orderIndex;
+      if (orderIndex === undefined || orderIndex === null) {
+        const [maxRow] = await db
+          .select({
+            maxOrder: sql<number | null>`MAX(${moduleContent.orderIndex})`,
+          })
+          .from(moduleContent)
+          .where(
+            and(
+              eq(moduleContent.courseId, courseId),
+              eq(moduleContent.moduleId, moduleId),
+            ),
+          );
+        orderIndex = maxRow?.maxOrder != null ? maxRow.maxOrder + 1 : 0;
+      }
+
+      const [created] = await db
+        .insert(moduleContent)
+        .values({
+          courseId,
+          moduleId,
+          title: data.title,
+          type: data.type,
+          content: data.content as ModuleContentPayload,
+          orderIndex,
+        })
+        .returning();
+
+      await this.invalidateCourseCaches(courseId);
+      await auditLog("course.module.content.created", {
+        courseId,
+        moduleId,
+        contentId: created.id,
+      });
+      logger.info(
+        { courseId, moduleId, contentId: created.id, type: data.type },
+        "Module content item created",
+      );
+
+      return this.toModuleContentItem(created);
+    });
+  }
+
+  /**
+   * Update an existing content item (#382).
+   */
+  async updateModuleContent(
+    courseId: string,
+    moduleId: string,
+    contentId: string,
+    data: UpdateContentBody,
+  ): Promise<ModuleContentItem> {
+    const [existing] = await db
+      .select()
+      .from(moduleContent)
+      .where(
+        and(
+          eq(moduleContent.id, contentId),
+          eq(moduleContent.courseId, courseId),
+          eq(moduleContent.moduleId, moduleId),
+        ),
+      );
+
+    if (!existing) {
+      throw new NotFoundError("Module content");
+    }
+
+    const updateValues: Partial<typeof moduleContent.$inferInsert> = {
+      updatedAt: new Date(),
+    };
+    if (data.title !== undefined) updateValues.title = data.title;
+    if (data.type !== undefined) updateValues.type = data.type;
+    if (data.content !== undefined) updateValues.content = data.content as ModuleContentPayload;
+    if (data.orderIndex !== undefined) updateValues.orderIndex = data.orderIndex;
+
+    const [updated] = await db
+      .update(moduleContent)
+      .set(updateValues)
+      .where(eq(moduleContent.id, contentId))
+      .returning();
+
+    await this.invalidateCourseCaches(courseId);
+    await auditLog("course.module.content.updated", {
+      courseId,
+      moduleId,
+      contentId,
+    });
+    logger.info(
+      { courseId, moduleId, contentId },
+      "Module content item updated",
+    );
+
+    return this.toModuleContentItem(updated);
+  }
+
+  /**
+   * Delete a content item (#382).
+   */
+  async deleteModuleContent(
+    courseId: string,
+    moduleId: string,
+    contentId: string,
+  ): Promise<void> {
+    const [existing] = await db
+      .select()
+      .from(moduleContent)
+      .where(
+        and(
+          eq(moduleContent.id, contentId),
+          eq(moduleContent.courseId, courseId),
+          eq(moduleContent.moduleId, moduleId),
+        ),
+      );
+
+    if (!existing) {
+      throw new NotFoundError("Module content");
+    }
+
+    await db.delete(moduleContent).where(eq(moduleContent.id, contentId));
+
+    await this.invalidateCourseCaches(courseId);
+    await auditLog("course.module.content.deleted", {
+      courseId,
+      moduleId,
+      contentId,
+    });
+    logger.info(
+      { courseId, moduleId, contentId },
+      "Module content item deleted",
+    );
+  }
+
+  /**
+   * Reorder content items within a module atomically (#382).
+   */
+  async reorderModuleContent(
+    courseId: string,
+    moduleId: string,
+    contentIds: string[],
+  ): Promise<ModuleContentItem[]> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    return withLock(`module-content:${courseId}:${moduleId}`, async () => {
+      const existingRows = await db
+        .select()
+        .from(moduleContent)
+        .where(
+          and(
+            eq(moduleContent.courseId, courseId),
+            eq(moduleContent.moduleId, moduleId),
+          ),
+        );
+
+      const existingIds = new Set(existingRows.map((r) => r.id));
+      const providedIds = new Set(contentIds);
+
+      if (existingIds.size !== providedIds.size) {
+        throw new ForbiddenError(
+          "Content IDs do not match the module's content items",
+        );
+      }
+
+      for (const id of contentIds) {
+        if (!existingIds.has(id)) {
+          throw new ForbiddenError(
+            `Content ${id} does not belong to this module`,
+          );
+        }
+      }
+
+      for (let i = 0; i < contentIds.length; i++) {
+        await db
+          .update(moduleContent)
+          .set({ orderIndex: i, updatedAt: new Date() })
+          .where(eq(moduleContent.id, contentIds[i]));
+      }
+
+      await this.invalidateCourseCaches(courseId);
+      await auditLog("course.module.content.reordered", {
+        courseId,
+        moduleId,
+        contentIds,
+      });
+      logger.info(
+        { courseId, moduleId, contentIds },
+        "Module content reordered",
+      );
+
+      const updatedRows = await db
+        .select()
+        .from(moduleContent)
+        .where(
+          and(
+            eq(moduleContent.courseId, courseId),
+            eq(moduleContent.moduleId, moduleId),
+          ),
+        )
+        .orderBy(asc(moduleContent.orderIndex));
+
+      return updatedRows.map((r) => this.toModuleContentItem(r));
     });
   }
 }

@@ -6,6 +6,7 @@ import { activityQuerySchema, updateProfileSchema } from "./user.types.js";
 import { config } from "../../config/index.js";
 import { notificationController } from "../notifications/notification.controller.js";
 import { credentialController } from "../credentials/credential.controller.js";
+import { badgeController } from "../badges/badge.controller.js";
 import {
   listNotificationsQuerySchema,
   notificationIdParamsSchema,
@@ -93,6 +94,19 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => userController.getProgress(request, reply)
+  );
+
+  app.get(
+    "/me/badges",
+    {
+      schema: {
+        description:
+          "Get authenticated user's earned badges and progress toward unearned badges (#379)",
+        tags: ["users", "badges"],
+        security: [{ bearerAuth: [] }],
+      } as FastifySchema,
+    },
+    (request, reply) => badgeController.getUserBadges(request, reply)
   );
 
   app.get(

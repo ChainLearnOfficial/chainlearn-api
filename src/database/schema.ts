@@ -53,6 +53,7 @@ export const users = pgTable(
     // a soft delete — the row (and its enrollments/credentials, which are
     // never touched here) is preserved for on-chain record consistency.
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    bannedAt: timestamp("banned_at", { withTimezone: true }),
   },
   (table) => [index("idx_users_stellar_address").on(table.stellarAddress)]
 );
@@ -463,5 +464,223 @@ export const auditLogs = pgTable(
     // range/ordering.
     index("idx_audit_logs_event").on(table.event),
     index("idx_audit_logs_created_at").on(table.createdAt),
+  ]
+);
+
+// ─── Announcements ──────────────────────────────────────────────────────────
+export const announcements = pgTable(
+  "announcements",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    title: varchar("title", { length: 255 }).notNull(),
+    message: text("message").notNull(),
+    priority: varchar("priority", { length: 20 }).notNull().default("normal"),
+    active: boolean("active").notNull().default(true),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("idx_announcements_active").on(table.active),
+  ]
+);
+
+// ─── Course Shares ──────────────────────────────────────────────────────────
+export const courseShares = pgTable(
+  "course_shares",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    courseId: uuid("course_id")
+      .notNull()
+      .references(() => courses.id, { onDelete: "cascade" }),
+    referralCode: varchar("referral_code", { length: 64 }).notNull().unique(),
+    clickCount: integer("click_count").notNull().default(0),
+    enrollmentCount: integer("enrollment_count").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_course_shares_user_course").on(table.userId, table.courseId),
+    index("idx_course_shares_referral_code").on(table.referralCode),
+  ]
+);
+
+// ─── Course Reviews ─────────────────────────────────────────────────────────
+export const courseReviews = pgTable(
+  "course_reviews",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    courseId: uuid("course_id")
+      .notNull()
+      .references(() => courses.id, { onDelete: "cascade" }),
+    rating: integer("rating").notNull(),
+    reviewText: text("review_text"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_course_reviews_user_course").on(table.userId, table.courseId),
+    index("idx_course_reviews_course_id").on(table.courseId),
+  ]
+);
+
+// ─── Notifications ─────────────────────────────────────────────────────────
+export const notifications = pgTable(
+  "notifications",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    type: varchar("type", { length: 50 }).notNull(),
+    title: varchar("title", { length: 255 }).notNull(),
+    message: text("message").notNull(),
+    read: boolean("read").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("idx_notifications_user_id").on(table.userId),
+    index("idx_notifications_user_read").on(table.userId, table.read),
+  ]
+);
+
+// ─── Badges ─────────────────────────────────────────────────────────────────
+export interface BadgeCriteria {
+  type?: string;
+  count?: number;
+  threshold?: number;
+  courseId?: string;
+  action?: string;
+  days?: number;
+  [key: string]: unknown;
+}
+
+export const badges = pgTable(
+  "badges",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: varchar("name", { length: 255 }).notNull(),
+    description: text("description").notNull(),
+    iconUrl: text("icon_url").notNull(),
+    type: varchar("type", { length: 50 }).notNull(), // 'enrollment', 'quiz_completion', 'credential', 'streak', 'course_completion'
+    criteria: jsonb("criteria").$type<BadgeCriteria>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("idx_badges_type").on(table.type),
+  ]
+);
+
+// ─── User Badges ────────────────────────────────────────────────────────────
+export const userBadges = pgTable(
+  "user_badges",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    badgeId: uuid("badge_id")
+      .notNull()
+      .references(() => badges.id, { onDelete: "cascade" }),
+    earnedAt: timestamp("earned_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    progress: jsonb("progress").$type<Record<string, unknown>>(),
+  },
+  (table) => [
+    uniqueIndex("idx_user_badges_user_badge").on(table.userId, table.badgeId),
+    index("idx_user_badges_user_id").on(table.userId),
+  ]
+);
+
+// ─── Module Content ────────────────────────────────────────────────────────
+export type ContentType = "text" | "video" | "quiz" | "exercise";
+
+export interface TextContentPayload {
+  body: string;
+}
+
+export interface VideoContentPayload {
+  videoUrl: string;
+  durationSeconds?: number;
+  transcript?: string;
+}
+
+export interface QuizContentPayload {
+  quizId?: string;
+  questions?: Array<{
+    id: string;
+    text: string;
+    options: string[];
+    correctIndex: number;
+    explanation?: string;
+  }>;
+}
+
+export interface ExerciseContentPayload {
+  instructions: string;
+  starterCode?: string;
+  solution?: string;
+  language?: string;
+}
+
+export type ModuleContentPayload =
+  | TextContentPayload
+  | VideoContentPayload
+  | QuizContentPayload
+  | ExerciseContentPayload
+  | Record<string, unknown>;
+
+export const moduleContent = pgTable(
+  "module_content",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    courseId: uuid("course_id")
+      .notNull()
+      .references(() => courses.id, { onDelete: "cascade" }),
+    moduleId: varchar("module_id", { length: 100 }).notNull(),
+    title: varchar("title", { length: 255 }).notNull(),
+    type: varchar("type", { length: 20 }).notNull(), // 'text' | 'video' | 'quiz' | 'exercise'
+    content: jsonb("content").$type<ModuleContentPayload>().notNull(),
+    orderIndex: integer("order_index").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("idx_module_content_course_module").on(table.courseId, table.moduleId),
+    index("idx_module_content_module_order").on(table.moduleId, table.orderIndex),
+    check(
+      "chk_module_content_type",
+      sql`type IN ('text', 'video', 'quiz', 'exercise')`
+    ),
   ]
 );

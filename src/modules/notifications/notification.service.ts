@@ -80,6 +80,27 @@ export class NotificationService {
 
     return this.toItem(updated);
   }
+
+  /** Create a notification for a user (e.g. when an achievement or badge is unlocked). */
+  async create(data: {
+    userId: string;
+    type: string;
+    title: string;
+    message: string;
+  }): Promise<NotificationItem> {
+    const [created] = await db
+      .insert(notifications)
+      .values({
+        userId: data.userId,
+        type: data.type,
+        title: data.title,
+        message: data.message,
+        read: false,
+      })
+      .returning();
+
+    return this.toItem(created);
+  }
 }
 
 export const notificationService = new NotificationService();

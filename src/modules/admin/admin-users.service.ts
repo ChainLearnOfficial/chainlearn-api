@@ -1,4 +1,4 @@
-import { and, count, desc, ilike, or, eq } from "drizzle-orm";
+import { and, count, desc, ilike, isNull, or, eq, sql } from "drizzle-orm";
 import { db } from "../../config/database.js";
 import {
   users,
@@ -9,7 +9,19 @@ import {
   auditLogs,
 } from "../../database/schema.js";
 import { NotFoundError } from "../../utils/errors.js";
-import type { AdminUserSummary, ListUsersQuery } from "./admin.types.js";
+import { auditLog } from "../../audit/index.js";
+import { logger } from "../../utils/logger.js";
+import {
+  cacheDel,
+  cacheInvalidatePattern,
+  cacheKey,
+  cacheKeyPattern,
+} from "../../cache/index.js";
+import type {
+  AdminUserSummary,
+  CreditGrantResult,
+  ListUsersQuery,
+} from "./admin.types.js";
 
 export class AdminUsersService {
   /**
@@ -75,6 +87,91 @@ export class AdminUsersService {
     if (!updated) {
       throw new NotFoundError("User");
     }
+  }
+
+  /**
+   * Grant credits to a user (#386) — promotions, rewards, corrections.
+   *
+   * The single `SET credits = credits + :amount` statement is deliberate:
+   * reading the balance first and writing back `before + amount` would lose
+   * a concurrent grant from the reward-claim path (which also increments
+   * credits). Letting Postgres do the addition under the row lock it takes
+   * for the UPDATE makes the grant safe against every other credit writer
+   * without a transaction or an application-level lock.
+   *
+   * `reference` is free-form and only ever written to the audit log — it's a
+   * pointer for whoever reconciles the grant later (promotion code, support
+   * ticket), never a lookup key.
+   *
+   * Soft-deleted accounts (#290) are rejected rather than credited: their
+   * sessions are already dead, so a grant would be invisible to the user and
+   * only recoverable by reading the audit log.
+   *
+   * @param actorId The admin who made the grant, recorded for the audit trail.
+   */
+  async grantCredits(
+    userId: string,
+    amount: number,
+    reason: string,
+    reference?: string,
+    actorId?: string,
+  ): Promise<CreditGrantResult> {
+    const [updated] = await db
+      .update(users)
+      .set({
+        credits: sql`${users.credits} + ${amount}`,
+        // Maintained by the users_updated_at trigger; set explicitly here so
+        // the write is correct even if the trigger is ever missing in a
+        // partially-migrated environment.
+        updatedAt: new Date(),
+      })
+      .where(and(eq(users.id, userId), isNull(users.deletedAt)))
+      .returning({
+        id: users.id,
+        credits: users.credits,
+      });
+
+    if (!updated) {
+      // Either the user doesn't exist, or the account is soft-deleted. Both
+      // are "there is nothing to credit" as far as the caller is concerned.
+      throw new NotFoundError("User");
+    }
+
+    const grantedAt = new Date();
+
+    await auditLog("credits.granted", {
+      userId,
+      amount,
+      reason,
+      reference,
+      actorId,
+      creditsBefore: updated.credits - amount,
+      creditsAfter: updated.credits,
+    });
+    logger.info(
+      { userId, amount, actorId, reason, reference },
+      "Credits granted to user by admin",
+    );
+
+    // Anything that caches a credit balance is now stale: the user's own
+    // profile, and the global leaderboard (which ranks by credits). The
+    // history/pending views key off individual reward records, not the
+    // balance, so they're unaffected. Both helpers fail soft — worst case is
+    // bounded staleness until the TTL expires.
+    await Promise.allSettled([
+      cacheDel(cacheKey("user", "profile", userId)),
+      cacheInvalidatePattern(cacheKeyPattern("rewards", "leaderboard")),
+    ]);
+
+    return {
+      userId: updated.id,
+      amount,
+      reason,
+      reference: reference ?? null,
+      creditsBefore: updated.credits - amount,
+      creditsAfter: updated.credits,
+      grantedAt,
+    };
   }
 
   /**

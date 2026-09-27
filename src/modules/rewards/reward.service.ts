@@ -1,4 +1,4 @@
-import { eq, and, desc, sql } from "drizzle-orm";
+import { eq, and, desc, inArray, sql } from "drizzle-orm";
 import { db } from "../../config/database.js";
 import crypto from "node:crypto";
 import {
@@ -20,13 +20,14 @@ import { createQuizProof } from "../../stellar/signatures.js";
 import { isCircuitBreakerError } from "../../stellar/resilience.js";
 import { config } from "../../config/index.js";
 import { logger } from "../../utils/logger.js";
-import { enqueueReward } from "../../services/retry-queue.js";
+import { enqueueReward, getQueuedRewardJobs, estimateProcessingSeconds } from "../../services/retry-queue.js";
 import { dispatchWebhook } from "../../services/webhook-dispatcher.js";
 import StellarSdk from "@stellar/stellar-sdk";
 import type {
   RewardClaimResult,
   RewardHistoryItem,
   RewardTransaction,
+  PendingRewardItem,
 } from "./reward.types.js";
 import { PASSING_PERCENTAGE } from "../quizzes/quiz.types.js";
 import { auditLog } from "../../audit/index.js";
@@ -411,6 +412,121 @@ export class RewardService {
         message: `Successfully claimed ${REWARD_AMOUNT} credits`,
       };
     });
+  }
+
+  /**
+   * The user's reward claims that haven't landed yet (#327) — claims sitting
+   * in the retry queue, plus claims whose Stellar transaction was submitted
+   * but left unconfirmed by a sequence error.
+   *
+   * Queued entries come first, ordered by the retry queue's own ordering, so
+   * the response reads as "here's what will happen, in what order".
+   *
+   * Cached for 10s: short enough that a claim moving from queued to claimed
+   * disappears from this list promptly, long enough that a client polling it
+   * while Stellar is down doesn't hammer the DB on every tick.
+   */
+  async getPendingRewards(userId: string): Promise<PendingRewardItem[]> {
+    const namespace = "rewards";
+    const cacheKeyString = cacheKey(namespace, "pending", userId);
+
+    const cached = await cacheGet<PendingRewardItem[]>(namespace, cacheKeyString);
+    if (cached) return cached;
+
+    // A job still in the queue but already marked claimed/pending in the DB
+    // would be double-reported (once as queued, once as awaiting
+    // confirmation) — the metadata query below only picks up submissions that
+    // are neither, so the two lists stay disjoint.
+    const pendingRows = await db
+      .select({
+        submissionId: quizSubmissions.id,
+        courseTitle: courses.title,
+        rewardAmount: quizSubmissions.rewardAmount,
+        txHash: quizSubmissions.txHash,
+        submittedAt: quizSubmissions.submittedAt,
+      })
+      .from(quizSubmissions)
+      .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+      .innerJoin(courses, eq(quizzes.courseId, courses.id))
+      .where(
+        and(
+          eq(quizSubmissions.userId, userId),
+          eq(quizSubmissions.rewardPending, true),
+        ),
+      );
+
+    // The queue is a single global Redis sorted set shared by every user, so
+    // filter to this user's jobs and keep the queue's own ordering (already
+    // sorted by scheduled ready time) rather than re-sorting here.
+    const queuedJobs = (await getQueuedRewardJobs()).filter(
+      (job) => job.userId === userId,
+    );
+
+    let queuedItems: PendingRewardItem[] = [];
+    if (queuedJobs.length > 0) {
+      const metadataRows = await db
+        .select({
+          submissionId: quizSubmissions.id,
+          courseTitle: courses.title,
+          rewardAmount: quizSubmissions.rewardAmount,
+          submittedAt: quizSubmissions.submittedAt,
+        })
+        .from(quizSubmissions)
+        .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+        .innerJoin(courses, eq(quizzes.courseId, courses.id))
+        .where(
+          and(
+            inArray(
+              quizSubmissions.id,
+              queuedJobs.map((job) => job.submissionId),
+            ),
+            eq(quizSubmissions.rewardClaimed, false),
+            eq(quizSubmissions.rewardPending, false),
+          ),
+        );
+
+      const bySubmissionId = new Map(
+        metadataRows.map((row) => [row.submissionId, row]),
+      );
+
+      queuedItems = queuedJobs.flatMap((job) => {
+        const row = bySubmissionId.get(job.submissionId);
+        if (!row) return [];
+        return [
+          {
+            submissionId: row.submissionId,
+            courseTitle: row.courseTitle,
+            amount: row.rewardAmount ?? REWARD_AMOUNT,
+            status: "queued" as const,
+            // 1-based: the queue's own `position` is 0-based, and "position 0"
+            // reads as a bug to a user looking at a queue position.
+            queuePosition: job.position + 1,
+            estimatedProcessingSeconds: estimateProcessingSeconds(
+              job.position,
+              job.readyAt,
+            ),
+            submittedAt: row.submittedAt,
+          },
+        ];
+      });
+    }
+
+    const result: PendingRewardItem[] = [
+      ...queuedItems,
+      ...pendingRows.map((row) => ({
+        submissionId: row.submissionId,
+        courseTitle: row.courseTitle,
+        amount: row.rewardAmount ?? REWARD_AMOUNT,
+        status: "awaiting_confirmation" as const,
+        queuePosition: null,
+        estimatedProcessingSeconds: null,
+        submittedAt: row.submittedAt,
+      })),
+    ];
+
+    await cacheSet(cacheKeyString, result, 10);
+
+    return result;
   }
 
   /**

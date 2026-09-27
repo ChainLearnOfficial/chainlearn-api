@@ -175,6 +175,17 @@ export type PopularCoursesQuery = z.infer<typeof popularCoursesQuerySchema>;
 export type EnrollCourseQuery = z.infer<typeof enrollCourseQuerySchema>;
 export type BatchEnrollBody = z.infer<typeof batchEnrollSchema>;
 export type ShareCodeParams = z.infer<typeof shareCodeParamsSchema>;
+
+/** One course's outcome in a POST /courses/enroll/batch response (#346).
+ * Enrollments are attempted independently, so one failure (course archived,
+ * waitlist full, already enrolled) doesn't roll back the rest. */
+export interface BatchEnrollEntry {
+  courseId: string;
+  success: boolean;
+  message?: string;
+  /** True when the request was instead queued on the course's waitlist. */
+  waitlisted?: boolean;
+}
 export type CreateCourseBody = z.infer<typeof createCourseSchema>;
 /**
  * Body of POST /admin/courses/:id/draft (#376): the same editable fields as an
@@ -203,7 +214,103 @@ export type ListReviewsQuery = z.infer<typeof listReviewsQuerySchema>;
 export type ListEnrolledUsersQuery = z.infer<typeof listEnrolledUsersQuerySchema>;
 export type CreateReviewBody = z.infer<typeof createReviewSchema>;
 export type ReportCourseBody = z.infer<typeof reportCourseSchema>;
-export type ListEnrolledUsersQuery = z.infer<typeof listEnrolledUsersQuerySchema>;
+
+export const cloneCourseSchema = z.object({
+  title: z.string().min(1).max(255).optional(),
+});
+export type CloneCourseBody = z.infer<typeof cloneCourseSchema>;
+
+export const contentParamsSchema = z.object({
+  id: z.string().uuid(),
+  moduleId: z.string().min(1).max(100),
+  contentId: z.string().uuid(),
+});
+export type ContentParams = z.infer<typeof contentParamsSchema>;
+
+export const moduleContentParamsSchema = z.object({
+  id: z.string().uuid(),
+  moduleId: z.string().min(1).max(100),
+});
+export type ModuleContentParams = z.infer<typeof moduleContentParamsSchema>;
+
+export const createContentSchema = z.discriminatedUnion("type", [
+  z.object({
+    title: z.string().min(1).max(255),
+    type: z.literal("text"),
+    content: z.object({
+      body: z.string().min(1),
+    }),
+    orderIndex: z.number().int().min(0).optional(),
+  }),
+  z.object({
+    title: z.string().min(1).max(255),
+    type: z.literal("video"),
+    content: z.object({
+      videoUrl: z.string().url(),
+      durationSeconds: z.number().int().min(1).optional(),
+      transcript: z.string().optional(),
+    }),
+    orderIndex: z.number().int().min(0).optional(),
+  }),
+  z.object({
+    title: z.string().min(1).max(255),
+    type: z.literal("quiz"),
+    content: z.object({
+      quizId: z.string().uuid().optional(),
+      questions: z.array(z.object({
+        id: z.string().min(1),
+        text: z.string().min(1),
+        options: z.array(z.string().min(1)).min(2),
+        correctIndex: z.number().int().min(0),
+        explanation: z.string().optional(),
+      })).optional(),
+    }).refine((c) => Boolean(c.quizId || (c.questions && c.questions.length > 0)), {
+      message: "Quiz content must provide quizId or questions",
+    }),
+    orderIndex: z.number().int().min(0).optional(),
+  }),
+  z.object({
+    title: z.string().min(1).max(255),
+    type: z.literal("exercise"),
+    content: z.object({
+      instructions: z.string().min(1),
+      starterCode: z.string().optional(),
+      solution: z.string().optional(),
+      language: z.string().optional(),
+    }),
+    orderIndex: z.number().int().min(0).optional(),
+  }),
+]);
+export type CreateContentBody = z.infer<typeof createContentSchema>;
+
+export const updateContentSchema = z.object({
+  title: z.string().min(1).max(255).optional(),
+  type: z.enum(["text", "video", "quiz", "exercise"]).optional(),
+  content: z.record(z.unknown()).optional(),
+  orderIndex: z.number().int().min(0).optional(),
+});
+export type UpdateContentBody = z.infer<typeof updateContentSchema>;
+
+export const reorderContentSchema = z.object({
+  contentIds: z.array(z.string().uuid()).min(1).max(100),
+});
+export type ReorderContentBody = z.infer<typeof reorderContentSchema>;
+
+export interface ModuleContentItem {
+  id: string;
+  courseId: string;
+  moduleId: string;
+  title: string;
+  type: "text" | "video" | "quiz" | "exercise";
+  content: Record<string, unknown>;
+  orderIndex: number;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface AdminCourseWithAccessibility extends AdminCourse {
+  accessibilityWarnings?: import("./accessibility.js").AccessibilityWarning[];
+}
 
 export interface CourseSummary {
   id: string;
@@ -486,6 +593,7 @@ export interface EnrollmentTrendsResult {
   granularity: string;
   trends: EnrollmentTrendDataPoint[];
   totalEnrollments: number;
+  generatedAt: Date;
 }
 
 /** One module entry in the syllabus response. */
@@ -506,6 +614,66 @@ export interface CourseSyllabus {
   modules: SyllabusModule[];
   totalEstimatedDurationMinutes: number | null;
   generatedAt: Date;
+}
+
+// ─── Publish Readiness Check (#384) ─────────────────────────────────────────
+
+/**
+ * Which part of the course a publish-readiness issue is about. Values are
+ * stable strings so a client can group or localize the issues it renders.
+ */
+export type PublishCheckField =
+  | "title"
+  | "description"
+  | "difficulty"
+  | "modules"
+  | "moduleContent"
+  | "quizzes";
+
+/**
+ * `blocking` issues are exactly what publishCourse() refuses to publish
+ * over — so `ready: true` on a publish-check guarantees the subsequent
+ * publish succeeds. `advisory` issues are real quality gaps that don't stop
+ * a course going live (currently only missing module content) and are
+ * reported so creators can see them without being forced to fix them.
+ */
+export type PublishCheckSeverity = "blocking" | "advisory";
+
+/** One unmet publish requirement (#384). */
+export interface PublishCheckIssue {
+  field: PublishCheckField;
+  severity: PublishCheckSeverity;
+  /** What is missing, phrased so a creator can act on it directly. */
+  message: string;
+  /** Set when the issue is about one specific module. */
+  moduleId?: string;
+  moduleTitle?: string;
+}
+
+/** One requirement the check evaluated, satisfied or not (#384). The
+ * readiness score is computed from these, so the number is always
+ * explainable from the response itself. */
+export interface PublishCheckRequirement {
+  /** Stable identifier, e.g. "title" or "module:<id>:quizzes". */
+  key: string;
+  label: string;
+  satisfied: boolean;
+  severity: PublishCheckSeverity;
+}
+
+/** Response of POST /api/v1/admin/courses/:id/publish-check (#384).
+ * Non-destructive — nothing in the course is modified by the check. */
+export interface PublishCheckResult {
+  courseId: string;
+  /** True when `issues` contains no blocking entry — i.e. publishing now
+   * would succeed. */
+  ready: boolean;
+  /** 0–100, the share of requirements satisfied (blocking and advisory
+   * combined). Rounded to the nearest whole percent. */
+  readinessScore: number;
+  requirements: PublishCheckRequirement[];
+  issues: PublishCheckIssue[];
+  checkedAt: Date;
 }
 
 // ─── Enrollment Status (#381) ───────────────────────────────────────────────

@@ -21,7 +21,9 @@ type AuditEvent =
   | "course.deleted"
   | "course.published"
   | "course.duplicated"
+  | "course.cloned"
   | "course.reviewed"
+  | "course.reported"
   | "course.imported"
   | "course.archived"
   | "course.enrollment_dropped"
@@ -34,7 +36,19 @@ type AuditEvent =
   | "course.module.updated"
   | "course.module.deleted"
   | "course.module.reordered"
+  | "course.quiz.created"
+  | "course.quiz.updated"
+  | "course.quiz.deleted"
+  | "course.module.content.created"
+  | "course.module.content.updated"
+  | "course.module.content.deleted"
+  | "course.module.content.reordered"
+  | "badge.created"
+  | "badge.updated"
+  | "badge.deleted"
+  | "badge.awarded"
   | "quiz.feedback.submitted"
+  | "credits.granted"
   | "announcement.created"
   | "announcement.updated"
   | "announcement.deleted"
@@ -49,6 +63,16 @@ interface AuditFields {
   credentialId?: string;
   courseId?: string;
   moduleId?: string;
+  moduleIds?: string[];
+  quizId?: string;
+  questionCount?: number;
+  contentId?: string;
+  contentIds?: string[];
+  badgeId?: string;
+  badgeType?: string;
+  badgeName?: string;
+  reportId?: string;
+  reason?: string;
   txHash?: string | null;
   amount?: number;
   score?: number;
@@ -70,8 +94,17 @@ interface AuditFields {
   rating?: number;
   sourceCourseId?: string;
   moduleCount?: number;
+  quizCount?: number;
   announcementId?: string;
   priority?: string;
+  /** Set by POST /admin/users/:id/credits/grant (#386) — why the credits
+   * were granted, plus the operator-supplied promotion/external reference. */
+  reason?: string;
+  reference?: string;
+  actorId?: string;
+  creditsBefore?: number;
+  creditsAfter?: number;
+  reportId?: string;
 }
 
 export async function auditLog(event: AuditEvent, fields: AuditFields): Promise<void> {

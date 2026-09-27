@@ -13,12 +13,14 @@ import { rewardRoutes } from "../../modules/rewards/reward.routes.js";
 import { credentialRoutes } from "../../modules/credentials/credential.routes.js";
 import { announcementRoutes } from "../../modules/announcements/announcement.routes.js";
 import { adminAnnouncementRoutes } from "../../modules/announcements/admin-announcement.routes.js";
+import { adminBadgeRoutes } from "../../modules/badges/admin-badge.routes.js";
 
 export async function registerV1Routes(app: FastifyInstance) {
   await app.register(authRoutes, { prefix: "/auth" });
   await app.register(userRoutes, { prefix: "/users" });
   await app.register(courseRoutes, { prefix: "/courses" });
   await app.register(adminCourseRoutes, { prefix: "/admin/courses" });
+  await app.register(adminBadgeRoutes, { prefix: "/admin/badges" });
   await app.register(adminUsersRoutes, { prefix: "/admin/users" });
   await app.register(auditRoutes, { prefix: "/admin/audit-logs" });
   await app.register(dashboardRoutes, { prefix: "/admin/dashboard" });

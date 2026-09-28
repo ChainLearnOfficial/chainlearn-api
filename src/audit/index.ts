@@ -74,6 +74,7 @@ interface AuditFields {
   badgeId?: string;
   badgeType?: string;
   badgeName?: string;
+  /** Why a report was filed, or why credits were granted or deducted. */
   reportId?: string;
   reason?: string;
   txHash?: string | null;
@@ -100,14 +101,11 @@ interface AuditFields {
   quizCount?: number;
   announcementId?: string;
   priority?: string;
-  /** Set by POST /admin/users/:id/credits/grant (#386) — why the credits
-   * were granted, plus the operator-supplied promotion/external reference. */
-  reason?: string;
+  /** Operator-supplied promotion or external reference for a credit change. */
   reference?: string;
   actorId?: string;
   creditsBefore?: number;
   creditsAfter?: number;
-  reportId?: string;
 }
 
 export async function auditLog(

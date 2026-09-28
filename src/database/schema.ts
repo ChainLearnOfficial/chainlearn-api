@@ -192,6 +192,14 @@ export const quizzes = pgTable(
     moduleId: varchar("module_id", { length: 100 }).notNull(),
     questions: jsonb("questions").notNull(),
     generatedFor: uuid("generated_for").references(() => users.id),
+    // Set by POST /admin/courses/:id/modules/:moduleId/quizzes/:quizId (#413).
+    // Null means the quiz is live. Archived quizzes stay visible to admins
+    // and are withheld from learners.
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    metadata: jsonb("metadata")
+      .$type<Record<string, string | number | boolean | null>>()
+      .notNull()
+      .default({}),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -587,103 +595,6 @@ export const auditLogs = pgTable(
     // range/ordering.
     index("idx_audit_logs_event").on(table.event),
     index("idx_audit_logs_created_at").on(table.createdAt),
-  ]
-);
-
-// ─── Announcements ──────────────────────────────────────────────────────────
-export const announcements = pgTable(
-  "announcements",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    title: varchar("title", { length: 255 }).notNull(),
-    message: text("message").notNull(),
-    priority: varchar("priority", { length: 20 }).notNull().default("normal"),
-    active: boolean("active").notNull().default(true),
-    expiresAt: timestamp("expires_at", { withTimezone: true }),
-    createdAt: timestamp("created_at", { withTimezone: true })
-      .notNull()
-      .defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true })
-      .notNull()
-      .defaultNow(),
-  },
-  (table) => [
-    index("idx_announcements_active").on(table.active),
-  ]
-);
-
-// ─── Course Shares ──────────────────────────────────────────────────────────
-export const courseShares = pgTable(
-  "course_shares",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    userId: uuid("user_id")
-      .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
-    courseId: uuid("course_id")
-      .notNull()
-      .references(() => courses.id, { onDelete: "cascade" }),
-    referralCode: varchar("referral_code", { length: 64 }).notNull().unique(),
-    clickCount: integer("click_count").notNull().default(0),
-    enrollmentCount: integer("enrollment_count").notNull().default(0),
-    createdAt: timestamp("created_at", { withTimezone: true })
-      .notNull()
-      .defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true })
-      .notNull()
-      .defaultNow(),
-  },
-  (table) => [
-    uniqueIndex("idx_course_shares_user_course").on(table.userId, table.courseId),
-    index("idx_course_shares_referral_code").on(table.referralCode),
-  ]
-);
-
-// ─── Course Reviews ─────────────────────────────────────────────────────────
-export const courseReviews = pgTable(
-  "course_reviews",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    userId: uuid("user_id")
-      .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
-    courseId: uuid("course_id")
-      .notNull()
-      .references(() => courses.id, { onDelete: "cascade" }),
-    rating: integer("rating").notNull(),
-    reviewText: text("review_text"),
-    createdAt: timestamp("created_at", { withTimezone: true })
-      .notNull()
-      .defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true })
-      .notNull()
-      .defaultNow(),
-  },
-  (table) => [
-    uniqueIndex("idx_course_reviews_user_course").on(table.userId, table.courseId),
-    index("idx_course_reviews_course_id").on(table.courseId),
-  ]
-);
-
-// ─── Notifications ─────────────────────────────────────────────────────────
-export const notifications = pgTable(
-  "notifications",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    userId: uuid("user_id")
-      .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
-    type: varchar("type", { length: 50 }).notNull(),
-    title: varchar("title", { length: 255 }).notNull(),
-    message: text("message").notNull(),
-    read: boolean("read").notNull().default(false),
-    createdAt: timestamp("created_at", { withTimezone: true })
-      .notNull()
-      .defaultNow(),
-  },
-  (table) => [
-    index("idx_notifications_user_id").on(table.userId),
-    index("idx_notifications_user_read").on(table.userId, table.read),
   ]
 );
 

@@ -11,6 +11,7 @@ import type {
   QuizFeedbackSummaryQuery,
   AdminQuizModuleParams,
   AdminQuizParams,
+  AdminQuizUpdateBody,
   AuthoredQuizBody,
 } from "./quiz.types.js";
 
@@ -177,6 +178,28 @@ export class QuizController {
       moduleId,
       quizId,
       request.body.questions,
+    );
+
+    reply.send({ success: true, data: quiz });
+  }
+
+  /**
+   * POST /api/v1/admin/courses/:id/modules/:moduleId/quizzes/:quizId
+   * Replace questions, merge metadata, and/or archive a quiz (admin only, #413).
+   */
+  async updateModuleQuizDetails(
+    request: FastifyRequest<{
+      Params: AdminQuizParams;
+      Body: AdminQuizUpdateBody;
+    }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id, moduleId, quizId } = request.params;
+    const quiz = await quizService.updateModuleQuizDetails(
+      id,
+      moduleId,
+      quizId,
+      request.body,
     );
 
     reply.send({ success: true, data: quiz });

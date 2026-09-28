@@ -1656,7 +1656,6 @@ export class CourseService {
       throw new NotFoundError("Course");
     }
 
-  ): Promise<AdminCourse> {
     // A course can't be its own prerequisite.
     const sanitized = data.prerequisites
       ? { ...data, prerequisites: data.prerequisites.filter((id) => id !== courseId) }

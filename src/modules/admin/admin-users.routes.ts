@@ -5,6 +5,7 @@ import { authGuard, adminGuard } from "../../middleware/auth.js";
 import { validate } from "../../middleware/validation.js";
 import {
   grantCreditsSchema,
+  deductCreditsSchema,
   listUsersSchema,
   userIdParamsSchema,
 } from "./admin.types.js";
@@ -103,5 +104,38 @@ export async function adminUsersRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => adminUsersController.grantCredits(request, reply),
+  );
+
+  app.post<{
+    Params: import("./admin.types.js").UserIdParams;
+    Body: import("./admin.types.js").DeductCreditsBody;
+  }>(
+    "/:id/credits/deduct",
+    {
+      preHandler: [
+        validate({ params: userIdParamsSchema, body: deductCreditsSchema }),
+      ],
+      schema: {
+        description:
+          "Deduct credits from a user — penalties, corrections, or abuse prevention. `amount` must be a positive whole number (the amount to subtract), `reason` is required and attributable, and `reference` is an optional external pointer recorded in the audit log. Validates that the deduction doesn't exceed the user's balance. Returns the balance before and after (admin only)",
+        tags: ["admin", "users"],
+        security: [{ bearerAuth: [] }],
+        params: {
+          type: "object",
+          required: ["id"],
+          properties: { id: { type: "string", format: "uuid" } },
+        },
+        body: {
+          type: "object",
+          required: ["amount", "reason"],
+          properties: {
+            amount: { type: "integer", minimum: 1, maximum: 1000000 },
+            reason: { type: "string", minLength: 1, maxLength: 500 },
+            reference: { type: "string", minLength: 1, maxLength: 200 },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => adminUsersController.deductCredits(request, reply),
   );
 }

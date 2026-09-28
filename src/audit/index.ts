@@ -49,6 +49,7 @@ type AuditEvent =
   | "badge.awarded"
   | "quiz.feedback.submitted"
   | "credits.granted"
+  | "credits.deducted"
   | "announcement.created"
   | "announcement.updated"
   | "announcement.deleted"
@@ -107,7 +108,10 @@ interface AuditFields {
   reportId?: string;
 }
 
-export async function auditLog(event: AuditEvent, fields: AuditFields): Promise<void> {
+export async function auditLog(
+  event: AuditEvent,
+  fields: AuditFields,
+): Promise<void> {
   const auditFields = { requestId: getRequestId(), ...fields };
   logger.info({ audit: true, event, ...auditFields }, `audit: ${event}`);
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -116,12 +120,19 @@ export async function auditLog(event: AuditEvent, fields: AuditFields): Promise<
       return;
     } catch (err) {
       if (attempt < 2) {
-        await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
+        await new Promise((resolve) =>
+          setTimeout(resolve, 100 * (attempt + 1)),
+        );
         continue;
       }
       logger.error({ err }, "Failed to persist audit log after 3 attempts");
       process.stdout.write(
-        JSON.stringify({ audit: true, event, ...auditFields, persistError: String(err) }) + "\n",
+        JSON.stringify({
+          audit: true,
+          event,
+          ...auditFields,
+          persistError: String(err),
+        }) + "\n",
       );
     }
   }

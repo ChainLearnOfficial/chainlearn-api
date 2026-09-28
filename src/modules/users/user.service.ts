@@ -11,6 +11,7 @@ import {
   credentials,
   courses,
   quizzes,
+  type CourseModuleDefinition,
 } from "../../database/schema.js";
 import { config } from "../../config/index.js";
 import { NotFoundError, ValidationError } from "../../utils/errors.js";
@@ -40,6 +41,8 @@ import type {
   UserProgress,
   UserDataExport,
   LearningStats,
+  UserCourseProgress,
+  UserCourseQuizScore,
 } from "./user.types.js";
 
 export class UserService {
@@ -162,6 +165,152 @@ export class UserService {
     // cache/index.ts.
     await cacheSet(cacheKeyString, progress, 60);
 
+    return progress;
+  }
+
+  /**
+   * Module-level progress for one course (#412). Cached 30 seconds.
+   * Distinct from the aggregate GET /users/me/progress payload.
+   */
+  async getCourseProgress(
+    userId: string,
+    courseId: string,
+  ): Promise<UserCourseProgress> {
+    const namespace = "user";
+    const cacheKeyString = cacheKey(
+      namespace,
+      "me-course-progress",
+      userId,
+      courseId,
+    );
+
+    const cached = await cacheGet<UserCourseProgress>(namespace, cacheKeyString);
+    if (cached) return cached;
+
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course || !course.isActive) {
+      throw new NotFoundError("Course");
+    }
+
+    const moduleDefinitions = (course.modules ?? []) as CourseModuleDefinition[];
+    const catalog = Array.isArray(course.courseModules) ? course.courseModules : [];
+    const titleById = new Map<string, string>();
+    const durationById = new Map<string, number>();
+    for (const entry of catalog) {
+      if (!entry?.id) continue;
+      if (entry.title) titleById.set(entry.id, entry.title);
+      if (
+        typeof entry.estimatedDurationMinutes === "number" &&
+        entry.estimatedDurationMinutes > 0
+      ) {
+        durationById.set(entry.id, entry.estimatedDurationMinutes);
+      }
+    }
+
+    let moduleIds: string[];
+    if (moduleDefinitions.length > 0) {
+      moduleIds = [...moduleDefinitions]
+        .sort((a, b) => a.order - b.order)
+        .map((module) => module.id);
+      for (const module of moduleDefinitions) {
+        if (module.title) titleById.set(module.id, module.title);
+      }
+    } else {
+      const moduleRows = await db
+        .select({ moduleId: quizzes.moduleId })
+        .from(quizzes)
+        .where(eq(quizzes.courseId, courseId))
+        .groupBy(quizzes.moduleId)
+        .orderBy(quizzes.moduleId);
+      moduleIds = moduleRows.map((row) => row.moduleId);
+    }
+
+    const submissionRows = await db
+      .select({
+        quizId: quizSubmissions.quizId,
+        moduleId: quizzes.moduleId,
+        score: quizSubmissions.score,
+        totalQuestions: sql<number>`COALESCE(jsonb_array_length(${quizzes.questions}), 0)`,
+        submittedAt: quizSubmissions.submittedAt,
+      })
+      .from(quizSubmissions)
+      .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+      .where(
+        and(
+          eq(quizzes.courseId, courseId),
+          eq(quizSubmissions.userId, userId),
+          eq(quizSubmissions.superseded, false),
+        ),
+      )
+      .orderBy(desc(quizSubmissions.submittedAt));
+
+    const completedModuleIds = new Set(submissionRows.map((row) => row.moduleId));
+
+    const quizScores: UserCourseQuizScore[] = submissionRows.map((row) => {
+      const totalQuestions = Number(row.totalQuestions) || 0;
+      const percentage =
+        row.score != null && totalQuestions > 0
+          ? Number(((row.score / totalQuestions) * 100).toFixed(2))
+          : null;
+      return {
+        quizId: row.quizId,
+        moduleId: row.moduleId,
+        score: row.score,
+        totalQuestions,
+        percentage,
+        submittedAt: row.submittedAt,
+      };
+    });
+
+    const scored = quizScores.filter((quiz) => quiz.percentage != null);
+    const averageScore =
+      scored.length > 0
+        ? Number(
+            (
+              scored.reduce((sum, quiz) => sum + (quiz.percentage ?? 0), 0) /
+              scored.length
+            ).toFixed(2),
+          )
+        : null;
+
+    const modulesCompleted = moduleIds.filter((id) =>
+      completedModuleIds.has(id),
+    ).length;
+    const completionPercentage =
+      moduleIds.length > 0
+        ? Math.round((modulesCompleted / moduleIds.length) * 100)
+        : 0;
+
+    const completedWithDuration = moduleIds.filter(
+      (id) => completedModuleIds.has(id) && durationById.has(id),
+    );
+    const timeSpentMinutes =
+      completedWithDuration.length > 0
+        ? completedWithDuration.reduce(
+            (sum, id) => sum + (durationById.get(id) ?? 0),
+            0,
+          )
+        : quizScores.length * 5;
+
+    const progress: UserCourseProgress = {
+      courseId,
+      courseTitle: course.title,
+      modules: moduleIds.map((moduleId) => ({
+        moduleId,
+        title: titleById.get(moduleId) ?? null,
+        status: completedModuleIds.has(moduleId) ? "completed" : "not_started",
+      })),
+      modulesCompleted,
+      quizzesTaken: quizScores.length,
+      quizScores,
+      averageScore,
+      completionPercentage,
+      timeSpentMinutes,
+    };
+
+    await cacheSet(cacheKeyString, progress, 30);
     return progress;
   }
 
@@ -731,7 +880,6 @@ export class UserService {
         id: user.id,
         stellarAddress: user.stellarAddress,
         displayName: user.displayName,
-        avatarUrl: user.avatarUrl,
         avatarUrl: user.avatarUrl ?? null,
         background: user.background,
         learningGoal: user.learningGoal,

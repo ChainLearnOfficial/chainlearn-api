@@ -7,6 +7,7 @@ import {
   quizFeedback,
   enrollments,
   courses,
+  moduleContent,
   type CourseModuleDefinition,
 } from "../../database/schema.js";
 import {
@@ -1100,14 +1101,13 @@ export class QuizService {
   }
 
   /**
-   * Delete a quiz and, via the quiz_submissions foreign key, every
-   * submission against it (#388).
+   * Delete a quiz, every submission against it, and any module content
+   * item that points at it (#414, #388).
    *
-   * That cascade is destructive and worth being explicit about: reward
-   * history is read from quiz_submissions, so deleting a quiz that learners
-   * have already claimed rewards against erases those history rows. The
-   * counts of what went with it are returned and audit-logged so the
-   * destruction is at least attributable after the fact.
+   * Submissions are removed in the same transaction as the quiz row so a
+   * failure cannot leave an orphaned submission or a quiz whose history
+   * was already wiped. Reward history is read from quiz_submissions, so
+   * the counts of what went with the quiz are returned and audit-logged.
    */
   async deleteModuleQuiz(
     courseId: string,
@@ -1115,41 +1115,78 @@ export class QuizService {
     quizId: string,
   ): Promise<AdminQuizDeleteResult> {
     await this.assertModuleBelongsToCourse(courseId, moduleId);
-    const existing = await this.assertQuizInModule(courseId, moduleId, quizId);
 
-    const [counts] = await db
-      .select({
-        total: sql<number>`count(*)::int`,
-        claimed: sql<number>`count(*) FILTER (WHERE ${quizSubmissions.rewardClaimed})::int`,
-      })
-      .from(quizSubmissions)
-      .where(eq(quizSubmissions.quizId, existing.id));
+    const deleted = await db.transaction(async (tx) => {
+      const [existing] = await tx
+        .select()
+        .from(quizzes)
+        .where(eq(quizzes.id, quizId))
+        .for("update");
 
-    await db.delete(quizzes).where(eq(quizzes.id, existing.id));
+      if (
+        !existing ||
+        existing.courseId !== courseId ||
+        existing.moduleId !== moduleId
+      ) {
+        throw new NotFoundError("Quiz");
+      }
+
+      const removedSubmissions = await tx
+        .delete(quizSubmissions)
+        .where(eq(quizSubmissions.quizId, existing.id))
+        .returning({ rewardClaimed: quizSubmissions.rewardClaimed });
+
+      // Module content of type "quiz" can reference this row by id. Drop
+      // those items in the same transaction so the quiz is gone from the
+      // module, not only from the quizzes table.
+      await tx
+        .delete(moduleContent)
+        .where(
+          and(
+            eq(moduleContent.courseId, courseId),
+            eq(moduleContent.moduleId, moduleId),
+            sql`${moduleContent.content}->>'quizId' = ${existing.id}`,
+          ),
+        );
+
+      await tx.delete(quizzes).where(eq(quizzes.id, existing.id));
+
+      return {
+        quiz: existing,
+        submissionsDeleted: removedSubmissions.length,
+        claimedRewardsDeleted: removedSubmissions.filter(
+          (row) => row.rewardClaimed,
+        ).length,
+      };
+    });
 
     await this.invalidateQuizCaches(courseId);
     await auditLog("course.quiz.deleted", {
       courseId,
       moduleId,
-      quizId: existing.id,
-      questionCount: (existing.questions as unknown[]).length,
+      quizId: deleted.quiz.id,
+      questionCount: Array.isArray(deleted.quiz.questions)
+        ? deleted.quiz.questions.length
+        : 0,
+      submissionsDeleted: deleted.submissionsDeleted,
+      claimedRewardsDeleted: deleted.claimedRewardsDeleted,
     });
     logger.info(
       {
         courseId,
         moduleId,
-        quizId: existing.id,
-        submissionsDeleted: counts?.total ?? 0,
+        quizId: deleted.quiz.id,
+        submissionsDeleted: deleted.submissionsDeleted,
       },
       "Quiz deleted by admin",
     );
 
     return {
-      quizId: existing.id,
+      quizId: deleted.quiz.id,
       courseId,
       moduleId,
-      submissionsDeleted: counts?.total ?? 0,
-      claimedRewardsDeleted: counts?.claimed ?? 0,
+      submissionsDeleted: deleted.submissionsDeleted,
+      claimedRewardsDeleted: deleted.claimedRewardsDeleted,
       deletedAt: new Date(),
     };
   }

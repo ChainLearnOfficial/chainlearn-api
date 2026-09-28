@@ -651,7 +651,7 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
       preHandler: [validate({ params: adminQuizParamsSchema })],
       schema: {
         description:
-          "Delete a quiz. Destructive: quiz_submissions cascade, so any learner submissions — including ones whose rewards have already been claimed — are removed too. The response reports how many submissions and claimed rewards were destroyed (admin only, #388)",
+          "Delete a quiz and its submissions in one transaction, and remove any module content item that references it. The response reports how many submissions and claimed rewards were destroyed (admin only, #414)",
         tags: ["admin", "courses", "quizzes"],
         security: [{ bearerAuth: [] }],
         params: {

@@ -67,6 +67,8 @@ interface AuditFields {
   moduleIds?: string[];
   quizId?: string;
   questionCount?: number;
+  submissionsDeleted?: number;
+  claimedRewardsDeleted?: number;
   contentId?: string;
   contentIds?: string[];
   badgeId?: string;

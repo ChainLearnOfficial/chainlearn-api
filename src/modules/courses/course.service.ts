@@ -1,4 +1,3 @@
-import { eq, and, count, desc, inArray, ilike, or, isNull, ne, sql } from "drizzle-orm";
 import { eq, and, count, desc, asc, inArray, ilike, or, isNull, ne, sql } from "drizzle-orm";
 import crypto from "node:crypto";
 import QRCode from "qrcode";
@@ -12,11 +11,8 @@ import {
   quizzes,
   quizSubmissions,
   users,
-  credentials,
   courseReports,
   notifications,
-  courseShares,
-  courseReviews,
   moduleContent,
   type CourseModuleDefinition,
   type ModuleContentPayload,
@@ -37,7 +33,6 @@ import { PASSING_PERCENTAGE } from "../quizzes/quiz.types.js";
 import { auditLog } from "../../audit/index.js";
 import { dispatchWebhook } from "../../services/webhook-dispatcher.js";
 import { waitlistService } from "./waitlist.service.js";
-import { checkAccessibility } from "./accessibility.js";
 import {
   cacheGet,
   cacheSet,
@@ -53,8 +48,6 @@ import type {
   CourseStats,
   AdminCourse,
   AdminCourseWithAccessibility,
-  CourseShareLink,
-  ResolvedShareLink,
   CreateCourseBody,
   CourseModule,
   CourseModuleMetadata,
@@ -1769,12 +1762,6 @@ export class CourseService {
         isActive: false,
         archivedAt: sql`COALESCE(${courses.archivedAt}, NOW())`,
       })
-   * Archive a course: hides it from public listings while preserving data (#358).
-   */
-  async archiveCourse(courseId: string): Promise<void> {
-    const [course] = await db
-      .update(courses)
-      .set({ isActive: false })
       .where(eq(courses.id, courseId))
       .returning();
 
@@ -1979,12 +1966,8 @@ export class CourseService {
           .filter((issue) => issue.severity === "blocking")
           .map((issue) => issue.message),
       });
-  }
+    }
 
-  /**
-   * Publish a course: validates required content and sets isActive = true, isDraft = false.
-   */
-  async publishCourse(courseId: string): Promise<AdminCourse> {
     const [existing] = await db
       .select()
       .from(courses)
@@ -2004,10 +1987,6 @@ export class CourseService {
       throw new NotFoundError("Course");
     }
 
-      .set({ isActive: true, isDraft: false })
-      .where(eq(courses.id, courseId))
-      .returning();
-
     await this.invalidateCourseCaches(courseId);
     await auditLog("course.published", { courseId });
     logger.info({ courseId }, "Course published");
@@ -2017,85 +1996,6 @@ export class CourseService {
     );
 
     return { ...this.toAdminCourse(published), accessibility };
-  }
-
-  /**
-   * Duplicate a course — its metadata, module definitions, and quizzes — into
-   * a brand new *draft*. The copy starts unpublished and unpublished-by-flag
-   * (isActive = false, isDraft = true) so a duplicate can be reviewed and
-   * edited before it goes live, and so a duplicate never doubles a course's
-   * live enrollments. Quizzes are copied verbatim, including their question
-   * order and correct answers; the AI-generated `generatedFor` attribution is
-   * dropped since it names the user the original was generated for.
-   */
-  async duplicateCourse(courseId: string): Promise<AdminCourse> {
-    return withLock(`course-duplicate:${courseId}`, async () => {
-      const source = await db.query.courses.findFirst({
-        where: eq(courses.id, courseId),
-      });
-      if (!source) {
-        throw new NotFoundError("Course");
-      }
-
-      return db.transaction(async (tx) => {
-        const [copy] = await tx
-          .insert(courses)
-          .values({
-            title: `${source.title} (Copy)`,
-            description: source.description,
-            difficulty: source.difficulty,
-            tags: source.tags ?? [],
-            courseModules: source.courseModules,
-            contentHash: source.contentHash,
-            // The copy gets fresh IDs, so the original's prerequisite IDs
-            // are meaningless here. Copying them verbatim would point the
-            // draft at unrelated courses.
-            prerequisites: [],
-            modules: (source.modules ?? []) as CourseModuleDefinition[],
-            isActive: false,
-            isDraft: true,
-            accessibilityScore: source.accessibilityScore,
-          })
-          .returning();
-
-        const sourceQuizzes = await tx
-          .select({
-            moduleId: quizzes.moduleId,
-            questions: quizzes.questions,
-            createdAt: quizzes.createdAt,
-          })
-          .from(quizzes)
-          .where(eq(quizzes.courseId, courseId));
-
-        if (sourceQuizzes.length > 0) {
-          await tx.insert(quizzes).values(
-            sourceQuizzes.map((quiz) => ({
-              courseId: copy.id,
-              moduleId: quiz.moduleId,
-              questions: quiz.questions,
-              // `generatedFor` is intentionally not copied: it records which
-              // user the AI generated the quiz for, which says nothing about
-              // the duplicated copy.
-              createdAt: quiz.createdAt,
-            })),
-          );
-        }
-
-        await auditLog("course.duplicated", {
-          courseId,
-          sourceCourseId: courseId,
-          moduleCount: (source.modules ?? []).length,
-          quizCount: sourceQuizzes.length,
-        });
-        logger.info(
-          { sourceCourseId: courseId, newCourseId: copy.id },
-          "Course duplicated",
-        );
-
-        return this.toAdminCourse(copy);
-      });
-    });
-    return this.toAdminCourse(published);
   }
 
   private normalizeCourseModules(

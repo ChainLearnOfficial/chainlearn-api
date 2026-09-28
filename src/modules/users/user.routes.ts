@@ -2,7 +2,11 @@ import type { FastifyInstance, FastifySchema } from "fastify";
 import { userController } from "./user.controller.js";
 import { authGuard } from "../../middleware/auth.js";
 import { validate } from "../../middleware/validation.js";
-import { activityQuerySchema, updateProfileSchema } from "./user.types.js";
+import {
+  activityQuerySchema,
+  updateProfileSchema,
+  userCourseProgressParamsSchema,
+} from "./user.types.js";
 import { config } from "../../config/index.js";
 import { notificationController } from "../notifications/notification.controller.js";
 import { credentialController } from "../credentials/credential.controller.js";
@@ -94,6 +98,25 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => userController.getProgress(request, reply)
+  );
+
+  app.get<{ Params: { courseId: string } }>(
+    "/me/courses/:courseId/progress",
+    {
+      preHandler: [validate({ params: userCourseProgressParamsSchema })],
+      schema: {
+        description:
+          "Course-specific progress: title, module-by-module status, quiz scores, average score, completion percentage, and time spent (cached 30s, #412)",
+        tags: ["users"],
+        security: [{ bearerAuth: [] }],
+        params: {
+          type: "object",
+          required: ["courseId"],
+          properties: { courseId: { type: "string", format: "uuid" } },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => userController.getCourseProgress(request, reply)
   );
 
   app.get(

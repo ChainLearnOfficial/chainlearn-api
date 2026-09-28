@@ -61,7 +61,7 @@ describe("CourseService — Module Content CRUD & Reorder (#382)", () => {
   });
 
   it("lists module content ordered by orderIndex", async () => {
-    mockDb.query.courses.findFirst.mockResolvedValue({ id: "course-1" } as any);
+    (mockDb.query.courses.findFirst as any).mockResolvedValue({ id: "course-1" } as any);
     const contentRows = [
       {
         id: "c1",
@@ -97,7 +97,7 @@ describe("CourseService — Module Content CRUD & Reorder (#382)", () => {
   });
 
   it("creates a text content item and logs audit", async () => {
-    mockDb.query.courses.findFirst.mockResolvedValue({ id: "course-1" } as any);
+    (mockDb.query.courses.findFirst as any).mockResolvedValue({ id: "course-1" } as any);
     mockDb.select.mockReturnValue({
       from: vi.fn().mockReturnValue({
         where: vi.fn().mockResolvedValue([{ maxOrder: 2 }]),
@@ -201,7 +201,7 @@ describe("CourseService — Module Content CRUD & Reorder (#382)", () => {
   });
 
   it("reorders content items atomically", async () => {
-    mockDb.query.courses.findFirst.mockResolvedValue({ id: "course-1" } as any);
+    (mockDb.query.courses.findFirst as any).mockResolvedValue({ id: "course-1" } as any);
     const existingItems = [
       { id: "c1", courseId: "course-1", moduleId: "m1", orderIndex: 0 },
       { id: "c2", courseId: "course-1", moduleId: "m1", orderIndex: 1 },

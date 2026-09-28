@@ -39,6 +39,7 @@ type AuditEvent =
   | "course.quiz.created"
   | "course.quiz.updated"
   | "course.quiz.deleted"
+  | "course.quiz.question.added"
   | "course.module.content.created"
   | "course.module.content.updated"
   | "course.module.content.deleted"

@@ -1206,6 +1206,95 @@ export class QuizService {
   }
 
   /**
+   * Append one validated question to a quiz (#411). The questions JSONB
+   * array is rewritten inside a row lock so two adds cannot drop each
+   * other. Archived quizzes are rejected — unarchive first.
+   */
+  async addModuleQuizQuestion(
+    courseId: string,
+    moduleId: string,
+    quizId: string,
+    question: AuthoredQuestion,
+  ): Promise<AdminQuiz> {
+    await this.assertModuleBelongsToCourse(courseId, moduleId);
+
+    const updated = await db.transaction(async (tx) => {
+      const [existing] = await tx
+        .select()
+        .from(quizzes)
+        .where(eq(quizzes.id, quizId))
+        .for("update");
+
+      if (
+        !existing ||
+        existing.courseId !== courseId ||
+        existing.moduleId !== moduleId
+      ) {
+        throw new NotFoundError("Quiz");
+      }
+
+      if (existing.archivedAt) {
+        throw new ValidationError({
+          quizId: [
+            "Archived quizzes cannot accept new questions. Unarchive the quiz first.",
+          ],
+        });
+      }
+
+      const questions = (
+        Array.isArray(existing.questions) ? existing.questions : []
+      ) as StoredQuestion[];
+
+      if (questions.some((existingQuestion) => existingQuestion.id === question.id)) {
+        throw new ConflictError(
+          `Question id "${question.id}" already exists on this quiz`,
+        );
+      }
+
+      if (questions.length >= 50) {
+        throw new ValidationError({
+          questions: ["A quiz can have at most 50 questions"],
+        });
+      }
+
+      const [row] = await tx
+        .update(quizzes)
+        .set({ questions: [...questions, question] })
+        .where(eq(quizzes.id, existing.id))
+        .returning();
+
+      return row;
+    });
+
+    await this.invalidateQuizCaches(courseId);
+    await auditLog("course.quiz.question.added", {
+      courseId,
+      moduleId,
+      quizId: updated.id,
+      questionCount: Array.isArray(updated.questions)
+        ? updated.questions.length
+        : 0,
+    });
+    logger.info(
+      { courseId, moduleId, quizId: updated.id, questionId: question.id },
+      "Question added to quiz by admin",
+    );
+
+    const submissionCount = await this.countSubmissions(updated.id);
+    return this.toAdminQuiz({
+      id: updated.id,
+      courseId: updated.courseId,
+      moduleId: updated.moduleId,
+      questions: updated.questions,
+      generatedFor: updated.generatedFor,
+      archivedAt: updated.archivedAt,
+      metadata: (updated.metadata ?? {}) as QuizMetadata,
+      createdAt: updated.createdAt,
+      submissionCount,
+    });
+  }
+
+  /**
    * Delete a quiz, every submission against it, and any module content
    * item that points at it (#414, #388).
    *

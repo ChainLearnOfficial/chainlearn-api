@@ -7,6 +7,7 @@ import {
   adminQuizModuleParamsSchema,
   adminQuizParamsSchema,
   adminUpdateQuizSchema,
+  authoredQuestionSchema,
   authoredQuizSchema,
 } from "../quizzes/quiz.types.js";
 import {
@@ -661,6 +662,52 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => quizController.updateModuleQuizDetails(request, reply),
+  );
+
+  app.post<{
+    Params: { id: string; moduleId: string; quizId: string };
+    Body: import("../quizzes/quiz.types.js").AuthoredQuestion;
+  }>(
+    "/:id/modules/:moduleId/quizzes/:quizId/questions",
+    {
+      preHandler: [
+        validate({
+          params: adminQuizParamsSchema,
+          body: authoredQuestionSchema,
+        }),
+      ],
+      schema: {
+        description:
+          "Add one question to an existing quiz. The question needs an id, text, 2-10 options, and a correctIndex within that range. The questions array is updated atomically and the change is audit-logged (admin only, #411)",
+        tags: ["admin", "courses", "quizzes"],
+        security: [{ bearerAuth: [] }],
+        params: {
+          type: "object",
+          required: ["id", "moduleId", "quizId"],
+          properties: {
+            id: { type: "string", format: "uuid" },
+            moduleId: { type: "string", minLength: 1, maxLength: 100 },
+            quizId: { type: "string", format: "uuid" },
+          },
+        },
+        body: {
+          type: "object",
+          required: ["id", "text", "options", "correctIndex"],
+          properties: {
+            id: { type: "string", minLength: 1, maxLength: 100 },
+            text: { type: "string", minLength: 1, maxLength: 2000 },
+            options: {
+              type: "array",
+              minItems: 2,
+              maxItems: 10,
+              items: { type: "string" },
+            },
+            correctIndex: { type: "integer", minimum: 0 },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => quizController.addModuleQuizQuestion(request, reply),
   );
 
   app.put<{

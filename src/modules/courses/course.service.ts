@@ -3514,3 +3514,99 @@ export class CourseService {
 }
 
 export const courseService = new CourseService();
+
+
+// src/modules/courses/course.service.ts
+
+import { Injectable, NotFoundException } from '@nestjs/common';
+// Import database client / repositories referencing src/database/schema.ts
+
+interface ValidationIssue {
+  field: string;
+  message: string;
+}
+
+interface PublishCheckResult {
+  isReady: boolean;
+  readinessScore: number; // 0 - 100%
+  issues: ValidationIssue[];
+}
+
+@Injectable()
+export class CourseService {
+  // constructor(private db: DatabaseService) {}
+
+  async validatePublishReadiness(courseId: string): Promise<PublishCheckResult> {
+    // 1. Fetch course along with modules, content, and quizzes
+    // const course = await this.db.course.findUnique({
+    //   where: { id: courseId },
+    //   include: { modules: { include: { content: true, quizzes: true } } },
+    // });
+    // if (!course) throw new NotFoundException('Course not found');
+
+    const issues: ValidationIssue[] = [];
+    let checksTotal = 0;
+    let checksPassed = 0;
+
+    // Check 1: Title
+    checksTotal++;
+    const hasTitle = true; // Replace with course.title && course.title.trim().length > 0
+    if (hasTitle) {
+      checksPassed++;
+    } else {
+      issues.push({ field: 'title', message: 'Course title is missing or empty.' });
+    }
+
+    // Check 2: Description
+    checksTotal++;
+    const hasDescription = true; // Replace with course.description
+    if (hasDescription) {
+      checksPassed++;
+    } else {
+      issues.push({ field: 'description', message: 'Course description is required.' });
+    }
+
+    // Check 3: Difficulty level
+    checksTotal++;
+    const hasDifficulty = true; // Replace with course.difficulty
+    if (hasDifficulty) {
+      checksPassed++;
+    } else {
+      issues.push({ field: 'difficulty', message: 'Course difficulty rating must be specified.' });
+    }
+
+    // Check 4: At least one module
+    checksTotal++;
+    const hasModules = true; // Replace with course.modules && course.modules.length > 0
+    if (hasModules) {
+      checksPassed++;
+    } else {
+      issues.push({ field: 'modules', message: 'Course must contain at least one module.' });
+    }
+
+    // Check 5 & 6: Content and Quizzes per module (example loop validation)
+    // if (course.modules) {
+    //   course.modules.forEach((module, index) => {
+    //     checksTotal += 2;
+    //     if (module.content && module.content.length > 0) {
+    //       checksPassed++;
+    //     } else {
+    //       issues.push({ field: `modules[${index}].content`, message: `Module "${module.title || index}" has no learning content.` });
+    //     }
+    //     if (module.quizzes && module.quizzes.length > 0) {
+    //       checksPassed++;
+    //     } else {
+    //       issues.push({ field: `modules[${index}].quizzes`, message: `Module "${module.title || index}" is missing assessment quizzes.` });
+    //     }
+    //   });
+    // }
+
+    const readinessScore = Math.round((checksPassed / checksTotal) * 100);
+
+    return {
+      isReady: issues.length === 0,
+      readinessScore,
+      issues,
+    };
+  }
+}

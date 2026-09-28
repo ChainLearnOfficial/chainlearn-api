@@ -1,3 +1,9 @@
+// src/modules/credentials/credential.controller.ts
+
+import { Controller, Get, Param, UseGuards, Header } from '@nestjs/common';
+import { CredentialService } from './credential.service';
+import { AdminAuthGuard } from '../../common/guards/admin-auth.guard';
+
 import type { FastifyRequest, FastifyReply } from "fastify";
 import { credentialService } from "./credential.service.js";
 import { Controller, Get, Param, Req, Res, UseGuards } from '@nestjs/common';
@@ -15,6 +21,18 @@ import {
   storeIdempotentResponse,
 } from "../../middleware/idempotency.js";
 
+
+@Controller('api/v1/admin/users')
+@UseGuards(AdminAuthGuard)
+export class AdminCredentialController {
+  constructor(private readonly credentialService: CredentialService) {}
+
+  @Get(':id/credentials')
+  @Header('Cache-Control', 'public, max-age=30')
+  async getUserCredentials(@Param('id') userId: string) {
+    return this.credentialService.getCredentialsByUserId(userId);
+  }
+}
 export class CredentialController {
   /**
    * POST /api/credentials/mint

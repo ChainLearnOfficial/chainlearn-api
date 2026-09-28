@@ -11,7 +11,9 @@ import type {
   QuizFeedbackSummaryQuery,
   AdminQuizModuleParams,
   AdminQuizParams,
+  AdminQuizUpdateBody,
   AuthoredQuizBody,
+  AuthoredQuestion,
 } from "./quiz.types.js";
 
 export class QuizController {
@@ -180,6 +182,50 @@ export class QuizController {
     );
 
     reply.send({ success: true, data: quiz });
+  }
+
+  /**
+   * POST /api/v1/admin/courses/:id/modules/:moduleId/quizzes/:quizId
+   * Replace questions, merge metadata, and/or archive a quiz (admin only, #413).
+   */
+  async updateModuleQuizDetails(
+    request: FastifyRequest<{
+      Params: AdminQuizParams;
+      Body: AdminQuizUpdateBody;
+    }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id, moduleId, quizId } = request.params;
+    const quiz = await quizService.updateModuleQuizDetails(
+      id,
+      moduleId,
+      quizId,
+      request.body,
+    );
+
+    reply.send({ success: true, data: quiz });
+  }
+
+  /**
+   * POST /api/v1/admin/courses/:id/modules/:moduleId/quizzes/:quizId/questions
+   * Append one question to an existing quiz (admin only, #411).
+   */
+  async addModuleQuizQuestion(
+    request: FastifyRequest<{
+      Params: AdminQuizParams;
+      Body: AuthoredQuestion;
+    }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id, moduleId, quizId } = request.params;
+    const quiz = await quizService.addModuleQuizQuestion(
+      id,
+      moduleId,
+      quizId,
+      request.body,
+    );
+
+    reply.status(201).send({ success: true, data: quiz });
   }
 
   /**

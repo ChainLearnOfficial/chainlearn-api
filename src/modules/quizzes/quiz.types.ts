@@ -196,6 +196,78 @@ export const adminQuizParamsSchema = adminQuizModuleParamsSchema.extend({
   quizId: z.string().uuid("Invalid quiz ID"),
 });
 
+/** Upper bound on keys an admin may store on a quiz (#413). */
+export const QUIZ_METADATA_MAX_KEYS = 20;
+
+const quizMetadataValueSchema = z.union([
+  z.string().trim().max(500).transform(sanitizeText),
+  z.number().finite(),
+  z.boolean(),
+  z.null(),
+]);
+
+/** Free-form admin metadata. Keys are short identifiers; string values are
+ *  HTML-stripped because they can be rendered back in the admin UI. */
+export const adminQuizMetadataSchema = z
+  .record(
+    z
+      .string()
+      .trim()
+      .min(1)
+      .max(50)
+      .regex(/^[A-Za-z0-9_-]+$/, "Metadata keys may only contain letters, numbers, _ and -"),
+    quizMetadataValueSchema,
+  )
+  .superRefine((value, ctx) => {
+    if (Object.keys(value).length > QUIZ_METADATA_MAX_KEYS) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `metadata can have at most ${QUIZ_METADATA_MAX_KEYS} keys`,
+      });
+    }
+  });
+
+/**
+ * POST body for updating an existing quiz (#413). `questions`, when sent,
+ * replaces the whole question list. `archived` hides the quiz from learners
+ * without deleting it. `metadata` is merged into the stored object.
+ * At least one field is required so an empty POST is not a silent no-op.
+ */
+export const adminUpdateQuizSchema = z
+  .object({
+    questions: z
+      .array(authoredQuestionSchema)
+      .min(1, "A quiz needs at least one question")
+      .max(50, "Too many questions")
+      .optional(),
+    archived: z.boolean().optional(),
+    metadata: adminQuizMetadataSchema.optional(),
+  })
+  .superRefine((body, ctx) => {
+    if (
+      body.questions === undefined &&
+      body.archived === undefined &&
+      body.metadata === undefined
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Provide questions, archived, or metadata to update",
+      });
+    }
+
+    if (body.questions) {
+      const unique = authoredQuizSchema.safeParse({ questions: body.questions });
+      if (!unique.success) {
+        for (const issue of unique.error.issues) {
+          // Question field errors are already reported by authoredQuestionSchema.
+          // The extra rule at quiz level is unique question ids.
+          if (!issue.message.startsWith("Duplicate question id")) continue;
+          ctx.addIssue(issue);
+        }
+      }
+    }
+  });
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 export type GenerateQuizBody = z.infer<typeof generateQuizSchema>;
@@ -290,6 +362,9 @@ export interface AdminQuiz {
   /** How many learners have submitted this quiz. Surfaced so an admin can
    *  see what deleting it would destroy — quiz_submissions cascades. */
   submissionCount: number;
+  /** When the quiz was archived (#413). Null while it is live. */
+  archivedAt: Date | null;
+  metadata: Record<string, string | number | boolean | null>;
   createdAt: Date;
 }
 
@@ -299,6 +374,8 @@ export type AuthoredQuestion = z.infer<typeof authoredQuestionSchema>;
 export type AuthoredQuizBody = z.infer<typeof authoredQuizSchema>;
 export type AdminQuizModuleParams = z.infer<typeof adminQuizModuleParamsSchema>;
 export type AdminQuizParams = z.infer<typeof adminQuizParamsSchema>;
+export type AdminQuizUpdateBody = z.infer<typeof adminUpdateQuizSchema>;
+export type QuizMetadata = Record<string, string | number | boolean | null>;
 
 /** Result of DELETE on an admin quiz (#388). `submissionsDeleted` is
  *  reported explicitly because quiz_submissions rows cascade, and those

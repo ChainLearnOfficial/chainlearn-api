@@ -3,7 +3,10 @@ import { userService } from "./user.service.js";
 import type { AuthenticatedRequest } from "../../middleware/auth.js";
 import { config } from "../../config/index.js";
 import { ValidationError } from "../../utils/errors.js";
-import type { ActivityQuery, UpdateProfileBody } from "./user.types.js";
+import type {
+  ActivityQuery,
+  UpdateProfileBody,
+} from "./user.types.js";
 
 export class UserController {
   /**
@@ -45,6 +48,23 @@ export class UserController {
   ): Promise<void> {
     const { authUser } = request as AuthenticatedRequest;
     const progress = await userService.getProgress(authUser.id);
+
+    reply.send({ success: true, data: progress });
+  }
+
+  /**
+   * GET /api/v1/users/me/courses/:courseId/progress
+   * Module-level progress for one course (#412).
+   */
+  async getCourseProgress(
+    request: FastifyRequest<{ Params: { courseId: string } }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { authUser } = request as AuthenticatedRequest;
+    const progress = await userService.getCourseProgress(
+      authUser.id,
+      request.params.courseId,
+    );
 
     reply.send({ success: true, data: progress });
   }

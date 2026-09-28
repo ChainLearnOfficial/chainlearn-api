@@ -42,6 +42,8 @@ import {
   cacheKey,
   cacheInvalidatePattern,
 } from "../../cache/index.js";
+import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common';
+import { DeductCreditsDto } from './dto/deduct-credits.dto';
 
 const REWARD_AMOUNT = 10; // credits per passed quiz
 
@@ -720,6 +722,25 @@ export class RewardService {
 
     return leaderboard;
   }
+  async deductCredits(adminId: string, userId: string, dto: DeductCreditsDto) {
+    return this.prisma.$transaction(async (tx) => {
+      // 1. Fetch user to verify existence and current balance
+      const user = await tx.user.findUnique({
+        where: { id: userId },
+        select: { id: true, credits: true },
+      });
+
+      if (!user) {
+        throw new NotFoundException(`User with ID ${userId} not found`);
+      }
+
+      // 2. Validate that amount does not exceed user's balance
+      if (user.credits < dto.amount) {
+        throw new BadRequestException(
+          `Insufficient credits. User balance (${user.credits}) is less than requested deduction amount (${dto.amount}).`,
+        );
+      }
 }
+
 
 export const rewardService = new RewardService();

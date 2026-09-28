@@ -6,6 +6,8 @@ import { validate } from "../../middleware/validation.js";
 import {
   adminQuizModuleParamsSchema,
   adminQuizParamsSchema,
+  adminUpdateQuizSchema,
+  authoredQuestionSchema,
   authoredQuizSchema,
 } from "../quizzes/quiz.types.js";
 import {
@@ -618,6 +620,96 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
     (request, reply) => quizController.updateModuleQuiz(request, reply),
   );
 
+  app.post<{
+    Params: { id: string; moduleId: string; quizId: string };
+    Body: import("../quizzes/quiz.types.js").AdminQuizUpdateBody;
+  }>(
+    "/:id/modules/:moduleId/quizzes/:quizId",
+    {
+      preHandler: [
+        validate({
+          params: adminQuizParamsSchema,
+          body: adminUpdateQuizSchema,
+        }),
+      ],
+      schema: {
+        description:
+          "Update an existing quiz: replace its questions, merge metadata, and/or archive it. Questions are validated before they are stored. The write is atomic and recorded in the audit log (admin only, #413)",
+        tags: ["admin", "courses", "quizzes"],
+        security: [{ bearerAuth: [] }],
+        params: {
+          type: "object",
+          required: ["id", "moduleId", "quizId"],
+          properties: {
+            id: { type: "string", format: "uuid" },
+            moduleId: { type: "string", minLength: 1, maxLength: 100 },
+            quizId: { type: "string", format: "uuid" },
+          },
+        },
+        body: {
+          type: "object",
+          properties: {
+            questions: {
+              type: "array",
+              minItems: 1,
+              maxItems: 50,
+              items: { type: "object" },
+            },
+            archived: { type: "boolean" },
+            metadata: { type: "object", additionalProperties: true },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => quizController.updateModuleQuizDetails(request, reply),
+  );
+
+  app.post<{
+    Params: { id: string; moduleId: string; quizId: string };
+    Body: import("../quizzes/quiz.types.js").AuthoredQuestion;
+  }>(
+    "/:id/modules/:moduleId/quizzes/:quizId/questions",
+    {
+      preHandler: [
+        validate({
+          params: adminQuizParamsSchema,
+          body: authoredQuestionSchema,
+        }),
+      ],
+      schema: {
+        description:
+          "Add one question to an existing quiz. The question needs an id, text, 2-10 options, and a correctIndex within that range. The questions array is updated atomically and the change is audit-logged (admin only, #411)",
+        tags: ["admin", "courses", "quizzes"],
+        security: [{ bearerAuth: [] }],
+        params: {
+          type: "object",
+          required: ["id", "moduleId", "quizId"],
+          properties: {
+            id: { type: "string", format: "uuid" },
+            moduleId: { type: "string", minLength: 1, maxLength: 100 },
+            quizId: { type: "string", format: "uuid" },
+          },
+        },
+        body: {
+          type: "object",
+          required: ["id", "text", "options", "correctIndex"],
+          properties: {
+            id: { type: "string", minLength: 1, maxLength: 100 },
+            text: { type: "string", minLength: 1, maxLength: 2000 },
+            options: {
+              type: "array",
+              minItems: 2,
+              maxItems: 10,
+              items: { type: "string" },
+            },
+            correctIndex: { type: "integer", minimum: 0 },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => quizController.addModuleQuizQuestion(request, reply),
+  );
+
   app.put<{
     Params: { id: string; moduleId: string; contentId: string };
     Body: import("./course.types.js").UpdateContentBody;
@@ -651,7 +743,7 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
       preHandler: [validate({ params: adminQuizParamsSchema })],
       schema: {
         description:
-          "Delete a quiz. Destructive: quiz_submissions cascade, so any learner submissions — including ones whose rewards have already been claimed — are removed too. The response reports how many submissions and claimed rewards were destroyed (admin only, #388)",
+          "Delete a quiz and its submissions in one transaction, and remove any module content item that references it. The response reports how many submissions and claimed rewards were destroyed (admin only, #414)",
         tags: ["admin", "courses", "quizzes"],
         security: [{ bearerAuth: [] }],
         params: {

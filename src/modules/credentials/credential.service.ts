@@ -1,5 +1,10 @@
 import { eq, and, desc, sql } from "drizzle-orm";
 import { db } from "../../config/database.js";
+// src/modules/credentials/credential.service.ts (Service addition)
+import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { PrismaService } from '../../database/prisma.service';
+import * as PDFDocument from 'pdfkit';
+
 import {
   credentials,
   enrollments,
@@ -529,3 +534,83 @@ export class CredentialService {
 }
 
 export const credentialService = new CredentialService();
+
+
+
+@Injectable()
+export class CredentialService {
+  constructor(private readonly prisma: PrismaService) {}
+
+  async generateCompletionCertificate(userId: string, courseId: string): Promise<Buffer> {
+    // 1. Verify user and course existence and check if course is completed
+    const enrollment = await this.prisma.courseEnrollment.findUnique({
+      where: {
+        userId_courseId: { userId, courseId },
+      },
+      include: {
+        user: { select: { name: true } },
+        course: { select: { title: true } },
+      },
+    });
+
+    if (!enrollment) {
+      throw new NotFoundException(`Enrollment not found for user in course ${courseId}`);
+    }
+
+    if (!enrollment.completedAt) {
+      throw new BadRequestException(`Course ${courseId} has not been completed by the user yet.`);
+    }
+
+    const userName = enrollment.user.name || 'Valued Learner';
+    const courseTitle = enrollment.course.title;
+    const completionDate = new Date(enrollment.completedAt).toLocaleDateString('en-US', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+    });
+
+    // 2. Generate PDF Certificate using PDFKit in memory
+    return new Promise((resolve, reject) => {
+      const doc = new PDFDocument({
+        layout: 'landscape',
+        size: 'A4',
+        margins: { top: 50, bottom: 50, left: 50, right: 50 },
+      });
+
+      const buffers: Buffer[] = [];
+      doc.on('data', (chunk) => buffers.push(chunk));
+      doc.on('end', () => resolve(Buffer.concat(buffers)));
+      doc.on('error', (err) => reject(err));
+
+      // Certificate Border & Styling
+      doc.rect(20, 20, doc.page.width - 40, doc.page.height - 40).lineWidth(2).stroke('#3b82f6');
+      doc.rect(28, 28, doc.page.width - 56, doc.page.height - 56).lineWidth(1).stroke('#93c5fd');
+
+      // Header
+      doc.font('Helvetica-Bold').fontSize(28).fillColor('#1e3a8a').text('CERTIFICATE OF COMPLETION', { align: 'center' });
+      doc.moveDown(0.5);
+
+      doc.font('Helvetica').fontSize(14).fillColor('#64748b').text('This is proudly presented to', { align: 'center' });
+      doc.moveDown(0.75);
+
+      // Recipient Name
+      doc.font('Helvetica-Bold').fontSize(26).fillColor('#0f172a').text(userName, { align: 'center' });
+      doc.moveDown(0.75);
+
+      // Course Completion Statement
+      doc.font('Helvetica').fontSize(14).fillColor('#64748b').text('for successfully completing the official curriculum and requirements for', { align: 'center' });
+      doc.moveDown(0.75);
+
+      // Course Title
+      doc.font('Helvetica-Bold').fontSize(20).fillColor('#2563eb').text(courseTitle, { align: 'center' });
+      doc.moveDown(1.5);
+
+      // Footer / Date & Signatory
+      const footerY = doc.y + 20;
+      doc.font('Helvetica').fontSize(12.').fillColor('#475569').text(`Completed on: ${completionDate}`, 80, footerY);
+      doc.text('ChainLearn Official Academy', doc.page.width - 280, footerY, { align: 'right' });
+
+      doc.end();
+    });
+  }
+}

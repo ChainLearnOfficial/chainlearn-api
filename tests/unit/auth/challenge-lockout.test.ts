@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import * as StellarSdk from "@stellar/stellar-sdk";
 
 const mockRedis = vi.hoisted(() => ({
   ttl: vi.fn(),
@@ -15,6 +16,13 @@ vi.mock("../../../src/utils/logger.js", () => ({
 }));
 vi.mock("../../../src/audit/index.js", () => ({
   auditLog: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("../../../src/config/database.js", () => ({
+  db: { query: { users: { findFirst: vi.fn() } }, insert: vi.fn() },
+}));
+vi.mock("../../../src/config/stellar.js", () => ({
+  getNetworkPassphrase: vi.fn().mockReturnValue(StellarSdk.Networks.TESTNET),
+  getPlatformKeypair: vi.fn(),
 }));
 
 import { authService } from "../../../src/modules/auth/auth.service.js";

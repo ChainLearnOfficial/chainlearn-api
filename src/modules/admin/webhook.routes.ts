@@ -8,6 +8,7 @@ import {
   listWebhooksSchema,
 } from "./webhook.types.js";
 import { z } from "zod";
+import { ROUTE_BODY_LIMITS } from "../../config/route-body-limits.js";
 
 const idParamSchema = z.object({
   id: z.string().uuid(),
@@ -19,6 +20,7 @@ export async function webhookRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Body: import("./webhook.types.js").CreateWebhookBody }>(
     "/",
     {
+      config: { bodyLimit: ROUTE_BODY_LIMITS.webhookCreate },
       preHandler: [validate({ body: createWebhookSchema })],
       schema: {
         description: "Create a new webhook",

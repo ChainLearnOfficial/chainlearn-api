@@ -3,6 +3,7 @@ import { adminCourseController } from "./admin-course.controller.js";
 import { quizController } from "../quizzes/quiz.controller.js";
 import { authGuard, adminGuard } from "../../middleware/auth.js";
 import { validate } from "../../middleware/validation.js";
+import { ROUTE_BODY_LIMITS } from "../../config/route-body-limits.js";
 import {
   adminQuizModuleParamsSchema,
   adminQuizParamsSchema,
@@ -505,6 +506,7 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
   }>(
     "/:id/modules/:moduleId/quizzes",
     {
+      config: { bodyLimit: ROUTE_BODY_LIMITS.quizAuthoring },
       preHandler: [
         validate({
           params: adminQuizModuleParamsSchema,
@@ -586,6 +588,7 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
   }>(
     "/:id/modules/:moduleId/quizzes/:quizId",
     {
+      config: { bodyLimit: ROUTE_BODY_LIMITS.quizAuthoring },
       preHandler: [
         validate({ params: adminQuizParamsSchema, body: authoredQuizSchema }),
       ],
@@ -626,6 +629,7 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
   }>(
     "/:id/modules/:moduleId/quizzes/:quizId",
     {
+      config: { bodyLimit: ROUTE_BODY_LIMITS.quizAuthoring },
       preHandler: [
         validate({
           params: adminQuizParamsSchema,
@@ -670,6 +674,7 @@ export async function adminCourseRoutes(app: FastifyInstance): Promise<void> {
   }>(
     "/:id/modules/:moduleId/quizzes/:quizId/questions",
     {
+      config: { bodyLimit: ROUTE_BODY_LIMITS.quizAuthoring },
       preHandler: [
         validate({
           params: adminQuizParamsSchema,

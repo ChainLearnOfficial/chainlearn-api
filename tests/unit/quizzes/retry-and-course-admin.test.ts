@@ -1,17 +1,17 @@
 import { test, describe, expect, beforeEach, afterEach, vi } from "vitest";
-import { db } from "../config/database.js";
-import { redis } from "../config/redis.js";
-import { quizService } from "../modules/quizzes/quiz.service.js";
-import { courseService } from "../modules/courses/course.service.js";
-import { MAX_RETRIES_PER_MODULE_PER_DAY } from "../modules/quizzes/quiz.types.js";
-import { RateLimitError, ForbiddenError } from "../utils/errors.js";
+import { db } from "../../../src/config/database.js";
+import { redis } from "../../../src/config/redis.js";
+import { quizService } from "../../../src/modules/quizzes/quiz.service.js";
+import { courseService } from "../../../src/modules/courses/course.service.js";
+import { MAX_RETRIES_PER_MODULE_PER_DAY } from "../../../src/modules/quizzes/quiz.types.js";
+import { RateLimitError, ForbiddenError } from "../../../src/utils/errors.js";
 import {
   courses,
   enrollments,
   users,
   quizSubmissions,
   quizzes,
-} from "../database/schema.js";
+} from "../../../src/database/schema.js";
 import { eq } from "drizzle-orm";
 
 describe("Quiz retry endpoint & course admin/popular endpoints (#292, #293, #294, #295)", () => {

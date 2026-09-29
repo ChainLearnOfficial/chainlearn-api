@@ -154,6 +154,11 @@ export function createCircuitBreaker(options: CircuitBreakerOptions): CircuitBre
       // or not — otherwise a persistent non-transient error (e.g. a 400 from
       // a corrupted account) would let unlimited probes through.
       if (state === CircuitState.HalfOpen || (err instanceof Error && isTransientError(err))) {
+        // recordFailure() itself logs when this pushes the circuit to Open
+        // (threshold reached, or the HalfOpen probe failed); this warn
+        // captures the underlying error for every failure, including the
+        // ones below threshold that recordFailure() doesn't log on its own.
+        logger.warn({ err, label, state }, "Circuit breaker recorded a failure");
         recordFailure();
       } else {
         halfOpenProbeInFlight = false;

@@ -12,10 +12,10 @@
  * visitor sees the prerequisite list but no personal status.
  */
 import { test, describe, expect, beforeEach, afterEach } from "vitest";
-import { courseService } from "../modules/courses/course.service.js";
-import { NotFoundError } from "../utils/errors.js";
-import { db } from "../config/database.js";
-import { courses, enrollments, users } from "../database/schema.js";
+import { courseService } from "../../../src/modules/courses/course.service.js";
+import { NotFoundError } from "../../../src/utils/errors.js";
+import { db } from "../../../src/config/database.js";
+import { courses, enrollments, users } from "../../../src/database/schema.js";
 import { eq, inArray } from "drizzle-orm";
 
 describe("GET /api/v1/courses/:id/prerequisites (#369)", () => {

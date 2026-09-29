@@ -19,8 +19,8 @@
 import { test, describe, expect, beforeAll, afterAll } from "vitest";
 import pino from "pino";
 import type { FastifyInstance } from "fastify";
-import { buildApp } from "../server.js";
-import { getRequestId, runWithRequestContext } from "../utils/request-context.js";
+import { buildApp } from "../../src/server.js";
+import { getRequestId, runWithRequestContext } from "../../src/utils/request-context.js";
 
 describe("X-Request-Id response header (#287)", () => {
   let app: FastifyInstance;

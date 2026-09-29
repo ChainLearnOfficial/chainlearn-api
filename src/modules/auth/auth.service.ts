@@ -94,7 +94,13 @@ export class AuthService {
     let storedChallenge: { challengeEnvelope: string };
     try {
       storedChallenge = JSON.parse(challengeData);
-    } catch {
+    } catch (err) {
+      // This is the server's own Redis-stored value, not client input, so
+      // a parse failure here is an internal anomaly worth tracking.
+      logger.warn(
+        { err, stellarAddress, challengeId },
+        "Corrupt stored SEP-10 challenge record",
+      );
       throw new UnauthorizedError("Corrupt stored challenge");
     }
 
@@ -109,7 +115,13 @@ export class AuthService {
         storedChallenge.challengeEnvelope,
         getNetworkPassphrase()
       ) as StellarSdk.Transaction;
-    } catch {
+    } catch (err) {
+      // Same as above — this decodes the server's own issued envelope, not
+      // client input, so a decode failure here is an internal anomaly.
+      logger.warn(
+        { err, stellarAddress, challengeId },
+        "Failed to decode server-issued SEP-10 challenge envelope",
+      );
       throw new UnauthorizedError("Corrupt stored challenge");
     }
     const issuedNonceOp = issuedTransaction.operations.find(

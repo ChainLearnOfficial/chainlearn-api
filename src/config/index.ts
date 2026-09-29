@@ -89,29 +89,76 @@ export type Env = z.infer<typeof envSchema>;
 
 let _config: Env | null = null;
 
+// Test-mode-only placeholders for non-critical vars (contract IDs, public
+// testnet URLs) whose exact value doesn't matter for most tests. These are
+// deliberately NOT secret-shaped — "CHANGE_ME_IN_TEST_ENV" can never be
+// mistaken for a real credential — unlike the old hardcoded fallbacks this
+// replaces (#475).
+const TEST_MODE_NON_SECRET_DEFAULTS = {
+  STELLAR_HORIZON_URL: "https://horizon-testnet.stellar.org",
+  STELLAR_SOROBAN_RPC_URL: "https://soroban-testnet.stellar.org",
+  STELLAR_QUIZ_CONTRACT_ID: "CHANGE_ME_IN_TEST_ENV",
+  STELLAR_REWARD_CONTRACT_ID: "CHANGE_ME_IN_TEST_ENV",
+  STELLAR_CREDENTIAL_CONTRACT_ID: "CHANGE_ME_IN_TEST_ENV",
+} as const;
+
+// Vars that must NEVER fall back to a hardcoded value, even a fake-looking
+// one, because a real value is required for the app/tests to behave
+// meaningfully (a real DB, a JWT secret whose length actually matters for
+// signing, a Stellar secret key whose format is validated and used to
+// derive a real keypair). Missing one of these in test mode is a config
+// error, not something to paper over — loadConfig throws a clear message
+// naming exactly which var(s) are missing (#475). See .env.test.example.
+const REQUIRED_IN_TEST_MODE = [
+  "DATABASE_URL",
+  "JWT_SECRET",
+  "STELLAR_PLATFORM_SECRET",
+] as const;
+
 function loadConfig(): Env {
   const result = envSchema.safeParse(process.env);
   if (!result.success) {
     if (process.env.NODE_ENV === "test") {
+      const missingRequired = REQUIRED_IN_TEST_MODE.filter(
+        (key) => !process.env[key],
+      );
+      if (missingRequired.length > 0) {
+        throw new Error(
+          `Missing required test environment variable(s): ${missingRequired.join(", ")}. ` +
+            "No hardcoded fallback is used for these, even in test mode, so tests never " +
+            "silently run against a fake-but-real-looking secret. Copy the matching " +
+            "entries from .env.test.example into your local .env with real test values.",
+        );
+      }
+
       // In test mode, warn but don't exit — tests mock what they need.
       // Merge with process.env so CI-provided values (DATABASE_URL, REDIS_URL, etc.)
-      // are preserved; only truly missing vars get test defaults.
+      // are preserved; only non-critical vars get obviously-fake test defaults.
       console.warn(
         "Missing env vars in test mode (expected if mocking config):",
         result.error.flatten().fieldErrors
       );
       return envSchema.parse({
-        DATABASE_URL: process.env.DATABASE_URL || "postgresql://chainlearn_test:test_password@localhost:5432/chainlearn_test",
+        DATABASE_URL: process.env.DATABASE_URL,
         REDIS_URL: process.env.REDIS_URL || "redis://localhost:6379",
         CORS_ORIGINS: process.env.CORS_ORIGINS,
-        JWT_SECRET:
-          process.env.JWT_SECRET || "test-secret-key-that-is-at-least-sixty-four-characters-long-for-tests",
-        STELLAR_HORIZON_URL: process.env.STELLAR_HORIZON_URL || "https://horizon-testnet.stellar.org",
-        STELLAR_SOROBAN_RPC_URL: process.env.STELLAR_SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org",
-        STELLAR_PLATFORM_SECRET: process.env.STELLAR_PLATFORM_SECRET || "test",
-        STELLAR_QUIZ_CONTRACT_ID: process.env.STELLAR_QUIZ_CONTRACT_ID || "test",
-        STELLAR_REWARD_CONTRACT_ID: process.env.STELLAR_REWARD_CONTRACT_ID || "test",
-        STELLAR_CREDENTIAL_CONTRACT_ID: process.env.STELLAR_CREDENTIAL_CONTRACT_ID || "test",
+        JWT_SECRET: process.env.JWT_SECRET,
+        STELLAR_HORIZON_URL:
+          process.env.STELLAR_HORIZON_URL ||
+          TEST_MODE_NON_SECRET_DEFAULTS.STELLAR_HORIZON_URL,
+        STELLAR_SOROBAN_RPC_URL:
+          process.env.STELLAR_SOROBAN_RPC_URL ||
+          TEST_MODE_NON_SECRET_DEFAULTS.STELLAR_SOROBAN_RPC_URL,
+        STELLAR_PLATFORM_SECRET: process.env.STELLAR_PLATFORM_SECRET,
+        STELLAR_QUIZ_CONTRACT_ID:
+          process.env.STELLAR_QUIZ_CONTRACT_ID ||
+          TEST_MODE_NON_SECRET_DEFAULTS.STELLAR_QUIZ_CONTRACT_ID,
+        STELLAR_REWARD_CONTRACT_ID:
+          process.env.STELLAR_REWARD_CONTRACT_ID ||
+          TEST_MODE_NON_SECRET_DEFAULTS.STELLAR_REWARD_CONTRACT_ID,
+        STELLAR_CREDENTIAL_CONTRACT_ID:
+          process.env.STELLAR_CREDENTIAL_CONTRACT_ID ||
+          TEST_MODE_NON_SECRET_DEFAULTS.STELLAR_CREDENTIAL_CONTRACT_ID,
         REQUEST_BODY_LIMIT_BYTES: process.env.REQUEST_BODY_LIMIT_BYTES,
         MULTIPART_BODY_LIMIT_BYTES: process.env.MULTIPART_BODY_LIMIT_BYTES,
         AVATAR_UPLOAD_MAX_BYTES: process.env.AVATAR_UPLOAD_MAX_BYTES,

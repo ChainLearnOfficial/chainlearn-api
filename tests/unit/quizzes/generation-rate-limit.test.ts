@@ -1,10 +1,10 @@
 import { test, describe, expect, beforeEach, afterEach } from "vitest";
-import { db } from "../config/database.js";
-import { redis } from "../config/redis.js";
-import { quizService } from "../modules/quizzes/quiz.service.js";
-import { MAX_QUIZ_GENERATIONS_PER_MODULE_PER_HOUR } from "../modules/quizzes/quiz.types.js";
-import { RateLimitError } from "../utils/errors.js";
-import { courses, enrollments, users, quizzes } from "../database/schema.js";
+import { db } from "../../../src/config/database.js";
+import { redis } from "../../../src/config/redis.js";
+import { quizService } from "../../../src/modules/quizzes/quiz.service.js";
+import { MAX_QUIZ_GENERATIONS_PER_MODULE_PER_HOUR } from "../../../src/modules/quizzes/quiz.types.js";
+import { RateLimitError } from "../../../src/utils/errors.js";
+import { courses, enrollments, users, quizzes } from "../../../src/database/schema.js";
 import { eq } from "drizzle-orm";
 
 describe("Quiz generation rate limiting (#291)", () => {

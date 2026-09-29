@@ -1,12 +1,13 @@
 import { z } from "zod";
+import { sanitizeText } from "../../utils/sanitize.js";
 
 // ─── Request Schemas ────────────────────────────────────────────────────────
 
 export const announcementPrioritySchema = z.enum(["normal", "high", "urgent"]);
 
 export const createAnnouncementSchema = z.object({
-  title: z.string().min(1).max(255),
-  message: z.string().min(1),
+  title: z.string().min(1).max(255).transform(sanitizeText),
+  message: z.string().min(1).transform(sanitizeText),
   priority: announcementPrioritySchema.default("normal"),
   active: z.boolean().default(true),
   expiresAt: z.coerce.date().optional(),
@@ -14,8 +15,8 @@ export const createAnnouncementSchema = z.object({
 
 export const updateAnnouncementSchema = z
   .object({
-    title: z.string().min(1).max(255).optional(),
-    message: z.string().min(1).optional(),
+    title: z.string().min(1).max(255).transform(sanitizeText).optional(),
+    message: z.string().min(1).transform(sanitizeText).optional(),
     priority: announcementPrioritySchema.optional(),
     active: z.boolean().optional(),
     // Explicit null clears an existing expiry; omitted leaves it unchanged.

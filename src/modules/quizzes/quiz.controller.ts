@@ -14,6 +14,7 @@ import type {
   AdminQuizUpdateBody,
   AuthoredQuizBody,
   AuthoredQuestion,
+  ArchiveModuleQuizBody,
 } from "./quiz.types.js";
 
 export class QuizController {
@@ -240,6 +241,56 @@ export class QuizController {
     const result = await quizService.deleteModuleQuiz(id, moduleId, quizId);
 
     reply.send({ success: true, data: result });
+  }
+
+  /**
+   * POST /api/v1/admin/courses/:id/modules/:moduleId/quizzes/:quizId/archive
+   * Archive (or unarchive) a quiz via its own endpoint (admin only, #416).
+   */
+  async archiveModuleQuiz(
+    request: FastifyRequest<{
+      Params: AdminQuizParams;
+      Body: ArchiveModuleQuizBody;
+    }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id, moduleId, quizId } = request.params;
+    const quiz = await quizService.archiveModuleQuiz(
+      id,
+      moduleId,
+      quizId,
+      request.body.archived,
+    );
+
+    reply.send({ success: true, data: quiz });
+  }
+
+  /**
+   * GET /api/v1/courses/:id/modules/:moduleId/quiz-history
+   * Aggregate quiz stats for every quiz in a course module (admin only, #415).
+   */
+  async getModuleQuizHistory(
+    request: FastifyRequest<{ Params: AdminQuizModuleParams }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id, moduleId } = request.params;
+    const history = await quizService.getModuleQuizHistory(id, moduleId);
+
+    reply.send({ success: true, data: history });
+  }
+
+  /**
+   * GET /api/v1/admin/courses/:id/modules/:moduleId/quizzes/:quizId/analytics
+   * Detailed question-by-question analytics for one quiz (admin only, #417).
+   */
+  async getQuizAnalytics(
+    request: FastifyRequest<{ Params: AdminQuizParams }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id, moduleId, quizId } = request.params;
+    const analytics = await quizService.getQuizAnalytics(id, moduleId, quizId);
+
+    reply.send({ success: true, data: analytics });
   }
 }
 

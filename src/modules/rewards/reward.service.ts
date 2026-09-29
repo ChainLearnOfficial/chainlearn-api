@@ -20,6 +20,7 @@ import { createQuizProof } from "../../stellar/signatures.js";
 import { isCircuitBreakerError } from "../../stellar/resilience.js";
 import { config } from "../../config/index.js";
 import { logger } from "../../utils/logger.js";
+import { getRequestId } from "../../utils/request-context.js";
 import { enqueueReward, getQueuedRewardJobs, estimateProcessingSeconds } from "../../services/retry-queue.js";
 import { dispatchWebhook } from "../../services/webhook-dispatcher.js";
 import StellarSdk from "@stellar/stellar-sdk";
@@ -81,7 +82,7 @@ async function handleBadSeqError(submissionId: string, stellarAddress: string): 
   }
   
   logger.warn(
-    { submissionId, accountSeq },
+    { requestId: getRequestId(), submissionId, accountSeq },
     "bad_seq after invoke — the tx might actually succeed on-chain"
   );
   return "pending_indexer_confirmation";
@@ -327,7 +328,7 @@ export class RewardService {
 
         if (isCircuitBreakerError(err)) {
           logger.warn(
-            { submissionId },
+            { requestId: getRequestId(), submissionId },
             "Stellar circuit breaker open — queuing reward for later",
           );
           await db
@@ -355,7 +356,7 @@ export class RewardService {
           .update(quizSubmissions)
           .set({ rewardPending: false, rewardFailed: true })
           .where(eq(quizSubmissions.id, submissionId));
-        logger.error({ err, submissionId }, "On-chain reward claim failed");
+        logger.error({ err, requestId: getRequestId(), submissionId }, "On-chain reward claim failed");
         throw new Error("Failed to process on-chain reward");
       }
 

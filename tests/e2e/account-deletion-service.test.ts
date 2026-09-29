@@ -1,15 +1,15 @@
 import { test, describe, expect, beforeEach, afterEach } from "vitest";
 import { eq } from "drizzle-orm";
-import { db } from "../config/database.js";
-import { redis } from "../config/redis.js";
-import { userService } from "../modules/users/user.service.js";
-import { cacheKey, cacheSet } from "../cache/index.js";
+import { db } from "../../src/config/database.js";
+import { redis } from "../../src/config/redis.js";
+import { userService } from "../../src/modules/users/user.service.js";
+import { cacheKey, cacheSet } from "../../src/cache/index.js";
 import {
   users,
   courses,
   enrollments,
   credentials,
-} from "../database/schema.js";
+} from "../../src/database/schema.js";
 
 describe("Account deletion (#290)", () => {
   const mockUserId = "f1a2d3e4-1111-4ef8-bb6d-6bb9bd380a44";

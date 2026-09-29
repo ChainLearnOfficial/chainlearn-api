@@ -8,20 +8,20 @@
  */
 import { test, describe, expect, beforeAll, beforeEach, afterAll, afterEach, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { buildApp } from "../server.js";
-import { db } from "../config/database.js";
-import { redis } from "../config/redis.js";
-import { courseService } from "../modules/courses/course.service.js";
-import { quizService } from "../modules/quizzes/quiz.service.js";
-import { cacheKey } from "../cache/index.js";
-import { ForbiddenError, NotFoundError } from "../utils/errors.js";
+import { buildApp } from "../../src/server.js";
+import { db } from "../../src/config/database.js";
+import { redis } from "../../src/config/redis.js";
+import { courseService } from "../../src/modules/courses/course.service.js";
+import { quizService } from "../../src/modules/quizzes/quiz.service.js";
+import { cacheKey } from "../../src/cache/index.js";
+import { ForbiddenError, NotFoundError } from "../../src/utils/errors.js";
 import {
   courses,
   enrollments,
   users,
   quizzes,
   quizSubmissions,
-} from "../database/schema.js";
+} from "../../src/database/schema.js";
 import { eq } from "drizzle-orm";
 
 describe("GET /api/v1/courses/:id/modules (#286)", () => {

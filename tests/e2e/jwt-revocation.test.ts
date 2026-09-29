@@ -10,7 +10,7 @@ import { test, describe, expect, beforeEach, vi } from "vitest";
 
 const redisStore = new Map<string, { value: string; expiresAt: number }>();
 
-vi.mock("../config/redis.js", () => ({
+vi.mock("../../src/config/redis.js", () => ({
   redis: {
     get: vi.fn(async (key: string) => {
       const entry = redisStore.get(key);
@@ -30,7 +30,7 @@ vi.mock("../config/redis.js", () => ({
 
 // ─── Import after mocks are in place ─────────────────────────────────────────
 
-import { revokeToken } from "../middleware/auth.js";
+import { revokeToken } from "../../src/middleware/auth.js";
 
 // ─── JWT Revocation Tests (#215) ─────────────────────────────────────────────
 
@@ -41,7 +41,7 @@ describe("JWT Revocation (#215)", () => {
   });
 
   test("revokeToken writes jti to Redis denylist with given TTL", async () => {
-    const { redis } = await import("../config/redis.js");
+    const { redis } = await import("../../src/config/redis.js");
     const jti = "test-jti-uuid-1234";
     const ttl = 3600;
 
@@ -55,7 +55,7 @@ describe("JWT Revocation (#215)", () => {
   });
 
   test("revoked token is found in the denylist", async () => {
-    const { redis } = await import("../config/redis.js");
+    const { redis } = await import("../../src/config/redis.js");
     const jti = "revoked-jti-5678";
 
     await revokeToken(jti, 3600);
@@ -66,7 +66,7 @@ describe("JWT Revocation (#215)", () => {
   });
 
   test("non-revoked jti is not in the denylist", async () => {
-    const { redis } = await import("../config/redis.js");
+    const { redis } = await import("../../src/config/redis.js");
     const val = await (redis.get as ReturnType<typeof vi.fn>)(
       "jwt:revoked:unknown-jti"
     );
@@ -74,7 +74,7 @@ describe("JWT Revocation (#215)", () => {
   });
 
   test("revokeToken called multiple times with different jtis stores all of them", async () => {
-    const { redis } = await import("../config/redis.js");
+    const { redis } = await import("../../src/config/redis.js");
     await revokeToken("jti-a", 100);
     await revokeToken("jti-b", 200);
     await revokeToken("jti-c", 300);
@@ -90,7 +90,7 @@ describe("JWT Revocation (#215)", () => {
   });
 
   test("TTL clamped to at-least 1 second even when exp has passed", async () => {
-    const { redis } = await import("../config/redis.js");
+    const { redis } = await import("../../src/config/redis.js");
     // Simulate a TTL of 1 (minimum) rather than a negative value
     await revokeToken("jti-expired", 1);
     expect(redis.setex).toHaveBeenCalledWith("jwt:revoked:jti-expired", 1, "1");
@@ -116,7 +116,7 @@ describe("processRewardClaim reads score from DB not caller (#219)", () => {
   });
 
   test("processRewardClaim signature takes only submissionId and userId", async () => {
-    const { processRewardClaim } = await import("../modules/rewards/reward.service.js");
+    const { processRewardClaim } = await import("../../src/modules/rewards/reward.service.js");
     // The function should have length 2 (submissionId, userId) — no longer 3
     expect(processRewardClaim.length).toBe(2);
   });

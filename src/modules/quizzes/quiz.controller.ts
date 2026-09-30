@@ -261,6 +261,17 @@ export class QuizController {
       quizId,
       request.body.archived,
     );
+   * Archive a quiz without deleting it (admin only, #416). Thin wrapper
+   * around the same archive path updateModuleQuizDetails already supports.
+   */
+  async archiveModuleQuiz(
+    request: FastifyRequest<{ Params: AdminQuizParams }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id, moduleId, quizId } = request.params;
+    const quiz = await quizService.updateModuleQuizDetails(id, moduleId, quizId, {
+      archived: true,
+    });
 
     reply.send({ success: true, data: quiz });
   }
@@ -268,6 +279,7 @@ export class QuizController {
   /**
    * GET /api/v1/courses/:id/modules/:moduleId/quiz-history
    * Aggregate quiz stats for every quiz in a course module (admin only, #415).
+   * Aggregate quiz performance across a module's quizzes (admin only, #415).
    */
   async getModuleQuizHistory(
     request: FastifyRequest<{ Params: AdminQuizModuleParams }>,
@@ -282,6 +294,7 @@ export class QuizController {
   /**
    * GET /api/v1/admin/courses/:id/modules/:moduleId/quizzes/:quizId/analytics
    * Detailed question-by-question analytics for one quiz (admin only, #417).
+   * Question-by-question analytics for a single quiz (admin only, #417).
    */
   async getQuizAnalytics(
     request: FastifyRequest<{ Params: AdminQuizParams }>,

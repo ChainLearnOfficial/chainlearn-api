@@ -15,7 +15,7 @@ export async function auditRoutes(app: FastifyInstance): Promise<void> {
       preHandler: [validate({ querystring: listAuditLogsSchema })],
       schema: {
         description:
-          "List audit log entries, paginated and filterable by event and date range (admin only)",
+          "List audit log entries, paginated and filterable by event and date range (admin only). Accepts either offset or cursor (from a previous response's pagination.nextCursor) for pagination — cursor is O(1) regardless of depth and takes precedence over offset when both are given (#482)",
         tags: ["admin", "audit-logs"],
         security: [{ bearerAuth: [] }],
         querystring: {
@@ -26,6 +26,7 @@ export async function auditRoutes(app: FastifyInstance): Promise<void> {
             dateTo: { type: "string", format: "date-time" },
             limit: { type: "integer", minimum: 1, maximum: 100, default: 20 },
             offset: { type: "integer", minimum: 0, default: 0 },
+            cursor: { type: "string" },
           },
         },
       } as FastifySchema,

@@ -1,4 +1,5 @@
 import type { FastifyRequest, FastifyReply } from "fastify";
+import { logger } from "../utils/logger.js";
 
 export async function responseEnvelope(
   request: FastifyRequest,
@@ -16,8 +17,9 @@ export async function responseEnvelope(
         };
         return JSON.stringify(body);
       }
-    } catch {
-      // Non-JSON response, pass through
+    } catch (err) {
+      // Non-JSON response (e.g. a PDF download), pass through unchanged.
+      logger.debug({ err, requestId: request.id, url: request.url }, "Response body is not JSON — skipping envelope");
     }
   }
   return payload;

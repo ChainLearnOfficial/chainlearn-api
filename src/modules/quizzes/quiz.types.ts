@@ -377,6 +377,39 @@ export type AdminQuizParams = z.infer<typeof adminQuizParamsSchema>;
 export type AdminQuizUpdateBody = z.infer<typeof adminUpdateQuizSchema>;
 export type QuizMetadata = Record<string, string | number | boolean | null>;
 
+/** Aggregate quiz performance for one module, across every quiz belonging to
+ *  it (admin only, #415). Mirrors QuizStats' normalization: `score` is a raw
+ *  correct-answer count, so each submission is normalized against its own
+ *  quiz's question count before averaging. */
+export interface ModuleQuizHistory {
+  moduleId: string;
+  totalAttempts: number;
+  averageScore: number;
+  passRate: number;
+  /** Percentage-decile bucket (e.g. "70-79") -> submission count. */
+  scoreDistribution: Record<string, number>;
+}
+
+/** How often each wrong option was picked for one question (admin only,
+ *  #417). Capped to the most-picked few so a question with many options
+ *  doesn't dump every wrong index. */
+export interface QuizQuestionAnalytics {
+  questionId: string;
+  questionText: string;
+  totalAnswered: number;
+  correctCount: number;
+  correctRate: number;
+  commonWrongAnswers: Array<{ selectedIndex: number; count: number }>;
+}
+
+/** Question-by-question performance for a single quiz (admin only, #417). */
+export interface QuizAnalytics {
+  quizId: string;
+  totalAttempts: number;
+  scoreDistribution: Record<string, number>;
+  questions: QuizQuestionAnalytics[];
+}
+
 /** Result of DELETE on an admin quiz (#388). `submissionsDeleted` is
  *  reported explicitly because quiz_submissions rows cascade, and those
  *  rows are what reward history is read from. */

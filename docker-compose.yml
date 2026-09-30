@@ -33,7 +33,7 @@ services:
     depends_on:
       - postgres
       - redis
-    command: sh -c "npx drizzle-kit push && npx vitest run src/test/"
+    command: sh -c "npx drizzle-kit push && npx vitest run tests/e2e/"
 
 volumes:
   pgdata:

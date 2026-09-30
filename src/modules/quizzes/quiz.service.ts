@@ -63,6 +63,17 @@ import {
 
 const QUIZ_STATS_TTL_SECONDS = 300;
 
+/** Buckets a 0-100 percentage into a decile label (e.g. "70-79"), with the
+ *  top bucket "90-100" absorbing 100 so it isn't a decile of one. Shared by
+ *  getModuleQuizHistory and getQuizAnalytics so both report distributions on
+ *  the same scale. */
+function scoreDistributionBucket(percentage: number): string {
+  const clamped = Math.min(Math.max(percentage, 0), 100);
+  const lower = clamped === 100 ? 90 : Math.floor(clamped / 10) * 10;
+  const upper = lower === 90 ? 100 : lower + 9;
+  return `${lower}-${upper}`;
+}
+
 type GeneratedQuestion = QuizQuestion & { correctIndex: number };
 type StoredQuestion = GeneratedQuestion & {
   /** Pre-shuffle bookkeeping, written by shuffleQuestions so an AI-generated
@@ -764,6 +775,176 @@ export class QuizService {
   }
 
   /**
+   * Aggregate quiz performance for one module (#415): average score, pass
+   * rate, total attempts, and a score-decile distribution across every quiz
+   * belonging to that module. Admin only. Superseded submissions (#295
+   * retries) are excluded for the same reason as getQuizStats.
+   */
+  async getModuleQuizHistory(
+    courseId: string,
+    moduleId: string,
+  ): Promise<ModuleQuizHistory> {
+    await this.assertModuleBelongsToCourse(courseId, moduleId);
+
+    const namespace = "quizzes";
+    const cacheKeyString = cacheKey(namespace, "module-history", courseId, moduleId);
+    const cached = await cacheGet<ModuleQuizHistory>(namespace, cacheKeyString);
+    if (cached) return cached;
+
+    const rows = await db
+      .select({
+        score: quizSubmissions.score,
+        questions: quizzes.questions,
+      })
+      .from(quizSubmissions)
+      .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+      .where(
+        and(
+          eq(quizzes.courseId, courseId),
+          eq(quizzes.moduleId, moduleId),
+          eq(quizSubmissions.superseded, false),
+        ),
+      );
+
+    let percentageSum = 0;
+    let passCount = 0;
+    const scoreDistribution: Record<string, number> = {};
+
+    for (const row of rows) {
+      const totalQuestions = Array.isArray(row.questions) ? row.questions.length : 0;
+      const percentage =
+        totalQuestions > 0 && row.score != null
+          ? Math.round((row.score / totalQuestions) * 100)
+          : 0;
+
+      percentageSum += percentage;
+      if (percentage >= PASSING_PERCENTAGE) passCount++;
+      const bucket = scoreDistributionBucket(percentage);
+      scoreDistribution[bucket] = (scoreDistribution[bucket] ?? 0) + 1;
+    }
+
+    const totalAttempts = rows.length;
+    const history: ModuleQuizHistory = {
+      moduleId,
+      totalAttempts,
+      averageScore: totalAttempts > 0 ? Math.round(percentageSum / totalAttempts) : 0,
+      passRate: totalAttempts > 0 ? Math.round((passCount / totalAttempts) * 100) : 0,
+      scoreDistribution,
+    };
+
+    await cacheSet(cacheKeyString, history, QUIZ_STATS_TTL_SECONDS);
+
+    return history;
+  }
+
+  /**
+   * Question-by-question analytics for a single quiz (#417): correct rate,
+   * the most commonly picked wrong answers, and a score distribution across
+   * that quiz's own attempts. Admin only.
+   *
+   * There is no per-question timing data anywhere in the submission path
+   * (submitQuizSchema only carries questionId + selectedIndex), so "average
+   * time per question" from the issue's acceptance criteria is intentionally
+   * left out — capturing it would mean a schema change plus a client change
+   * to record per-question timestamps, which is bigger than this fix.
+   */
+  async getQuizAnalytics(
+    courseId: string,
+    moduleId: string,
+    quizId: string,
+  ): Promise<QuizAnalytics> {
+    const quiz = await this.assertQuizInModule(courseId, moduleId, quizId);
+
+    const namespace = "quizzes";
+    const cacheKeyString = cacheKey(namespace, "analytics", quizId);
+    const cached = await cacheGet<QuizAnalytics>(namespace, cacheKeyString);
+    if (cached) return cached;
+
+    const submissions = await db
+      .select({ answers: quizSubmissions.answers, score: quizSubmissions.score })
+      .from(quizSubmissions)
+      .where(
+        and(
+          eq(quizSubmissions.quizId, quizId),
+          eq(quizSubmissions.superseded, false),
+        ),
+      );
+
+    const questions = (quiz.questions ?? []) as StoredQuestion[];
+    const totalQuestionsCount = questions.length;
+
+    const scoreDistribution: Record<string, number> = {};
+    const perQuestion = new Map<
+      string,
+      { total: number; correct: number; wrong: Map<number, number> }
+    >();
+    for (const question of questions) {
+      perQuestion.set(question.id, { total: 0, correct: 0, wrong: new Map() });
+    }
+
+    for (const submission of submissions) {
+      const percentage =
+        totalQuestionsCount > 0 && submission.score != null
+          ? Math.round((submission.score / totalQuestionsCount) * 100)
+          : 0;
+      const bucket = scoreDistributionBucket(percentage);
+      scoreDistribution[bucket] = (scoreDistribution[bucket] ?? 0) + 1;
+
+      const answers = (submission.answers ?? []) as Array<{
+        questionId: string;
+        selectedIndex: number;
+      }>;
+      for (const answer of answers) {
+        const entry = perQuestion.get(answer.questionId);
+        if (!entry) continue;
+        entry.total++;
+        const question = questions.find((q) => q.id === answer.questionId);
+        if (question && answer.selectedIndex === question.correctIndex) {
+          entry.correct++;
+        } else {
+          entry.wrong.set(
+            answer.selectedIndex,
+            (entry.wrong.get(answer.selectedIndex) ?? 0) + 1,
+          );
+        }
+      }
+    }
+
+    const MAX_COMMON_WRONG_ANSWERS = 3;
+    const questionAnalytics: QuizQuestionAnalytics[] = questions.map((question) => {
+      const entry = perQuestion.get(question.id) ?? {
+        total: 0,
+        correct: 0,
+        wrong: new Map<number, number>(),
+      };
+      const commonWrongAnswers = [...entry.wrong.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, MAX_COMMON_WRONG_ANSWERS)
+        .map(([selectedIndex, count]) => ({ selectedIndex, count }));
+
+      return {
+        questionId: question.id,
+        questionText: question.text,
+        totalAnswered: entry.total,
+        correctCount: entry.correct,
+        correctRate: entry.total > 0 ? Math.round((entry.correct / entry.total) * 100) : 0,
+        commonWrongAnswers,
+      };
+    });
+
+    const analytics: QuizAnalytics = {
+      quizId,
+      totalAttempts: submissions.length,
+      scoreDistribution,
+      questions: questionAnalytics,
+    };
+
+    await cacheSet(cacheKeyString, analytics, QUIZ_STATS_TTL_SECONDS);
+
+    return analytics;
+  }
+
+  /**
    * Submit feedback on a specific quiz question (#331): "this question is
    * unclear", "wrong answer marked as correct", or something else.
    *
@@ -932,6 +1113,10 @@ export class QuizService {
     const invalidations = await Promise.allSettled([
       // Both the course-scoped and the all-courses aggregate.
       cacheInvalidatePattern(cacheKeyPattern("quizzes", "stats")),
+      // Module-level history (#415) and per-quiz analytics (#417) — an
+      // admin editing/archiving questions changes what both would report.
+      cacheInvalidatePattern(cacheKeyPattern("quizzes", "module-history")),
+      cacheInvalidatePattern(cacheKeyPattern("quizzes", "analytics")),
       // Enrollment status derives its module list from quizzes.
       cacheInvalidatePattern(cacheKeyPattern("user", "enrollment-status")),
       cacheDel(cacheKey("courses", "detail", courseId)),

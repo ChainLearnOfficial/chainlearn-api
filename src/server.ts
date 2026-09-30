@@ -2,7 +2,6 @@ import { initTracing, shutdownTracing } from "./tracing.js";
 
 import { createReadStream } from "node:fs";
 import { access } from "node:fs/promises";
-import path from "node:path";
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
@@ -48,6 +47,8 @@ import {
 import { processRewardClaim } from "./modules/rewards/reward.service.js";
 import { warmCourseCache } from "./cache/warmer.js";
 import { runWithRequestContext } from "./utils/request-context.js";
+import { resolveSafeStaticPath } from "./utils/safe-static-path.js";
+import { checkServiceHealth } from "./utils/service-health.js";
 
 // Versioned route modules
 import { registerVersionedRoutes } from "./routes/versioning.js";
@@ -234,6 +235,43 @@ async function buildApp() {
     });
   });
 
+  // Individual per-service health checks (#483) — the combined /health above
+  // can't tell an operator which dependency is down. Each of these is
+  // independent so one outage doesn't block checking the others, and none
+  // require authentication (matching /health).
+  app.get("/health/redis", async (_request, reply) => {
+    const result = await checkServiceHealth("redis", () => redis.ping());
+    return reply.status(result.status === "ok" ? 200 : 503).send(result);
+  });
+
+  app.get("/health/database", async (_request, reply) => {
+    const result = await checkServiceHealth("database", () => db.execute(sql`SELECT 1`));
+    return reply.status(result.status === "ok" ? 200 : 503).send(result);
+  });
+
+  app.get("/health/stellar", async (_request, reply) => {
+    const [horizon, soroban] = await Promise.all([
+      checkServiceHealth("stellar.horizon", () => stellarClient.getHorizonServer().root()),
+      checkServiceHealth("stellar.soroban", () => stellarClient.checkSorobanHealth()),
+    ]);
+    const status = horizon.status === "ok" && soroban.status === "ok" ? "ok" : "down";
+    return reply.status(status === "ok" ? 200 : 503).send({
+      status,
+      latencyMs: Math.max(horizon.latencyMs, soroban.latencyMs),
+      checks: { horizon, soroban },
+    });
+  });
+
+  app.get("/health/ai", async (_request, reply) => {
+    const result = await checkServiceHealth("ai", async () => {
+      const response = await fetch(`${config.AI_SERVICE_URL}/health`);
+      if (!response.ok) {
+        throw new Error(`AI service health check returned ${response.status}`);
+      }
+    });
+    return reply.status(result.status === "ok" ? 200 : 503).send(result);
+  });
+
   app.get("/metrics", { preHandler: authGuard }, async (_request, reply) => {
     reply.header("Content-Type", registry.contentType);
     return reply.send(await registry.metrics());
@@ -245,7 +283,17 @@ async function buildApp() {
     "/uploads/avatars/:filename",
     async (request, reply) => {
       const { filename } = request.params;
-      if (!/^[A-Za-z0-9_-]+\\.(jpg|png|webp)$/.test(filename)) {
+      // #486: previously `\\.` in this regex literal matched a literal
+      // backslash character, not an escaped dot, so this route 404'd on
+      // every legitimate filename. Fixed to `\.`, and path resolution is
+      // now handled by resolveSafeStaticPath (basename + within-directory
+      // check) rather than a bare path.join of the raw param.
+      const filePath = resolveSafeStaticPath(
+        filename,
+        config.AVATAR_UPLOAD_DIR,
+        /^[A-Za-z0-9_-]+\.(jpg|png|webp)$/,
+      );
+      if (!filePath) {
         return reply.status(404).send({
           statusCode: 404,
           error: "NOT_FOUND",
@@ -253,7 +301,6 @@ async function buildApp() {
         });
       }
 
-      const filePath = path.join(path.resolve(config.AVATAR_UPLOAD_DIR), filename);
       try {
         await access(filePath);
       } catch {

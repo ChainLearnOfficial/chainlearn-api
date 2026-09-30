@@ -20,6 +20,7 @@ import { createQuizProof } from "../../stellar/signatures.js";
 import { isCircuitBreakerError } from "../../stellar/resilience.js";
 import { config } from "../../config/index.js";
 import { logger } from "../../utils/logger.js";
+import { getRequestId } from "../../utils/request-context.js";
 import { enqueueReward, getQueuedRewardJobs, estimateProcessingSeconds } from "../../services/retry-queue.js";
 import { dispatchWebhook } from "../../services/webhook-dispatcher.js";
 import StellarSdk from "@stellar/stellar-sdk";
@@ -75,13 +76,25 @@ async function handleBadSeqError(submissionId: string, stellarAddress: string): 
   try {
     const account = await stellarClient.getAccount(stellarAddress);
     accountSeq = account.sequence;
-  } catch {
+  } catch (err) {
+    // Intentionally swallow error: sequence fetch is for debugging only —
+    // if Horizon is unavailable, we still want to mark the transaction as
+    // pending. Logged at warn (not error) since this is a best-effort
+    // diagnostic lookup, not the failure itself — the bad_seq warning below
+    // still fires either way.
+    logger.warn(
+      { err, submissionId },
+      "Could not fetch account sequence while handling bad_seq (debugging aid only)",
     // Intentionally swallow error: sequence fetch is for debugging only
     // If Horizon is unavailable, we still want to mark the transaction as pending
+    logger.debug(
+      { err, submissionId, stellarAddress },
+      "Could not fetch account sequence for bad_seq diagnostics — Horizon unavailable",
+    );
   }
   
   logger.warn(
-    { submissionId, accountSeq },
+    { requestId: getRequestId(), submissionId, accountSeq },
     "bad_seq after invoke — the tx might actually succeed on-chain"
   );
   return "pending_indexer_confirmation";
@@ -125,6 +138,10 @@ async function _executeStellarRewardClaim(claimData: RewardClaimData): Promise<s
     ) {
       return handleBadSeqError(claimData.submissionId, claimData.stellarAddress);
     }
+    logger.error(
+      { err, submissionId: claimData.submissionId, userId: claimData.userId },
+      "Stellar reward claim transaction failed",
+    );
     throw err;
   }
 }
@@ -219,6 +236,10 @@ export async function processRewardClaim(
     try {
       txHash = await _executeStellarRewardClaim(claimData);
     } catch (err: unknown) {
+      logger.error(
+        { err, submissionId, userId },
+        "Reward claim failed — marking submission as rewardFailed",
+      );
       await db
         .update(quizSubmissions)
         .set({ rewardPending: false, rewardFailed: true })
@@ -327,7 +348,7 @@ export class RewardService {
 
         if (isCircuitBreakerError(err)) {
           logger.warn(
-            { submissionId },
+            { requestId: getRequestId(), submissionId },
             "Stellar circuit breaker open — queuing reward for later",
           );
           await db
@@ -355,7 +376,7 @@ export class RewardService {
           .update(quizSubmissions)
           .set({ rewardPending: false, rewardFailed: true })
           .where(eq(quizSubmissions.id, submissionId));
-        logger.error({ err, submissionId }, "On-chain reward claim failed");
+        logger.error({ err, requestId: getRequestId(), submissionId }, "On-chain reward claim failed");
         throw new Error("Failed to process on-chain reward");
       }
 

@@ -26,6 +26,7 @@ import { invokeContract } from "../../stellar/transactions.js";
 import { createMintAuthorization } from "../../stellar/signatures.js";
 import { config } from "../../config/index.js";
 import { logger } from "../../utils/logger.js";
+import { getRequestId } from "../../utils/request-context.js";
 import crypto, { createHash } from "node:crypto";
 import StellarSdk from "@stellar/stellar-sdk";
 import {
@@ -179,7 +180,7 @@ export class CredentialService {
           Number(process.hrtime.bigint() - txStart) / 1e9,
         );
         logger.error(
-          { err, userId, courseId },
+          { err, requestId: getRequestId(), userId, courseId },
           "On-chain credential mint failed",
         );
         throw new Error("Failed to mint credential on-chain");
@@ -244,6 +245,14 @@ export class CredentialService {
           data,
         });
       } catch (err) {
+        // Reported back to the caller in `results` below, so this isn't a
+        // silent swallow from the client's perspective — but it's still
+        // worth a warn here for operational visibility into which
+        // courses/reasons show up across batch requests.
+        logger.warn(
+          { err, userId, courseId: submission.courseId, submissionId: submission.submissionId },
+          "Batch credential mint: failed to mint one credential",
+        );
         results.push({
           ...submission,
           success: false,

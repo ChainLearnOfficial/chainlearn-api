@@ -56,6 +56,49 @@ export class StellarError extends AppError {
   }
 }
 
+/** Which layer produced the error — lets callers branch without re-parsing
+ *  the underlying SDK error shape themselves (#479). */
+export type StellarErrorKind = "network" | "horizon" | "soroban";
+
+export interface StellarResultCodes {
+  transaction?: string;
+  operations?: string[];
+}
+
+/**
+ * Structured Stellar client error (#479). Preserves the diagnostic context
+ * that `catch (err: any)` + a generic `StellarError` message used to throw
+ * away: which layer failed, the HTTP status if any, Horizon's result codes,
+ * and the raw Soroban RPC error string. `cause` carries the original
+ * unknown error for logging.
+ */
+export class StellarClientError extends StellarError {
+  public readonly kind: StellarErrorKind;
+  public readonly httpStatus?: number;
+  public readonly resultCodes?: StellarResultCodes;
+  public readonly sorobanError?: string;
+
+  constructor(
+    message: string,
+    kind: StellarErrorKind,
+    details?: {
+      httpStatus?: number;
+      resultCodes?: StellarResultCodes;
+      sorobanError?: string;
+      cause?: unknown;
+    },
+  ) {
+    super(message);
+    this.kind = kind;
+    this.httpStatus = details?.httpStatus;
+    this.resultCodes = details?.resultCodes;
+    this.sorobanError = details?.sorobanError;
+    if (details?.cause !== undefined) {
+      this.cause = details.cause;
+    }
+  }
+}
+
 export class RateLimitError extends AppError {
   /** Seconds the client should wait before retrying, if known. When set,
    *  the error handler surfaces this as a `Retry-After` response header. */

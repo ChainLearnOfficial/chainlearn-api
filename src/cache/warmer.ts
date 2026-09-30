@@ -1,4 +1,5 @@
 import { logger } from "../utils/logger.js";
+import { getRequestId } from "../utils/request-context.js";
 import { courseService } from "../modules/courses/course.service.js";
 
 /**
@@ -42,10 +43,10 @@ export async function warmCourseCache(): Promise<void> {
     }
 
     logger.info(
-      { pagesWarmed: totalPages },
+      { requestId: getRequestId(), pagesWarmed: totalPages },
       "Course listing cache successfully warmed",
     );
   } catch (err) {
-    logger.error({ err }, "Cache warming cycle failed step execution");
+    logger.error({ err, requestId: getRequestId() }, "Cache warming cycle failed step execution");
   }
 }

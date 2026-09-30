@@ -5,13 +5,13 @@ import {
   getNetworkPassphrase,
 } from "../config/stellar.js";
 import { logger } from "../utils/logger.js";
-import { StellarError } from "../utils/errors.js";
 import {
   stellarRetry,
   circuitBreakerExecute,
   withTimeout,
 } from "./resilience.js";
 import { getRequestId } from "../utils/request-context.js";
+import { getHorizonEnvelopeXdr, getHttpStatus, toStellarClientError } from "./errors.js";
 
 const READ_TIMEOUT_MS = 10_000;
 const WRITE_TIMEOUT_MS = 30_000;
@@ -63,7 +63,8 @@ export class StellarClient {
   async getAccount(
     publicKey: string,
   ): Promise<StellarSdk.Horizon.AccountResponse> {
-    logger.debug({ requestId: getRequestId(), publicKey }, "Loading Stellar account");
+    const requestId = getRequestId();
+    logger.debug({ requestId, publicKey }, "Loading Stellar account");
     try {
       return await circuitBreakerExecute(
         () =>
@@ -73,8 +74,9 @@ export class StellarClient {
         "read"
       );
     } catch (err) {
-      logger.error({ err, publicKey }, "Failed to load Stellar account");
-      throw new StellarError(`Account ${publicKey} not found or unreachable`);
+      const clientError = toStellarClientError(err, `Account ${publicKey} not found or unreachable`);
+      logger.error({ requestId, err, publicKey, kind: clientError.kind }, "Failed to load Stellar account");
+      throw clientError;
     }
   }
 
@@ -108,7 +110,18 @@ export class StellarClient {
         extras?.result_codes
           ? `Tx failed: ${JSON.stringify(extras.result_codes)}`
           : "Transaction submission failed",
+    } catch (err) {
+      const clientError = toStellarClientError(err, "Transaction submission failed");
+      logger.error(
+        {
+          requestId,
+          resultCodes: clientError.resultCodes,
+          envelope: getHorizonEnvelopeXdr(err),
+          kind: clientError.kind,
+        },
+        "Transaction failed",
       );
+      throw clientError;
     }
   }
 
@@ -119,7 +132,8 @@ export class StellarClient {
   async callContract(
     tx: StellarSdk.Transaction,
   ): Promise<StellarSdk.rpc.Api.SimulateTransactionResponse> {
-    logger.debug({ requestId: getRequestId() }, "Simulating Stellar contract call");
+    const requestId = getRequestId();
+    logger.debug({ requestId }, "Simulating Stellar contract call");
     try {
       return await circuitBreakerExecute(() =>
         stellarRetry.execute(() =>
@@ -127,8 +141,9 @@ export class StellarClient {
         ),
       );
     } catch (err) {
-      logger.error({ err }, "Soroban contract call failed");
-      throw new StellarError("Contract call failed");
+      const clientError = toStellarClientError(err, "Contract call failed");
+      logger.error({ requestId, err, kind: clientError.kind }, "Soroban contract call failed");
+      throw clientError;
     }
   }
 
@@ -139,7 +154,8 @@ export class StellarClient {
    * silently misled into treating an unreachable network as a missing account.
    */
   async accountExists(publicKey: string): Promise<boolean> {
-    logger.debug({ requestId: getRequestId(), publicKey }, "Checking Stellar account");
+    const requestId = getRequestId();
+    logger.debug({ requestId, publicKey }, "Checking Stellar account");
     try {
       await circuitBreakerExecute(
         () =>
@@ -157,6 +173,11 @@ export class StellarClient {
       throw new StellarError(
         `Could not verify account ${publicKey}: ${unknownErr.message ?? String(err)}`,
       );
+    } catch (err) {
+      if (getHttpStatus(err) === 404) return false;
+      const clientError = toStellarClientError(err, `Could not verify account ${publicKey}`);
+      logger.error({ requestId, err, publicKey, kind: clientError.kind }, "accountExists check failed");
+      throw clientError;
     }
   }
 
@@ -173,7 +194,8 @@ export class StellarClient {
    * Used by the pending-reward reconciliation job (#207).
    */
   async getTransaction(txHash: string): Promise<{ status: "SUCCESS" | "FAILED" | "NOT_FOUND" }> {
-    logger.debug({ requestId: getRequestId(), txHash }, "Fetching Stellar transaction");
+    const requestId = getRequestId();
+    logger.debug({ requestId, txHash }, "Fetching Stellar transaction");
     try {
       const result = await withTimeout(
         this.soroban.getTransaction(txHash),
@@ -189,6 +211,11 @@ export class StellarClient {
       if (status === 404) return { status: "NOT_FOUND" };
       logger.error({ err, txHash }, "getTransaction failed");
       throw new StellarError(`Could not fetch transaction ${txHash}`);
+    } catch (err) {
+      if (getHttpStatus(err) === 404) return { status: "NOT_FOUND" };
+      const clientError = toStellarClientError(err, `Could not fetch transaction ${txHash}`);
+      logger.error({ requestId, err, txHash, kind: clientError.kind }, "getTransaction failed");
+      throw clientError;
     }
   }
 
@@ -217,9 +244,8 @@ export class StellarClient {
           ),
         "read"
       );
-    } catch (err: any) {
-      const status = err?.response?.status ?? err?.status;
-      if (status === 404) {
+    } catch (err) {
+      if (getHttpStatus(err) === 404) {
         return { status: "pending", ledger: null, confirmations: null };
       }
       logger.warn({ err, txHash }, "Horizon transaction lookup failed — reporting pending");
@@ -254,6 +280,7 @@ export class StellarClient {
       // Use a shorter timeout for health checks (3s) to fail fast if RPC is unreachable
       await withTimeout(this.soroban.getLatestLedger(), 3_000);
     } catch (err: unknown) {
+    } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       logger.warn({ message }, "Soroban RPC health check failed");
       throw err;

@@ -1,10 +1,12 @@
 import crypto from "node:crypto";
 import { eq, desc, count, sql } from "drizzle-orm";
+import { eq, and, desc, count, lt, or, sql } from "drizzle-orm";
 import { db } from "../../config/database.js";
 import { webhooks, webhookAttempts } from "../../database/schema.js";
 import { NotFoundError } from "../../utils/errors.js";
 import { logger } from "../../utils/logger.js";
 import { auditLog } from "../../audit/index.js";
+import { decodeCursor, encodeCursor } from "../../utils/cursor-pagination.js";
 import type {
   CreateWebhookBody,
   UpdateWebhookBody,
@@ -155,11 +157,18 @@ export class WebhookService {
   /**
    * Get attempts for a webhook (paginated).
    */
+  /**
+   * Accepts either `page` (backward-compatible, O(offset)) or `cursor`
+   * (#482, O(1) regardless of how deep the client has paged) — `cursor`
+   * wins if both are present. See cursor-pagination.ts for why the cursor
+   * encodes (createdAt, id) rather than id alone.
+   */
   async getWebhookAttempts(
     webhookId: string,
     page: number,
-    limit: number
-  ): Promise<{ attempts: WebhookAttemptResponse[]; total: number }> {
+    limit: number,
+    cursorParam?: string,
+  ): Promise<{ attempts: WebhookAttemptResponse[]; total: number; nextCursor: string | null }> {
     // Verify webhook exists
     const [webhook] = await db
       .select()
@@ -170,7 +179,18 @@ export class WebhookService {
       throw new NotFoundError("Webhook");
     }
 
-    const offset = (page - 1) * limit;
+    const cursor = cursorParam ? decodeCursor(cursorParam) : null;
+    const offset = cursor ? 0 : (page - 1) * limit;
+
+    const where = cursor
+      ? and(
+          eq(webhookAttempts.webhookId, webhookId),
+          or(
+            lt(webhookAttempts.createdAt, cursor.createdAt),
+            and(eq(webhookAttempts.createdAt, cursor.createdAt), lt(webhookAttempts.id, cursor.id)),
+          ),
+        )
+      : eq(webhookAttempts.webhookId, webhookId);
 
     const totalResult = await db
       .select({ count: count() })
@@ -180,14 +200,19 @@ export class WebhookService {
     const rows = await db
       .select()
       .from(webhookAttempts)
-      .where(eq(webhookAttempts.webhookId, webhookId))
-      .orderBy(desc(webhookAttempts.createdAt))
-      .limit(limit)
+      .where(where)
+      .orderBy(desc(webhookAttempts.createdAt), desc(webhookAttempts.id))
+      .limit(limit + 1)
       .offset(offset);
 
+    const hasMore = rows.length > limit;
+    const pageRows = hasMore ? rows.slice(0, limit) : rows;
+    const lastRow = pageRows[pageRows.length - 1];
+
     return {
-      attempts: rows.map((a) => this.toAttemptResponse(a)),
+      attempts: pageRows.map((a) => this.toAttemptResponse(a)),
       total: totalResult[0]?.count ?? 0,
+      nextCursor: hasMore && lastRow ? encodeCursor(lastRow) : null,
     };
   }
 

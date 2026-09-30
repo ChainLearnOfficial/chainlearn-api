@@ -6,7 +6,9 @@ import {
 } from "../config/stellar.js";
 import { stellarClient } from "./client.js";
 import { logger } from "../utils/logger.js";
-import { StellarError } from "../utils/errors.js";
+import { StellarError, StellarClientError } from "../utils/errors.js";
+import { toStellarClientError } from "./errors.js";
+import { getRequestId } from "../utils/request-context.js";
 
 import { sequenceCache } from "./sequence-cache.js";
 import { withAccountLock } from "../utils/account-lock.js";
@@ -18,8 +20,9 @@ const MAX_SEQ_RETRIES = 3;
  * Uses multiple detection methods for robustness across SDK versions.
  */
 function isBadSeqError(err: StellarError): boolean {
-  // Primary detection: string matching (backwards compatible)
-  if (err.message.includes("bad_seq") || err.message.includes("tx_bad_seq")) {
+  // Robust detection: a StellarClientError (#479) carries Horizon's parsed
+  // result codes directly, no unsafe property access needed.
+  if (err instanceof StellarClientError && err.resultCodes?.transaction === "tx_bad_seq") {
     return true;
   }
 
@@ -40,6 +43,9 @@ function isBadSeqError(err: StellarError): boolean {
   }
 
   return false;
+  // Fallback string matching, for a StellarError that didn't go through
+  // toStellarClientError (e.g. constructed directly elsewhere).
+  return err.message.includes("bad_seq") || err.message.includes("tx_bad_seq");
 }
 
 /**
@@ -52,6 +58,7 @@ export async function invokeContract(
   signer?: StellarSdk.Keypair
 ): Promise<string> {
   const keypair = signer ?? getPlatformKeypair();
+  const requestId = getRequestId();
 
   return withAccountLock(keypair.publicKey(), async () => {
     const contract = new StellarSdk.Contract(contractId);
@@ -76,8 +83,10 @@ export async function invokeContract(
         const soroban = getSorobanServer();
         const simResult = await soroban.simulateTransaction(txForSim);
         if (StellarSdk.rpc.Api.isSimulationError(simResult)) {
-          logger.error({ error: simResult.error }, "Simulation failed");
-          throw new StellarError(`Simulation failed: ${simResult.error}`);
+          logger.error({ requestId, error: simResult.error }, "Simulation failed");
+          throw new StellarClientError(`Simulation failed: ${simResult.error}`, "soroban", {
+            sorobanError: simResult.error,
+          });
         }
 
         // #218: Compute the total fee from the simulation result.
@@ -109,15 +118,20 @@ export async function invokeContract(
         const result = await stellarClient.submitTransaction(preparedTx);
         return result.hash;
       } catch (err: unknown) {
+      } catch (err) {
         if (err instanceof StellarError && isBadSeqError(err)) {
           await sequenceCache.invalidate(keypair.publicKey());
-          logger.warn({ attempt, err }, "Sequence number conflict, retrying with fresh sequence");
+          logger.warn({ requestId, attempt, err }, "Sequence number conflict, retrying with fresh sequence");
           continue;
         }
-        throw err;
+        if (err instanceof StellarError) throw err;
+        throw toStellarClientError(err, "Contract invocation failed");
       }
     }
-    throw new StellarError(`Failed after ${MAX_SEQ_RETRIES} attempts due to sequence conflicts`);
+    throw new StellarClientError(
+      `Failed after ${MAX_SEQ_RETRIES} attempts due to sequence conflicts`,
+      "horizon",
+    );
   });
 }
 

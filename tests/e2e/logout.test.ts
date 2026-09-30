@@ -9,10 +9,10 @@
  */
 import { test, describe, expect, beforeEach, afterEach } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { buildApp } from "../server.js";
-import { db } from "../config/database.js";
-import { redis } from "../config/redis.js";
-import { users } from "../database/schema.js";
+import { buildApp } from "../../src/server.js";
+import { db } from "../../src/config/database.js";
+import { redis } from "../../src/config/redis.js";
+import { users } from "../../src/database/schema.js";
 import { eq } from "drizzle-orm";
 
 describe("POST /api/v1/auth/logout (#284)", () => {

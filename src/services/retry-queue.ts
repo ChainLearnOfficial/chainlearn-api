@@ -242,8 +242,15 @@ export async function getQueuedRewardJobs(): Promise<QueuedRewardJob[]> {
         position: i / 2,
         readyAt: Number(raw[i + 1]),
       });
-    } catch {
-      // Malformed entry — dequeueReadyBatch handles moving it to the DLQ.
+    } catch (err) {
+      // Malformed entry — dequeueReadyBatch handles moving it to the DLQ;
+      // this is just a read-only introspection path so it skips rather
+      // than throwing. Still logged here since a malformed queue entry is
+      // an anomaly worth tracking even though it self-heals elsewhere.
+      logger.warn({ err }, "Skipped malformed reward retry queue entry");
+      // this read-only view just can't render it, so log rather than
+      // silently omitting it from what the caller sees.
+      logger.warn({ err, index: i / 2 }, "Skipping malformed queue entry in getQueuedRewardJobs");
     }
   }
   return jobs;

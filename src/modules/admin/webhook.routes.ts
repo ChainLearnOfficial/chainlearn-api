@@ -8,6 +8,7 @@ import {
   listWebhooksSchema,
 } from "./webhook.types.js";
 import { z } from "zod";
+import { ROUTE_BODY_LIMITS } from "../../config/route-body-limits.js";
 
 const idParamSchema = z.object({
   id: z.string().uuid(),
@@ -19,6 +20,7 @@ export async function webhookRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Body: import("./webhook.types.js").CreateWebhookBody }>(
     "/",
     {
+      config: { bodyLimit: ROUTE_BODY_LIMITS.webhookCreate },
       preHandler: [validate({ body: createWebhookSchema })],
       schema: {
         description: "Create a new webhook",
@@ -143,13 +145,14 @@ export async function webhookRoutes(app: FastifyInstance): Promise<void> {
 
   app.get<{
     Params: z.infer<typeof idParamSchema>;
-    Querystring: { page?: number; limit?: number };
+    Querystring: { page?: number; limit?: number; cursor?: string };
   }>(
     "/:id/attempts",
     {
       preHandler: [validate({ params: idParamSchema })],
       schema: {
-        description: "Get webhook delivery attempts",
+        description:
+          "Get webhook delivery attempts. Accepts either page or cursor (from a previous response's pagination.nextCursor) — cursor is O(1) regardless of depth and takes precedence over page when both are given (#482)",
         tags: ["webhooks"],
         security: [{ bearerAuth: [] }],
         params: {
@@ -162,6 +165,7 @@ export async function webhookRoutes(app: FastifyInstance): Promise<void> {
           properties: {
             page: { type: "integer", minimum: 1, default: 1 },
             limit: { type: "integer", minimum: 1, maximum: 50, default: 20 },
+            cursor: { type: "string" },
           },
         },
       } as FastifySchema,

@@ -113,6 +113,11 @@ export class StellarClient {
   getHorizonServer(): StellarSdk.Horizon.Server {
     return this.horizon;
   }
+
+  /** Expose Soroban RPC server for health checks. */
+  getSorobanServer(): StellarSdk.rpc.Server {
+    return this.soroban;
+  }
 }
 
 export const stellarClient = new StellarClient();

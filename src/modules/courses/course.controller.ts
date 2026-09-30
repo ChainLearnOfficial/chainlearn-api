@@ -1,7 +1,7 @@
 import type { FastifyRequest, FastifyReply } from "fastify";
 import { courseService } from "./course.service.js";
 import type { AuthenticatedRequest } from "../../middleware/auth.js";
-import type { ListCoursesQuery, CourseIdParams } from "./course.types.js";
+import type { ListCoursesQuery, CourseIdParams, RecommendationsQuery } from "./course.types.js";
 
 export class CourseController {
   /**
@@ -57,6 +57,29 @@ export class CourseController {
     reply.status(201).send({
       success: true,
       message: "Enrolled successfully",
+    });
+  }
+
+  /**
+   * GET /api/courses/recommended
+   * Return a personalised ranked list of courses for the authenticated user.
+   * Requires auth — recommendations are user-specific.
+   */
+  async getRecommendations(
+    request: FastifyRequest<{ Querystring: RecommendationsQuery }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { authUser } = request as AuthenticatedRequest;
+    const { limit } = request.query;
+    const result = await courseService.getRecommendedCourses(authUser.id, limit);
+
+    reply.send({
+      success: true,
+      data: result.courses,
+      meta: {
+        inferredDifficulty: result.inferredDifficulty,
+        count: result.courses.length,
+      },
     });
   }
 }

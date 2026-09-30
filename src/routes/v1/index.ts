@@ -6,6 +6,7 @@ import { courseRoutes } from "../../modules/courses/course.routes.js";
 import { quizRoutes } from "../../modules/quizzes/quiz.routes.js";
 import { rewardRoutes } from "../../modules/rewards/reward.routes.js";
 import { credentialRoutes } from "../../modules/credentials/credential.routes.js";
+import { adminUsersRoutes } from "../../modules/admin/admin-users.routes.js";
 
 export async function registerV1Routes(app: FastifyInstance) {
   await app.register(authRoutes, { prefix: "/auth" });
@@ -14,4 +15,5 @@ export async function registerV1Routes(app: FastifyInstance) {
   await app.register(quizRoutes, { prefix: "/quizzes" });
   await app.register(rewardRoutes, { prefix: "/rewards" });
   await app.register(credentialRoutes, { prefix: "/credentials" });
+  await app.register(adminUsersRoutes, { prefix: "/admin/users" });
 }

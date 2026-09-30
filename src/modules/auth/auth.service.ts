@@ -7,6 +7,7 @@ import { getNetworkPassphrase } from "../../config/stellar.js";
 import { UnauthorizedError } from "../../utils/errors.js";
 import { logger } from "../../utils/logger.js";
 import { eq } from "drizzle-orm";
+import { auditLog } from "../../audit/index.js";
 import type { ChallengeResponse, AuthResponse } from "./auth.types.js";
 
 const CHALLENGE_TTL_SECONDS = 300; // 5 minutes
@@ -78,6 +79,22 @@ export class AuthService {
    * Looks up or creates the user record.
    */
   async verifyChallenge(
+    stellarAddress: string,
+    challengeId: string,
+    signedChallenge: string
+  ): Promise<AuthResponse> {
+    try {
+      return await this._verifyChallenge(stellarAddress, challengeId, signedChallenge);
+    } catch (err) {
+      // Audit every authentication failure in one place so individual
+      // throw sites don't each need their own auditLog call. Re-throw
+      // unchanged so the HTTP layer still returns the correct status.
+      auditLog("auth.login_failed", { stellarAddress });
+      throw err;
+    }
+  }
+
+  private async _verifyChallenge(
     stellarAddress: string,
     challengeId: string,
     signedChallenge: string
@@ -204,6 +221,8 @@ export class AuthService {
       isNewUser = true;
       logger.info({ stellarAddress, userId: user.id }, "New user created");
     }
+
+    auditLog("auth.login", { userId: user.id, stellarAddress });
 
     return {
       token: "", // Will be set by controller

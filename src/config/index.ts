@@ -37,6 +37,24 @@ const envSchema = z.object({
   RATE_LIMIT_MAX: z.coerce.number().default(100),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().default(60_000),
 
+  // Admin API — a static bearer token that must be supplied on every request
+  // to /api/admin/*. Kept separate from JWT_SECRET so admin credentials can
+  // be rotated independently of user-facing auth.
+  ADMIN_API_KEY: z
+    .string()
+    .min(32, "ADMIN_API_KEY must be at least 32 characters")
+    .refine(
+      (val) => val !== "admin-secret" && !val.includes("change-in-production"),
+      "ADMIN_API_KEY must be a real secret, not a placeholder"
+    ),
+
+  // Audit log buffer — entries are accumulated in memory and flushed to the
+  // database periodically or when the buffer reaches capacity.
+  // AUDIT_BUFFER_SIZE: max entries before an early flush is triggered.
+  // AUDIT_FLUSH_INTERVAL_MS: how often the background timer fires (ms).
+  AUDIT_BUFFER_SIZE: z.coerce.number().int().min(1).default(100),
+  AUDIT_FLUSH_INTERVAL_MS: z.coerce.number().int().min(100).default(5_000),
+
   // AI service (chainlearn-ai) used for quiz generation
   AI_SERVICE_URL: z.string().url().default("http://localhost:8000"),
   AI_TIMEOUT_MS: z.coerce.number().default(30_000),
@@ -68,6 +86,7 @@ function loadConfig(): Env {
         STELLAR_QUIZ_CONTRACT_ID: process.env.STELLAR_QUIZ_CONTRACT_ID || "test",
         STELLAR_REWARD_CONTRACT_ID: process.env.STELLAR_REWARD_CONTRACT_ID || "test",
         STELLAR_CREDENTIAL_CONTRACT_ID: process.env.STELLAR_CREDENTIAL_CONTRACT_ID || "test",
+        ADMIN_API_KEY: process.env.ADMIN_API_KEY || "test-admin-api-key-that-is-at-least-32-chars",
       });
     }
     console.error(

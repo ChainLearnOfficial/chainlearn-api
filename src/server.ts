@@ -27,6 +27,7 @@ import {
 } from "./jobs/cleanup-idempotency.js";
 import { processRewardClaim } from "./modules/rewards/reward.service.js";
 import { warmCourseCache } from "./cache/warmer.js";
+import { startAuditLogger, stopAuditLogger } from "./audit/index.js";
 
 // Versioned route modules
 import { registerVersionedRoutes } from "./routes/versioning.js";
@@ -93,27 +94,81 @@ async function buildApp() {
   registerErrorHandler(app);
 
   // ─── Health Check ───────────────────────────────────────────────────────
-  app.get("/health", async (_request, reply) => {
-    const [dbCheck, redisCheck, stellarCheck] = await Promise.allSettled([
+  //
+  // Three tiers of health checks:
+  //
+  //   GET /health/live  — Liveness: is the process alive?
+  //                       Always returns 200. Used by Kubernetes liveness probes
+  //                       to decide whether to restart the container.
+  //
+  //   GET /health/ready — Readiness: can the API serve requests?
+  //                       Returns 200 only when DB and Redis are reachable.
+  //                       Used by load balancers / Kubernetes readiness probes.
+  //                       Deliberately excludes Stellar — an outage of the
+  //                       blockchain network must not pull the API out of rotation
+  //                       since course browsing, quiz taking, and other non-Stellar
+  //                       features remain fully functional.
+  //
+  //   GET /health       — Full health: detailed status for monitoring dashboards.
+  //                       Checks DB, Redis, Stellar Horizon, and Soroban RPC.
+  //                       Returns 503 when any dependency is degraded so that
+  //                       dashboards and alerting tools can surface the issue,
+  //                       but this endpoint should NOT be wired up to probes that
+  //                       trigger restarts or traffic removal.
+
+  /** Liveness probe — returns 200 as long as the process is running. */
+  app.get("/health/live", async () => ({ status: "ok" }));
+
+  /**
+   * Readiness probe — returns 200 only when core infrastructure (DB + Redis)
+   * is reachable. Stellar is intentionally excluded so that blockchain outages
+   * do not cause load balancers to stop routing traffic to healthy instances.
+   */
+  app.get("/health/ready", async (_request, reply) => {
+    const [dbCheck, redisCheck] = await Promise.allSettled([
       db.execute(sql`SELECT 1`),
       redis.ping(),
-      stellarClient.getHorizonServer().root(),
     ]);
 
-    const allHealthy = [dbCheck, redisCheck, stellarCheck].every(
+    const ready =
+      dbCheck.status === "fulfilled" && redisCheck.status === "fulfilled";
+
+    return reply.status(ready ? 200 : 503).send({
+      status: ready ? "ready" : "not_ready",
+      checks: {
+        database: dbCheck.status === "fulfilled" ? "ok" : "error",
+        redis: redisCheck.status === "fulfilled" ? "ok" : "error",
+      },
+    });
+  });
+
+  /**
+   * Full health — detailed status including external Stellar dependencies.
+   * Intended for monitoring dashboards and alerting, not for automated probes
+   * that restart containers or remove instances from rotation.
+   */
+  app.get("/health", async (_request, reply) => {
+    const [dbCheck, redisCheck, horizonCheck, sorobanCheck] =
+      await Promise.allSettled([
+        db.execute(sql`SELECT 1`),
+        redis.ping(),
+        stellarClient.getHorizonServer().root(),
+        stellarClient.getSorobanServer().getHealth(),
+      ]);
+
+    const allHealthy = [dbCheck, redisCheck, horizonCheck, sorobanCheck].every(
       (c) => c.status === "fulfilled",
     );
 
-    const status = allHealthy ? "healthy" : "degraded";
-
     return reply.status(allHealthy ? 200 : 503).send({
-      status,
+      status: allHealthy ? "healthy" : "degraded",
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
       checks: {
         database: dbCheck.status === "fulfilled" ? "ok" : "error",
         redis: redisCheck.status === "fulfilled" ? "ok" : "error",
-        stellar: stellarCheck.status === "fulfilled" ? "ok" : "error",
+        stellar_horizon: horizonCheck.status === "fulfilled" ? "ok" : "error",
+        stellar_soroban: sorobanCheck.status === "fulfilled" ? "ok" : "error",
       },
     });
   });
@@ -121,29 +176,6 @@ async function buildApp() {
   app.get("/metrics", { preHandler: authGuard }, async (_request, reply) => {
     reply.header("Content-Type", registry.contentType);
     return reply.send(await registry.metrics());
-  });
-
-  app.get("/health/live", async () => ({ status: "ok" }));
-
-  app.get("/health/ready", async (_request, reply) => {
-    const [dbCheck, redisCheck, stellarCheck] = await Promise.allSettled([
-      db.execute(sql`SELECT 1`),
-      redis.ping(),
-      stellarClient.getHorizonServer().root(),
-    ]);
-
-    const allHealthy = [dbCheck, redisCheck, stellarCheck].every(
-      (c) => c.status === "fulfilled",
-    );
-
-    return reply.status(allHealthy ? 200 : 503).send({
-      status: allHealthy ? "ready" : "not_ready",
-      checks: {
-        database: dbCheck.status === "fulfilled" ? "ok" : "error",
-        redis: redisCheck.status === "fulfilled" ? "ok" : "error",
-        stellar: stellarCheck.status === "fulfilled" ? "ok" : "error",
-      },
-    });
   });
 
   // ─── API Routes ─────────────────────────────────────────────────────────
@@ -157,6 +189,7 @@ async function start() {
 
   startRetryProcessor(processRetryJob);
   startIdempotencyCleanup();
+  startAuditLogger();
 
   let cacheWarmInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -180,6 +213,7 @@ async function start() {
       clearInterval(cacheWarmInterval);
     }
     await app.close();
+    await stopAuditLogger();
     await closeDatabase();
     await closeRedis();
     await shutdownTracing();

@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifySchema } from "fastify";
 import { courseController } from "./course.controller.js";
+import { quizController } from "../quizzes/quiz.controller.js";
 import { authGuard, adminGuard, optionalAuth } from "../../middleware/auth.js";
 import { waitlistController } from "./waitlist.controller.js";
 import { validate } from "../../middleware/validation.js";
@@ -242,6 +243,28 @@ export async function courseRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => courseController.quizAttempts(request, reply)
+  );
+
+  app.get<{ Params: { id: string; moduleId: string } }>(
+    "/:id/modules/:moduleId/quiz-history",
+    {
+      preHandler: [authGuard, adminGuard, validate({ params: moduleParamsSchema })],
+      schema: {
+        description:
+          "Aggregate quiz history for a module across all users: average score, pass rate, total attempts, and score distribution (admin only, cached 5 minutes, #415)",
+        tags: ["admin", "courses"],
+        security: [{ bearerAuth: [] }],
+        params: {
+          type: "object",
+          required: ["id", "moduleId"],
+          properties: {
+            id: { type: "string", format: "uuid" },
+            moduleId: { type: "string", minLength: 1, maxLength: 100 },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => quizController.getModuleQuizHistory(request, reply)
   );
 
   app.post<{ Params: { id: string }; Querystring: import("./course.types.js").EnrollCourseQuery }>(

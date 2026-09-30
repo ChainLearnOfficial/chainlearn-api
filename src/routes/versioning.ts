@@ -1,6 +1,10 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import { registerV1Routes } from "./v1/index.js";
 import { responseEnvelope } from "../middleware/response-envelope.js";
+
+export interface VersionedRequest extends FastifyRequest {
+  apiVersion: string;
+}
 
 export function cacheControlHeader(
   url: string,
@@ -31,7 +35,7 @@ export async function registerVersionedRoutes(app: FastifyInstance) {
   app.register(
     async function v1(app) {
       app.addHook("onRequest", async (request) => {
-        (request as any).apiVersion = "v1";
+        (request as VersionedRequest).apiVersion = "v1";
       });
       app.addHook("onSend", async (request, reply, payload) => {
         const header = cacheControlHeader(request.url, reply.statusCode);

@@ -1,8 +1,8 @@
 import crypto from "node:crypto";
-import { eq, and, desc, count, sql } from "drizzle-orm";
+import { eq, desc, count, sql } from "drizzle-orm";
 import { db } from "../../config/database.js";
 import { webhooks, webhookAttempts } from "../../database/schema.js";
-import { NotFoundError, ConflictError } from "../../utils/errors.js";
+import { NotFoundError } from "../../utils/errors.js";
 import { logger } from "../../utils/logger.js";
 import { auditLog } from "../../audit/index.js";
 import type {
@@ -10,7 +10,9 @@ import type {
   UpdateWebhookBody,
   WebhookResponse,
   WebhookAttemptResponse,
+  WebhookStats,
 } from "./webhook.types.js";
+import type { Webhook, WebhookAttempt } from "../../database/schema.js";
 
 export class WebhookService {
   /**
@@ -58,7 +60,7 @@ export class WebhookService {
       throw new NotFoundError("Webhook");
     }
 
-    const updates: any = {
+    const updates: Partial<Webhook> = {
       updatedAt: new Date(),
     };
 
@@ -221,7 +223,7 @@ export class WebhookService {
   /**
    * Get webhook statistics (success/failure counts, etc.).
    */
-  async getWebhookStats(webhookId: string): Promise<any> {
+  async getWebhookStats(webhookId: string): Promise<WebhookStats> {
     const [webhook] = await db
       .select()
       .from(webhooks)
@@ -257,7 +259,7 @@ export class WebhookService {
     };
   }
 
-  private toResponse(webhook: any): WebhookResponse {
+  private toResponse(webhook: Webhook): WebhookResponse {
     return {
       id: webhook.id,
       url: webhook.url,
@@ -268,7 +270,7 @@ export class WebhookService {
     };
   }
 
-  private toAttemptResponse(attempt: any): WebhookAttemptResponse {
+  private toAttemptResponse(attempt: WebhookAttempt): WebhookAttemptResponse {
     return {
       id: attempt.id,
       webhookId: attempt.webhookId,

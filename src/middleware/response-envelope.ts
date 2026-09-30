@@ -1,4 +1,5 @@
 import type { FastifyRequest, FastifyReply } from "fastify";
+import type { VersionedRequest } from "../routes/versioning.js";
 
 export async function responseEnvelope(
   request: FastifyRequest,
@@ -10,7 +11,7 @@ export async function responseEnvelope(
       const body = JSON.parse(payload);
       if (!body.meta) {
         body.meta = {
-          version: (request as any).apiVersion ?? "v1",
+          version: (request as VersionedRequest).apiVersion ?? "v1",
           timestamp: new Date().toISOString(),
           requestId: request.id,
         };

@@ -1,6 +1,7 @@
 import type { FastifyRateLimitOptions, RateLimitOptions } from "@fastify/rate-limit";
 import type { FastifyRequest } from "fastify";
 import { config } from "../config/index.js";
+import type { AuthenticatedRequest } from "./auth.js";
 
 const errorResponseBuilder = (
   _request: FastifyRequest,
@@ -17,7 +18,7 @@ export function rateLimitOptions(): FastifyRateLimitOptions {
     timeWindow: config.RATE_LIMIT_WINDOW_MS,
     keyGenerator: (request: FastifyRequest) => {
       // Prefer authenticated user id, fall back to IP
-      const authReq = request as any;
+      const authReq = request as AuthenticatedRequest;
       return authReq.authUser?.id ?? request.ip;
     },
     errorResponseBuilder,
@@ -51,7 +52,7 @@ export const claimRateLimit: RateLimitOptions = {
   max: 10,
   timeWindow: "1 minute",
   keyGenerator: (request: FastifyRequest) => {
-    const authReq = request as any;
+    const authReq = request as AuthenticatedRequest;
     return authReq.authUser?.id ?? request.ip;
   },
   errorResponseBuilder,
@@ -65,7 +66,7 @@ export const batchMintRateLimit: RateLimitOptions = {
   max: 5,
   timeWindow: "1 minute",
   keyGenerator: (request: FastifyRequest) => {
-    const authReq = request as any;
+    const authReq = request as AuthenticatedRequest;
     return authReq.authUser?.id ?? request.ip;
   },
   errorResponseBuilder,

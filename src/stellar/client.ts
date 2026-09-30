@@ -67,8 +67,9 @@ export class StellarClient {
       );
       logger.info({ requestId, hash: result.hash }, "Transaction submitted successfully");
       return result;
-    } catch (err: any) {
-      const extras = err.response?.data?.extras;
+    } catch (err: unknown) {
+      const unknownErr = err as { response?: { data?: { extras?: { result_codes?: unknown; envelope_xdr?: string } } } };
+      const extras = unknownErr.response?.data?.extras;
       if (extras) {
         logger.error(
           { resultCodes: extras.result_codes, envelope: extras.envelope_xdr },
@@ -120,12 +121,13 @@ export class StellarClient {
         "read"
       );
       return true;
-    } catch (err: any) {
-      const status = err?.response?.status ?? err?.status;
+    } catch (err: unknown) {
+      const unknownErr = err as { response?: { status?: number }; status?: number; message?: string };
+      const status = unknownErr.response?.status ?? unknownErr.status;
       if (status === 404) return false;
       logger.error({ err, publicKey }, "accountExists check failed");
       throw new StellarError(
-        `Could not verify account ${publicKey}: ${err?.message ?? err}`,
+        `Could not verify account ${publicKey}: ${unknownErr.message ?? String(err)}`,
       );
     }
   }
@@ -153,8 +155,9 @@ export class StellarClient {
         return { status: "SUCCESS" };
       }
       return { status: "FAILED" };
-    } catch (err: any) {
-      const status = err?.response?.status ?? err?.status;
+    } catch (err: unknown) {
+      const unknownErr = err as { response?: { status?: number }; status?: number };
+      const status = unknownErr.response?.status ?? unknownErr.status;
       if (status === 404) return { status: "NOT_FOUND" };
       logger.error({ err, txHash }, "getTransaction failed");
       throw new StellarError(`Could not fetch transaction ${txHash}`);
@@ -166,8 +169,8 @@ export class StellarClient {
     try {
       // Use a shorter timeout for health checks (3s) to fail fast if RPC is unreachable
       await withTimeout(this.soroban.getLatestLedger(), 3_000);
-    } catch (err: any) {
-      const message = err?.message || String(err);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
       logger.warn({ message }, "Soroban RPC health check failed");
       throw err;
     }

@@ -4,7 +4,6 @@ import {
   getNetworkPassphrase,
   getSorobanServer,
 } from "../config/stellar.js";
-import { config } from "../config/index.js";
 import { stellarClient } from "./client.js";
 import { logger } from "../utils/logger.js";
 import { StellarError } from "../utils/errors.js";
@@ -23,16 +22,23 @@ function isBadSeqError(err: StellarError): boolean {
   if (err.message.includes("bad_seq") || err.message.includes("tx_bad_seq")) {
     return true;
   }
-  
+
   // Robust detection: check Horizon response structure
-  const response = (err as any)?.response;
-  if (response?.status === 400) {
-    const resultCodes = response?.data?.extras?.result_codes;
-    if (resultCodes?.transaction === "tx_bad_seq") {
-      return true;
+  const unknownErr = err as unknown;
+  if (
+    unknownErr &&
+    typeof unknownErr === "object" &&
+    "response" in unknownErr
+  ) {
+    const response = (unknownErr as { response?: { status?: number; data?: { extras?: { result_codes?: { transaction?: string } } } } }).response;
+    if (response?.status === 400) {
+      const resultCodes = response?.data?.extras?.result_codes;
+      if (resultCodes?.transaction === "tx_bad_seq") {
+        return true;
+      }
     }
   }
-  
+
   return false;
 }
 
@@ -102,7 +108,7 @@ export async function invokeContract(
 
         const result = await stellarClient.submitTransaction(preparedTx);
         return result.hash;
-      } catch (err: any) {
+      } catch (err: unknown) {
         if (err instanceof StellarError && isBadSeqError(err)) {
           await sequenceCache.invalidate(keypair.publicKey());
           logger.warn({ attempt, err }, "Sequence number conflict, retrying with fresh sequence");

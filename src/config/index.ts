@@ -1,5 +1,6 @@
 import { z } from "zod";
 import "dotenv/config";
+import { logger } from "../utils/logger.js";
 
 const envSchema = z.object({
   NODE_ENV: z
@@ -96,9 +97,11 @@ function loadConfig(): Env {
       // In test mode, warn but don't exit — tests mock what they need.
       // Merge with process.env so CI-provided values (DATABASE_URL, REDIS_URL, etc.)
       // are preserved; only truly missing vars get test defaults.
-      console.warn(
-        "Missing env vars in test mode (expected if mocking config):",
-        result.error.flatten().fieldErrors
+      logger.warn(
+        {
+          fieldErrors: result.error.flatten().fieldErrors,
+        },
+        "Missing env vars in test mode (expected if mocking config)"
       );
       return envSchema.parse({
         DATABASE_URL: process.env.DATABASE_URL || "postgresql://chainlearn_test:test_password@localhost:5432/chainlearn_test",
@@ -119,9 +122,11 @@ function loadConfig(): Env {
         PUBLIC_BASE_URL: process.env.PUBLIC_BASE_URL,
       });
     }
-    console.error(
-      "Invalid environment variables:",
-      result.error.flatten().fieldErrors
+    logger.error(
+      {
+        fieldErrors: result.error.flatten().fieldErrors,
+      },
+      "Invalid environment variables"
     );
     process.exit(1);
   }

@@ -326,6 +326,11 @@ export const webhookAttempts = pgTable(
   ]
 );
 
+// ─── Type exports for use in services ────────────────────────────────────────
+
+export type Webhook = typeof webhooks.$inferSelect;
+export type WebhookAttempt = typeof webhookAttempts.$inferSelect;
+
 // ─── Audit Logs ─────────────────────────────────────────────────────────────
 export const auditLogs = pgTable(
   "audit_logs",

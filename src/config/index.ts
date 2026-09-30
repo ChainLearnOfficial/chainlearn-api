@@ -1,4 +1,6 @@
 import { z } from "zod";
+import "dotenv/config";
+import { logger } from "../utils/logger.js";
 import dotenv from "dotenv";
 
 // Test mode gets its own optional .env.test file (#475), gitignored like
@@ -163,6 +165,12 @@ function loadConfig(): Env {
 
       // In test mode, warn but don't exit — tests mock what they need.
       // Merge with process.env so CI-provided values (DATABASE_URL, REDIS_URL, etc.)
+      // are preserved; only truly missing vars get test defaults.
+      logger.warn(
+        {
+          fieldErrors: result.error.flatten().fieldErrors,
+        },
+        "Missing env vars in test mode (expected if mocking config)"
       // are preserved; only non-critical vars get obviously-fake test defaults.
       // Every field is passed through from process.env (populated above by
       // real environment variables, then .env.test, in that precedence)
@@ -178,6 +186,14 @@ function loadConfig(): Env {
         DATABASE_URL: process.env.DATABASE_URL,
         REDIS_URL: process.env.REDIS_URL || "redis://localhost:6379",
         CORS_ORIGINS: process.env.CORS_ORIGINS,
+        JWT_SECRET:
+          process.env.JWT_SECRET || "test-secret-key-that-is-at-least-sixty-four-characters-long-for-tests",
+        STELLAR_HORIZON_URL: process.env.STELLAR_HORIZON_URL || "https://horizon-testnet.stellar.org",
+        STELLAR_SOROBAN_RPC_URL: process.env.STELLAR_SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org",
+        STELLAR_PLATFORM_SECRET: process.env.STELLAR_PLATFORM_SECRET || "SBZVMB74Z76QZ3ZQY6ADDING6S5AIJWXE3MVRULCNPG7ZBJRYUX3CBNN",
+        STELLAR_QUIZ_CONTRACT_ID: process.env.STELLAR_QUIZ_CONTRACT_ID || "CB6Q2YKQQHH7GV7CU5RZDYM5S5OE2GABYLG5IY6YO5XLBAALBQKXYB53",
+        STELLAR_REWARD_CONTRACT_ID: process.env.STELLAR_REWARD_CONTRACT_ID || "CBAKHFY4SIBRIVYH2Y2QDUIUZPGYGS4B26YBHC6RLV5QZ7OHH5FOF55T",
+        STELLAR_CREDENTIAL_CONTRACT_ID: process.env.STELLAR_CREDENTIAL_CONTRACT_ID || "CD4ZJWLPGYLCYR7G5DZQ4EJWVMMF5VXU5Z2ECRSKGWV6GBV5S3F52K7",
         JWT_SECRET: process.env.JWT_SECRET,
         STELLAR_HORIZON_URL:
           process.env.STELLAR_HORIZON_URL ||
@@ -213,9 +229,11 @@ function loadConfig(): Env {
           process.env.STELLAR_CREDENTIAL_CONTRACT_ID || TEST_FALLBACKS.STELLAR_CREDENTIAL_CONTRACT_ID,
       });
     }
-    console.error(
-      "Invalid environment variables:",
-      result.error.flatten().fieldErrors
+    logger.error(
+      {
+        fieldErrors: result.error.flatten().fieldErrors,
+      },
+      "Invalid environment variables"
     );
     process.exit(1);
   }

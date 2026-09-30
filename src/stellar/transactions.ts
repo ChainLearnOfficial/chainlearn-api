@@ -4,7 +4,6 @@ import {
   getNetworkPassphrase,
   getSorobanServer,
 } from "../config/stellar.js";
-import { config } from "../config/index.js";
 import { stellarClient } from "./client.js";
 import { logger } from "../utils/logger.js";
 import { StellarError, StellarClientError } from "../utils/errors.js";
@@ -27,6 +26,23 @@ function isBadSeqError(err: StellarError): boolean {
     return true;
   }
 
+  // Robust detection: check Horizon response structure
+  const unknownErr = err as unknown;
+  if (
+    unknownErr &&
+    typeof unknownErr === "object" &&
+    "response" in unknownErr
+  ) {
+    const response = (unknownErr as { response?: { status?: number; data?: { extras?: { result_codes?: { transaction?: string } } } } }).response;
+    if (response?.status === 400) {
+      const resultCodes = response?.data?.extras?.result_codes;
+      if (resultCodes?.transaction === "tx_bad_seq") {
+        return true;
+      }
+    }
+  }
+
+  return false;
   // Fallback string matching, for a StellarError that didn't go through
   // toStellarClientError (e.g. constructed directly elsewhere).
   return err.message.includes("bad_seq") || err.message.includes("tx_bad_seq");
@@ -101,6 +117,7 @@ export async function invokeContract(
 
         const result = await stellarClient.submitTransaction(preparedTx);
         return result.hash;
+      } catch (err: unknown) {
       } catch (err) {
         if (err instanceof StellarError && isBadSeqError(err)) {
           await sequenceCache.invalidate(keypair.publicKey());

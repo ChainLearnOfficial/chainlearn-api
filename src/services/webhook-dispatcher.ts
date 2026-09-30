@@ -1,8 +1,9 @@
 import crypto from "node:crypto";
-import { eq } from "drizzle-orm";
+import { eq, and, lte, isNull } from "drizzle-orm";
 import { db } from "../config/database.js";
 import { webhooks, webhookAttempts } from "../database/schema.js";
 import { logger } from "../utils/logger.js";
+import type { WebhookPayload } from "../modules/admin/webhook.types.js";
 import { getRequestId } from "../utils/request-context.js";
 import type { WebhookPayload, WebhookEventType } from "../modules/admin/webhook.types.js";
 
@@ -159,7 +160,7 @@ export async function dispatchWebhook(
       .values({
         webhookId: webhook.id,
         event: payload.event,
-        payload: payload as any,
+        payload: payload as unknown as Record<string, unknown>,
         statusCode: result.statusCode ?? null,
         errorMessage: result.error ?? null,
         succeededAt: result.success ? new Date() : null,
@@ -233,11 +234,11 @@ export async function processWebhookRetries(): Promise<void> {
     .select()
     .from(webhookAttempts)
     .where(
-      (col: any) =>
-        col("next_retry_at") &&
-        col("next_retry_at") <= now &&
-        !col("succeeded_at") &&
-        !col("failed_at")
+      and(
+        lte(webhookAttempts.nextRetryAt, now),
+        isNull(webhookAttempts.succeededAt),
+        isNull(webhookAttempts.failedAt)
+      )
     );
 
   if (readyForRetry.length === 0) return;

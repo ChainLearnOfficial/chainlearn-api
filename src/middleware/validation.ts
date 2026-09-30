@@ -29,7 +29,7 @@ export function validate(schemas: ValidationSchemas) {
       if (!result.success) {
         errors.querystring = formatZodErrors(result.error);
       } else {
-        request.query = result.data as any;
+        request.query = result.data as unknown as typeof request.query;
       }
     }
 
@@ -38,7 +38,7 @@ export function validate(schemas: ValidationSchemas) {
       if (!result.success) {
         errors.params = formatZodErrors(result.error);
       } else {
-        request.params = result.data as any;
+        request.params = result.data as unknown as typeof request.params;
       }
     }
 

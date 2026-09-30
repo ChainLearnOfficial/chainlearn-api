@@ -87,3 +87,12 @@ export interface WebhookAttemptResponse {
   retryCount: number;
   createdAt: Date;
 }
+
+export interface WebhookStats {
+  webhookId: string;
+  totalAttempts: number;
+  succeeded: number;
+  failed: number;
+  pending: number;
+  successRate: number;
+}

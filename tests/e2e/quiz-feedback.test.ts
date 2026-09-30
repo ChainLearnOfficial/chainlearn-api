@@ -1,5 +1,4 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import type { FastifyInstance } from "fastify";
 import { buildApp } from "../../src/server.js";
 
 describe("Quiz Feedback Customization API (Issue #322)", () => {

@@ -750,6 +750,15 @@ export class CourseService {
             : "Enrolled successfully",
         });
       } catch (err) {
+        // Reported back to the caller in `results` below, so this isn't a
+        // silent swallow from the client's perspective — but it's still
+        // worth a warn here for operational visibility into which
+        // courses/reasons show up across batch requests (e.g. spotting a
+        // course that's failing for everyone).
+        logger.warn(
+          { err, userId, courseId },
+          "Batch enrollment: failed to enroll in one course",
+        );
         results.push({
           courseId,
           success: false,

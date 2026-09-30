@@ -188,6 +188,13 @@ export async function revokeRefreshToken(token: string): Promise<void> {
     await revokeRefreshFamily(record.familyId, "logout");
   } catch (err) {
     // Corrupt record — nothing more we can do, and logout still succeeds.
+    // Logged because a corrupt Redis record is an anomaly worth tracking
+    // (e.g. a serialization bug or bit rot), not an expected outcome. Not
+    // logging `raw` itself since it's a serialized auth record.
+    logger.warn(
+      { err, hash },
+      "Corrupt refresh token record encountered during logout revoke",
+    );
     logger.debug({ err }, "Could not revoke refresh token family on logout — corrupt record");
   }
 }

@@ -175,6 +175,33 @@ export class AdminUsersService {
   /**
    * Deduct credits from a user — penalties, corrections, abuse prevention.
    *
+   * #476: this used to be a SELECT-then-UPDATE — read `credits`, check
+   * `credits >= amount` in application code, then a separate UPDATE wrote
+   * `credits - amount`. Between the SELECT and the UPDATE, a concurrent
+   * writer (another deduction, or a reward/grant credit) could change the
+   * balance, so by the time the UPDATE ran the check was stale: the UPDATE's
+   * WHERE clause didn't re-enforce sufficiency, so two concurrent deductions
+   * could both pass their (now-stale) check and together drive credits
+   * negative.
+   *
+   * Fixed the same way grantCredits already avoids the analogous race: one
+   * atomic UPDATE. The WHERE clause enforces `credits >= amount` at the
+   * database level (in addition to the id/not-deleted match), so Postgres's
+   * row lock for the UPDATE is what actually serializes concurrent
+   * deductions — there's no window between "check" and "act" because they're
+   * the same statement. If two deductions race for a balance that can only
+   * afford one of them, exactly one UPDATE matches the WHERE and returns a
+   * row; the other matches nothing and `returning` comes back empty.
+   *
+   * An empty `returning` is then ambiguous between "user doesn't exist /
+   * already soft-deleted" and "balance was insufficient" — the WHERE clause
+   * can't distinguish them, since both make zero rows match. Existence
+   * itself isn't racy the way the balance check was (nothing turns a valid
+   * userId into an invalid one mid-request, short of an admin racing this
+   * same call with a delete), so a preliminary `SELECT id` is safe and lets
+   * the error message be precise without reintroducing the TOCTOU: it can
+   * only ever make this method THROW SOONER on a case that would have
+   * failed anyway, never allow an over-deduction to slip through.
    * The balance check and the deduction are a single atomic UPDATE (#476):
    * `WHERE credits >= amount` guards the row itself, so a concurrent grant or
    * deduction between "check" and "act" can no longer let credits go
@@ -193,6 +220,21 @@ export class AdminUsersService {
     reference?: string,
     actorId?: string,
   ): Promise<CreditDeductResult> {
+    // Existence check only — not racy, see the note above. Deliberately
+    // does NOT read `credits` here: any balance read here would be exactly
+    // the stale value the atomic UPDATE below is written to not depend on.
+    const [existing] = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(and(eq(users.id, userId), isNull(users.deletedAt)));
+
+    if (!existing) {
+      throw new NotFoundError("User");
+    }
+
+    // Single atomic UPDATE: the WHERE clause's `credits >= amount` guard is
+    // enforced by Postgres under the row lock the UPDATE takes, so there is
+    // no gap between checking the balance and acting on it.
     const [updated] = await db
       .update(users)
       .set({
@@ -203,6 +245,7 @@ export class AdminUsersService {
         and(
           eq(users.id, userId),
           isNull(users.deletedAt),
+          sql`${users.credits} >= ${amount}`,
           gte(users.credits, amount),
         ),
       )
@@ -212,6 +255,23 @@ export class AdminUsersService {
       });
 
     if (!updated) {
+      // The preliminary existence check above passed, so getting here means
+      // the WHERE guard's balance condition is what didn't match: the
+      // balance dropped below `amount` sometime between the existence check
+      // and this UPDATE (concurrent deduction) or was already insufficient.
+      // Re-read the current balance only for the error message — this read
+      // has no bearing on the deduction decision itself, which the atomic
+      // UPDATE above already made.
+      const [current] = await db
+        .select({ credits: users.credits })
+        .from(users)
+        .where(eq(users.id, userId));
+
+      throw new ValidationError({
+        amount: [
+          current
+            ? `Insufficient credits. User has ${current.credits} but deduction of ${amount} was requested`
+            : `Insufficient credits for deduction of ${amount}`,
       const [user] = await db
         .select({ credits: users.credits })
         .from(users)

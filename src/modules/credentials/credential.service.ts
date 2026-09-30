@@ -245,6 +245,14 @@ export class CredentialService {
           data,
         });
       } catch (err) {
+        // Reported back to the caller in `results` below, so this isn't a
+        // silent swallow from the client's perspective — but it's still
+        // worth a warn here for operational visibility into which
+        // courses/reasons show up across batch requests.
+        logger.warn(
+          { err, userId, courseId: submission.courseId, submissionId: submission.submissionId },
+          "Batch credential mint: failed to mint one credential",
+        );
         results.push({
           ...submission,
           success: false,

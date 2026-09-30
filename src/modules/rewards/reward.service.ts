@@ -77,6 +77,14 @@ async function handleBadSeqError(submissionId: string, stellarAddress: string): 
     const account = await stellarClient.getAccount(stellarAddress);
     accountSeq = account.sequence;
   } catch (err) {
+    // Intentionally swallow error: sequence fetch is for debugging only —
+    // if Horizon is unavailable, we still want to mark the transaction as
+    // pending. Logged at warn (not error) since this is a best-effort
+    // diagnostic lookup, not the failure itself — the bad_seq warning below
+    // still fires either way.
+    logger.warn(
+      { err, submissionId },
+      "Could not fetch account sequence while handling bad_seq (debugging aid only)",
     // Intentionally swallow error: sequence fetch is for debugging only
     // If Horizon is unavailable, we still want to mark the transaction as pending
     logger.debug(
@@ -130,6 +138,10 @@ async function _executeStellarRewardClaim(claimData: RewardClaimData): Promise<s
     ) {
       return handleBadSeqError(claimData.submissionId, claimData.stellarAddress);
     }
+    logger.error(
+      { err, submissionId: claimData.submissionId, userId: claimData.userId },
+      "Stellar reward claim transaction failed",
+    );
     throw err;
   }
 }
@@ -224,6 +236,10 @@ export async function processRewardClaim(
     try {
       txHash = await _executeStellarRewardClaim(claimData);
     } catch (err: unknown) {
+      logger.error(
+        { err, submissionId, userId },
+        "Reward claim failed — marking submission as rewardFailed",
+      );
       await db
         .update(quizSubmissions)
         .set({ rewardPending: false, rewardFailed: true })

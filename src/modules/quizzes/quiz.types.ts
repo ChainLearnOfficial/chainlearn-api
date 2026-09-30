@@ -421,3 +421,84 @@ export interface AdminQuizDeleteResult {
   claimedRewardsDeleted: number;
   deletedAt: Date;
 }
+
+// ─── Admin: Archive (#416) ───────────────────────────────────────────────────
+
+/** POST body for the dedicated archive endpoint (#416). Defaults to `true`
+ *  (archive) — most callers of a POST .../archive route want to archive;
+ *  passing `{ archived: false }` un-archives through the same route so
+ *  there's one endpoint for the whole toggle rather than a second route
+ *  just for the reverse action. */
+export const archiveModuleQuizSchema = z.object({
+  archived: z.boolean().optional().default(true),
+});
+export type ArchiveModuleQuizBody = z.infer<typeof archiveModuleQuizSchema>;
+
+// ─── Admin: Quiz History & Analytics (#415, #417) ────────────────────────────
+
+/** Score buckets shared by the module quiz-history (#415) and single-quiz
+ *  analytics (#417) endpoints, so the two "score distribution" shapes read
+ *  the same way in the admin UI. Percentage-based (0-100), five even 20-point
+ *  bands — there's no existing bucketing convention elsewhere in the
+ *  codebase (getFeedbackSummary counts by feedback `type`, not by score), so
+ *  this is a new, deliberately simple default. */
+export const SCORE_DISTRIBUTION_BUCKETS = [
+  "0-20",
+  "21-40",
+  "41-60",
+  "61-80",
+  "81-100",
+] as const;
+export type ScoreDistributionBucket = (typeof SCORE_DISTRIBUTION_BUCKETS)[number];
+export type ScoreDistribution = Record<ScoreDistributionBucket, number>;
+
+/** Aggregate stats across every non-superseded submission for every quiz in
+ *  one course module (#415). `quizCount` is how many distinct quizzes (across
+ *  all learners, since AI-generated quizzes are per-learner) contributed. */
+export interface ModuleQuizHistory {
+  courseId: string;
+  moduleId: string;
+  quizCount: number;
+  totalAttempts: number;
+  averageScore: number;
+  passRate: number;
+  scoreDistribution: ScoreDistribution;
+}
+
+/** Per-question performance within one quiz (#417). `averageTimeSeconds` is
+ *  always null today — see the note on QuizAnalytics. `commonWrongAnswer` is
+ *  the selectedIndex most often chosen by learners who got the question
+ *  wrong, or null if nobody answered it incorrectly (or nobody answered it
+ *  at all). */
+export interface QuizQuestionAnalytics {
+  questionId: string;
+  totalAnswered: number;
+  correctCount: number;
+  correctRate: number;
+  commonWrongAnswer: { selectedIndex: number; count: number } | null;
+  averageTimeSeconds: null;
+}
+
+/** Detailed analytics for one specific quiz (#417): question-by-question
+ *  breakdown, score distribution, and attempt patterns (current vs
+ *  superseded/retried attempts, using quizSubmissions.superseded — see
+ *  QuizService.retryQuiz). `perQuestionTimingAvailable` is always false:
+ *  quizSubmissions.answers only stores { questionId, selectedIndex } (see
+ *  submitQuizSchema) with no per-answer timestamp, so per-question timing
+ *  cannot be derived from data actually captured today. It's surfaced
+ *  explicitly here rather than omitted, so a caller can render "not
+ *  tracked" instead of assuming a missing/zero value means "0 seconds".
+ */
+export interface QuizAnalytics {
+  quizId: string;
+  courseId: string;
+  moduleId: string;
+  totalAttempts: number;
+  currentAttempts: number;
+  supersededAttempts: number;
+  averageScore: number;
+  passRate: number;
+  scoreDistribution: ScoreDistribution;
+  questions: QuizQuestionAnalytics[];
+  perQuestionTimingAvailable: false;
+}

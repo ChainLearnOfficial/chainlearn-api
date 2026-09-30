@@ -14,6 +14,7 @@ import type {
   AdminQuizUpdateBody,
   AuthoredQuizBody,
   AuthoredQuestion,
+  ArchiveModuleQuizBody,
 } from "./quiz.types.js";
 
 export class QuizController {
@@ -244,6 +245,22 @@ export class QuizController {
 
   /**
    * POST /api/v1/admin/courses/:id/modules/:moduleId/quizzes/:quizId/archive
+   * Archive (or unarchive) a quiz via its own endpoint (admin only, #416).
+   */
+  async archiveModuleQuiz(
+    request: FastifyRequest<{
+      Params: AdminQuizParams;
+      Body: ArchiveModuleQuizBody;
+    }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id, moduleId, quizId } = request.params;
+    const quiz = await quizService.archiveModuleQuiz(
+      id,
+      moduleId,
+      quizId,
+      request.body.archived,
+    );
    * Archive a quiz without deleting it (admin only, #416). Thin wrapper
    * around the same archive path updateModuleQuizDetails already supports.
    */
@@ -261,6 +278,7 @@ export class QuizController {
 
   /**
    * GET /api/v1/courses/:id/modules/:moduleId/quiz-history
+   * Aggregate quiz stats for every quiz in a course module (admin only, #415).
    * Aggregate quiz performance across a module's quizzes (admin only, #415).
    */
   async getModuleQuizHistory(
@@ -275,6 +293,7 @@ export class QuizController {
 
   /**
    * GET /api/v1/admin/courses/:id/modules/:moduleId/quizzes/:quizId/analytics
+   * Detailed question-by-question analytics for one quiz (admin only, #417).
    * Question-by-question analytics for a single quiz (admin only, #417).
    */
   async getQuizAnalytics(

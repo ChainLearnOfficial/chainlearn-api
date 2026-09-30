@@ -33,6 +33,7 @@ import {
   cacheKey,
   cacheKeyPattern,
   cacheInvalidatePattern,
+  cacheGetOrSet,
 } from "../../cache/index.js";
 import {
   PASSING_PERCENTAGE,
@@ -57,6 +58,7 @@ import {
   type ModuleQuizHistory,
   type QuizAnalytics,
   type QuizQuestionAnalytics,
+  type ScoreDistribution,
 } from "./quiz.types.js";
 
 const QUIZ_STATS_TTL_SECONDS = 300;
@@ -1101,6 +1103,11 @@ export class QuizService {
    * mean fanning a SCAN or a per-enrollee write over the whole roster for
    * every authoring change. Its own 60s TTL bounds the staleness — the same
    * tradeoff QuizService.submitQuiz already makes for a submission.
+   *
+   * Also clears getModuleQuizHistory's (#415) and getQuizAnalytics's (#417)
+   * 5-minute caches course-wide via pattern match, since a write here
+   * (archiving via #416 in particular) changes which submissions count
+   * toward both views and which quizzes are even eligible.
    */
   private async invalidateQuizCaches(courseId: string): Promise<void> {
     const invalidations = await Promise.allSettled([
@@ -1113,6 +1120,9 @@ export class QuizService {
       // Enrollment status derives its module list from quizzes.
       cacheInvalidatePattern(cacheKeyPattern("user", "enrollment-status")),
       cacheDel(cacheKey("courses", "detail", courseId)),
+      // #415/#417: module-history and per-quiz analytics aggregates.
+      cacheInvalidatePattern(cacheKeyPattern("quizzes", "module-history")),
+      cacheInvalidatePattern(cacheKeyPattern("quizzes", "analytics")),
     ]);
     const failed = invalidations.filter((r) => r.status === "rejected");
     if (failed.length > 0) {
@@ -1579,6 +1589,289 @@ export class QuizService {
       .from(quizSubmissions)
       .where(eq(quizSubmissions.quizId, quizId));
     return row?.value ?? 0;
+  }
+
+  /**
+   * Archive or unarchive a quiz via a dedicated endpoint (#416).
+   *
+   * This is a thin wrapper over updateModuleQuizDetails (#413) rather than
+   * new logic: archiving is already atomic (single UPDATE inside a row
+   * lock), already hides the quiz from learners (isNull(quizzes.archivedAt)
+   * filters in generateQuiz/submitQuiz), already preserves submissions
+   * (nothing is deleted), and already audit-logs via "course.quiz.updated"
+   * with changes: ["archived"]. #416 asks for the action to live at its own
+   * URL (POST .../quizzes/:quizId/archive) for discoverability — an admin
+   * client shouldn't need to know a generic update endpoint doubles as an
+   * archive action — but the underlying write is intentionally the same
+   * code path so there is exactly one place that knows how to archive a
+   * quiz.
+   */
+  async archiveModuleQuiz(
+    courseId: string,
+    moduleId: string,
+    quizId: string,
+    archived: boolean,
+  ): Promise<AdminQuiz> {
+    return this.updateModuleQuizDetails(courseId, moduleId, quizId, {
+      archived,
+    });
+  }
+
+  /**
+   * Aggregate quiz stats across every quiz in a course module (#415):
+   * average score, pass rate, total attempts, and a score distribution.
+   * Cached for 5 minutes, keyed by courseId+moduleId so different modules
+   * don't collide (mirrors getQuizStats's cache-aside pattern above).
+   *
+   * Scoped to this module's quizzes specifically (unlike getQuizStats,
+   * which is course- or platform-wide) — a course creator reviewing one
+   * module's difficulty shouldn't have other modules' scores mixed in.
+   * Superseded submissions (#295 retries) are excluded for the same reason
+   * getQuizStats excludes them: a retried quiz's stale attempt would
+   * otherwise double-count against the same learner's real result.
+   */
+  async getModuleQuizHistory(
+    courseId: string,
+    moduleId: string,
+  ): Promise<ModuleQuizHistory> {
+    await this.assertModuleBelongsToCourse(courseId, moduleId);
+
+    const cacheKeyString = cacheKey(
+      "quizzes",
+      "module-history",
+      courseId,
+      moduleId,
+    );
+
+    return cacheGetOrSet(
+      "quizzes",
+      cacheKeyString,
+      async () => {
+        const rows = await db
+          .select({
+            score: quizSubmissions.score,
+            questions: quizzes.questions,
+            quizId: quizzes.id,
+          })
+          .from(quizSubmissions)
+          .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+          .where(
+            and(
+              eq(quizzes.courseId, courseId),
+              eq(quizzes.moduleId, moduleId),
+              eq(quizSubmissions.superseded, false),
+            ),
+          );
+
+        const percentages = rows.map((row) => {
+          const totalQuestions = Array.isArray(row.questions)
+            ? row.questions.length
+            : 0;
+          return totalQuestions > 0 && row.score != null
+            ? Math.round((row.score / totalQuestions) * 100)
+            : 0;
+        });
+
+        const quizIds = new Set(rows.map((row) => row.quizId));
+        const passCount = percentages.filter(
+          (p) => p >= PASSING_PERCENTAGE,
+        ).length;
+        const totalAttempts = percentages.length;
+
+        return {
+          courseId,
+          moduleId,
+          quizCount: quizIds.size,
+          totalAttempts,
+          averageScore:
+            totalAttempts > 0
+              ? Math.round(
+                  percentages.reduce((sum, p) => sum + p, 0) / totalAttempts,
+                )
+              : 0,
+          passRate:
+            totalAttempts > 0
+              ? Math.round((passCount / totalAttempts) * 100)
+              : 0,
+          scoreDistribution: this.buildScoreDistribution(percentages),
+        };
+      },
+      QUIZ_STATS_TTL_SECONDS,
+    );
+  }
+
+  /**
+   * Detailed analytics for one specific quiz (#417): question-by-question
+   * correct rate and most common wrong answer, score distribution, and
+   * attempt patterns (current vs superseded, using quizSubmissions.superseded
+   * the same way retryQuiz sets it). Cached for 5 minutes like
+   * getModuleQuizHistory.
+   *
+   * Unlike getModuleQuizHistory, superseded submissions are NOT excluded
+   * from the top-level attempt counts (totalAttempts includes them,
+   * currentAttempts/supersededAttempts break them out) — #417 explicitly
+   * asks for "attempt patterns (e.g. retry counts)", which requires seeing
+   * both current and superseded rows rather than filtering superseded ones
+   * out. Score distribution and the per-question breakdown are computed
+   * only from current (non-superseded) submissions, matching
+   * getModuleQuizHistory's and getQuizStats's convention that "the score"
+   * for a learner is their current attempt, not a stale retried one.
+   *
+   * Per-question average time is not derivable: quizSubmissions.answers only
+   * stores { questionId, selectedIndex } per answer (submitQuizSchema), with
+   * no per-answer timestamp captured anywhere in submitQuiz. Rather than
+   * fabricate a number, averageTimeSeconds is always null and
+   * perQuestionTimingAvailable is false on the response so callers can
+   * render "not tracked" instead of misreading a missing value as 0.
+   */
+  async getQuizAnalytics(
+    courseId: string,
+    moduleId: string,
+    quizId: string,
+  ): Promise<QuizAnalytics> {
+    const quiz = await this.assertQuizInModule(courseId, moduleId, quizId);
+
+    const cacheKeyString = cacheKey("quizzes", "analytics", quizId);
+
+    return cacheGetOrSet(
+      "quizzes",
+      cacheKeyString,
+      async () => {
+        const submissions = await db
+          .select({
+            score: quizSubmissions.score,
+            answers: quizSubmissions.answers,
+            superseded: quizSubmissions.superseded,
+          })
+          .from(quizSubmissions)
+          .where(eq(quizSubmissions.quizId, quizId));
+
+        const questions = (
+          Array.isArray(quiz.questions) ? quiz.questions : []
+        ) as StoredQuestion[];
+        const totalQuestions = questions.length;
+
+        const current = submissions.filter((s) => !s.superseded);
+        const superseded = submissions.filter((s) => s.superseded);
+
+        const percentages = current.map((row) =>
+          totalQuestions > 0 && row.score != null
+            ? Math.round((row.score / totalQuestions) * 100)
+            : 0,
+        );
+        const passCount = percentages.filter(
+          (p) => p >= PASSING_PERCENTAGE,
+        ).length;
+
+        const questionAnalytics = questions.map((question) =>
+          this.buildQuestionAnalytics(question, current),
+        );
+
+        return {
+          quizId,
+          courseId,
+          moduleId,
+          totalAttempts: submissions.length,
+          currentAttempts: current.length,
+          supersededAttempts: superseded.length,
+          averageScore:
+            percentages.length > 0
+              ? Math.round(
+                  percentages.reduce((sum, p) => sum + p, 0) /
+                    percentages.length,
+                )
+              : 0,
+          passRate:
+            percentages.length > 0
+              ? Math.round((passCount / percentages.length) * 100)
+              : 0,
+          scoreDistribution: this.buildScoreDistribution(percentages),
+          questions: questionAnalytics,
+          perQuestionTimingAvailable: false,
+        };
+      },
+      QUIZ_STATS_TTL_SECONDS,
+    );
+  }
+
+  /**
+   * Correct rate and most common wrong answer for one question, across a
+   * set of (non-superseded) submissions. A submission that never answered
+   * this questionId (skipped, or an unrecognized id per submitQuiz's
+   * lenient handling of stale questionIds) simply doesn't contribute a row
+   * — `totalAnswered` is how many submissions actually included this
+   * question, not the submission count.
+   */
+  private buildQuestionAnalytics(
+    question: StoredQuestion,
+    submissions: Array<{ answers: unknown }>,
+  ): QuizQuestionAnalytics {
+    let totalAnswered = 0;
+    let correctCount = 0;
+    const wrongAnswerCounts = new Map<number, number>();
+
+    for (const submission of submissions) {
+      const answers = Array.isArray(submission.answers)
+        ? (submission.answers as Array<{
+            questionId: string;
+            selectedIndex: number;
+          }>)
+        : [];
+      const answer = answers.find((a) => a?.questionId === question.id);
+      if (!answer) continue;
+
+      totalAnswered++;
+      if (answer.selectedIndex === question.correctIndex) {
+        correctCount++;
+      } else {
+        wrongAnswerCounts.set(
+          answer.selectedIndex,
+          (wrongAnswerCounts.get(answer.selectedIndex) ?? 0) + 1,
+        );
+      }
+    }
+
+    let commonWrongAnswer: QuizQuestionAnalytics["commonWrongAnswer"] = null;
+    for (const [selectedIndex, count] of wrongAnswerCounts) {
+      if (!commonWrongAnswer || count > commonWrongAnswer.count) {
+        commonWrongAnswer = { selectedIndex, count };
+      }
+    }
+
+    return {
+      questionId: question.id,
+      totalAnswered,
+      correctCount,
+      correctRate:
+        totalAnswered > 0 ? Math.round((correctCount / totalAnswered) * 100) : 0,
+      commonWrongAnswer,
+      averageTimeSeconds: null,
+    };
+  }
+
+  /** Buckets a list of percentage scores (0-100) into
+   *  SCORE_DISTRIBUTION_BUCKETS. Shared by getModuleQuizHistory (#415) and
+   *  getQuizAnalytics (#417) so both endpoints report distribution the same
+   *  way. */
+  private buildScoreDistribution(percentages: number[]): ScoreDistribution {
+    const distribution: ScoreDistribution = {
+      "0-20": 0,
+      "21-40": 0,
+      "41-60": 0,
+      "61-80": 0,
+      "81-100": 0,
+    };
+
+    for (const percentage of percentages) {
+      const clamped = Math.max(0, Math.min(100, percentage));
+      if (clamped <= 20) distribution["0-20"]++;
+      else if (clamped <= 40) distribution["21-40"]++;
+      else if (clamped <= 60) distribution["41-60"]++;
+      else if (clamped <= 80) distribution["61-80"]++;
+      else distribution["81-100"]++;
+    }
+
+    return distribution;
   }
 
   /**

@@ -76,9 +76,13 @@ async function handleBadSeqError(submissionId: string, stellarAddress: string): 
   try {
     const account = await stellarClient.getAccount(stellarAddress);
     accountSeq = account.sequence;
-  } catch {
+  } catch (err) {
     // Intentionally swallow error: sequence fetch is for debugging only
     // If Horizon is unavailable, we still want to mark the transaction as pending
+    logger.debug(
+      { err, submissionId, stellarAddress },
+      "Could not fetch account sequence for bad_seq diagnostics — Horizon unavailable",
+    );
   }
   
   logger.warn(

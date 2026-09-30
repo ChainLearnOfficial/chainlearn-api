@@ -84,13 +84,14 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     env:
+      NODE_ENV: test
       DATABASE_URL: postgresql://chainlearn_test:test_password@localhost:5432/chainlearn_test
       REDIS_URL: redis://localhost:6379
       JWT_SECRET: test-secret-key-that-is-at-least-64-characters-long-for-testing-purposes-only
       STELLAR_NETWORK: testnet
       STELLAR_HORIZON_URL: https://horizon-testnet.stellar.org
       STELLAR_SOROBAN_RPC_URL: https://soroban-testnet.stellar.org
-      STELLAR_PLATFORM_SECRET: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && secrets.STELLAR_PLATFORM_SECRET || '' }}
+      STELLAR_PLATFORM_SECRET: SBZVMB74Z76QZ3ZQY6ADDING6S5AIJWXE3MVRULCNPG7ZBJRYUX3CBNN
       STELLAR_QUIZ_CONTRACT_ID: CB6Q2YKQQHH7GV7CU5RZDYM5S5OE2GABYLG5IY6YO5XLBAALBQKXYB53
       STELLAR_REWARD_CONTRACT_ID: CBAKHFY4SIBRIVYH2Y2QDUIUZPGYGS4B26YBHC6RLV5QZ7OHH5FOF55T
       STELLAR_CREDENTIAL_CONTRACT_ID: CD4ZJWLPGYLCYR7G5DZQ4EJWVMMF5VXU5Z2ECRSKGWV6GBV5S3F52K7

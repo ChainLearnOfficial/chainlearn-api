@@ -12,8 +12,15 @@ export async function checkIdempotency(
 ): Promise<{ cached: boolean; response?: { status: number; body: unknown } }> {
   const requestHash = sha256Hash(JSON.stringify(requestBody));
 
+  // Scope lookup to userId AND endpoint so the same key value used by two
+  // different users (or at two different endpoints) never returns a cached
+  // response from the wrong context — closes #227.
   const existing = await db.query.idempotencyKeys.findFirst({
-    where: eq(idempotencyKeys.key, key),
+    where: and(
+      eq(idempotencyKeys.key, key),
+      eq(idempotencyKeys.userId, userId),
+      eq(idempotencyKeys.endpoint, endpoint),
+    ),
   });
 
   if (existing) {
@@ -51,7 +58,11 @@ export async function checkIdempotency(
 
     if (isUniqueViolation) {
       const concurrentRecord = await db.query.idempotencyKeys.findFirst({
-        where: eq(idempotencyKeys.key, key),
+        where: and(
+          eq(idempotencyKeys.key, key),
+          eq(idempotencyKeys.userId, userId),
+          eq(idempotencyKeys.endpoint, endpoint),
+        ),
       });
 
       if (
@@ -81,6 +92,8 @@ export async function checkIdempotency(
 
 export async function storeIdempotentResponse(
   key: string,
+  userId: string,
+  endpoint: string,
   status: number,
   body: unknown,
   txHash?: string
@@ -92,7 +105,13 @@ export async function storeIdempotentResponse(
       responseBody: body,
       txHash: txHash ?? null,
     })
-    .where(eq(idempotencyKeys.key, key));
+    .where(
+      and(
+        eq(idempotencyKeys.key, key),
+        eq(idempotencyKeys.userId, userId),
+        eq(idempotencyKeys.endpoint, endpoint)
+      )
+    );
 }
 
 export async function cleanupIdempotencyKeys(): Promise<number> {

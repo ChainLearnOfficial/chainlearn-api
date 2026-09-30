@@ -14,12 +14,13 @@ export function isTransientError(err: Error): boolean {
     msg.includes("ECONNRESET") ||
     msg.includes("ENOTFOUND") ||
     msg.includes("socket hang up") ||
-    msg.includes("timed out")
+    msg.includes("timed out") ||
+    /too many requests/i.test(msg)
   ) {
     return true;
   }
 
-  const statusMatch = msg.match(/\b(502|503|504)\b/);
+  const statusMatch = msg.match(/\b(429|502|503|504)\b/);
   if (statusMatch) return true;
 
   return false;
@@ -87,9 +88,11 @@ export function createCircuitBreaker(options: CircuitBreakerOptions): CircuitBre
   let circuitState = CircuitState.Closed;
   let failureCount = 0;
   let lastFailureTime = 0;
+  let halfOpenProbeInFlight = false;
 
   function recordSuccess(): void {
     failureCount = 0;
+    halfOpenProbeInFlight = false;
     if (circuitState !== CircuitState.Closed) {
       logger.info({ label }, "Circuit breaker reset to closed");
       circuitState = CircuitState.Closed;
@@ -99,6 +102,7 @@ export function createCircuitBreaker(options: CircuitBreakerOptions): CircuitBre
   function recordFailure(): void {
     failureCount++;
     lastFailureTime = Date.now();
+    halfOpenProbeInFlight = false;
 
     if (failureCount >= threshold && circuitState === CircuitState.Closed) {
       circuitState = CircuitState.Open;
@@ -134,13 +138,30 @@ export function createCircuitBreaker(options: CircuitBreakerOptions): CircuitBre
       throw new CircuitBreakerOpenError(`Circuit breaker is open for ${label}`);
     }
 
+    if (state === CircuitState.HalfOpen) {
+      if (halfOpenProbeInFlight) {
+        throw new CircuitBreakerOpenError(`Circuit breaker is open for ${label}`);
+      }
+      halfOpenProbeInFlight = true;
+    }
+
     try {
       const result = await fn();
       recordSuccess();
       return result;
     } catch (err) {
-      if (err instanceof Error && isTransientError(err)) {
+      // A half-open probe must re-open the circuit on any failure, transient
+      // or not — otherwise a persistent non-transient error (e.g. a 400 from
+      // a corrupted account) would let unlimited probes through.
+      if (state === CircuitState.HalfOpen || (err instanceof Error && isTransientError(err))) {
+        // recordFailure() itself logs when this pushes the circuit to Open
+        // (threshold reached, or the HalfOpen probe failed); this warn
+        // captures the underlying error for every failure, including the
+        // ones below threshold that recordFailure() doesn't log on its own.
+        logger.warn({ err, label, state }, "Circuit breaker recorded a failure");
         recordFailure();
+      } else {
+        halfOpenProbeInFlight = false;
       }
       throw err;
     }

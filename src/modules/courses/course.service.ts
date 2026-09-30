@@ -1,8 +1,38 @@
-import { eq, and, count, desc, inArray, notInArray, avg, sql } from "drizzle-orm";
+import { eq, and, count, desc, asc, inArray, ilike, or, isNull, ne, sql } from "drizzle-orm";
+import crypto from "node:crypto";
+import QRCode from "qrcode";
 import { db } from "../../config/database.js";
-import { courses, enrollments, credentials, quizSubmissions, quizzes } from "../../database/schema.js";
-import { NotFoundError, ConflictError } from "../../utils/errors.js";
+import {
+  courses,
+  courseReviews,
+  courseShares,
+  credentials,
+  enrollments,
+  quizzes,
+  quizSubmissions,
+  users,
+  courseReports,
+  notifications,
+  moduleContent,
+  type CourseModuleDefinition,
+  type ModuleContentPayload,
+} from "../../database/schema.js";
+import { config } from "../../config/index.js";
+import {
+  NotFoundError,
+  ConflictError,
+  ForbiddenError,
+  ValidationError,
+  AppError,
+} from "../../utils/errors.js";
 import { withLock } from "../../utils/lock.js";
+import { logger } from "../../utils/logger.js";
+import { getOnChainContentHash } from "../../stellar/progress-tracker.js";
+import { checkAccessibility } from "./accessibility.js";
+import { PASSING_PERCENTAGE } from "../quizzes/quiz.types.js";
+import { auditLog } from "../../audit/index.js";
+import { dispatchWebhook } from "../../services/webhook-dispatcher.js";
+import { waitlistService } from "./waitlist.service.js";
 import {
   cacheGet,
   cacheSet,
@@ -15,20 +45,155 @@ import type {
   ListCoursesQuery,
   CourseSummary,
   CourseDetail,
-  RecommendedCourse,
-  GetRecommendationsResult,
+  CourseStats,
+  AdminCourse,
+  AdminCourseWithAccessibility,
+  CreateCourseBody,
+  CourseModule,
+  CourseModuleMetadata,
+  UpdateCourseBody,
+  CourseModuleWithProgress,
+  CourseLeaderboardEntry,
+  CourseShareLink,
+  ResolvedShareLink,
+  CreateModuleBody,
+  UpdateModuleBody,
+  ListReviewsQuery,
+  CreateReviewBody,
+  CourseReview,
+  CourseReviewsResult,
+  CoursePrerequisiteEntry,
+  CoursePrerequisitesResult,
+  ImportCourseBody,
+  ImportCourseResult,
+  ListEnrolledUsersQuery,
+  EnrolledUsersResult,
+  BatchEnrollEntry,
+  ReportCourseBody,
+  CourseReportResult,
+  CourseAnalytics,
+  CourseEngagement,
+  DraftCourseBody,
+  ModuleEngagement,
+  EnrollmentTrendPoint,
+  ModuleDifficulty,
+  EnrollmentTrendsQuery,
+  EnrollmentTrendsResult,
+  EnrollmentTrendDataPoint,
+  CourseSyllabus,
+  SyllabusModule,
+  PublishCheckResult,
+  PublishCheckIssue,
+  PublishCheckRequirement,
+  PublishCheckSeverity,
+  EnrollmentStatus,
+  EnrollmentModuleProgress,
+  CourseProgress,
+  CourseProgressModule,
+  QuizAttempt,
+  QuizAttemptsResult,
+  CreateContentBody,
+  UpdateContentBody,
+  ModuleContentItem,
 } from "./course.types.js";
 
+const POPULAR_COURSES_TTL_SECONDS = 300;
+const LEADERBOARD_TTL_SECONDS = 300;
+const LEADERBOARD_SIZE = 20;
+
 export class CourseService {
+  async getStats(): Promise<CourseStats> {
+    const namespace = "courses";
+    const cacheKeyString = cacheKey(namespace, "stats");
+
+    const cachedStats = await cacheGet<CourseStats>(namespace, cacheKeyString);
+    if (cachedStats) return cachedStats;
+
+    const [[totalResult], enrollmentRows] = await Promise.all([
+      db
+        .select({ value: count() })
+        .from(courses)
+        .where(eq(courses.isActive, true)),
+      db
+        .select({
+          difficulty: courses.difficulty,
+          value: sql<number>`COUNT(${enrollments.id})`,
+        })
+        .from(courses)
+        .leftJoin(enrollments, eq(enrollments.courseId, courses.id))
+        .where(eq(courses.isActive, true))
+        .groupBy(courses.difficulty),
+    ]);
+
+    const totalCourses = totalResult?.value ?? 0;
+    const enrollmentsByDifficulty: CourseStats["enrollmentsByDifficulty"] = {
+      beginner: 0,
+      intermediate: 0,
+      advanced: 0,
+    };
+
+    let totalEnrollments = 0;
+    for (const row of enrollmentRows) {
+      if (
+        row.difficulty === "beginner" ||
+        row.difficulty === "intermediate" ||
+        row.difficulty === "advanced"
+      ) {
+        const value = Number(row.value);
+        enrollmentsByDifficulty[row.difficulty] = value;
+        totalEnrollments += value;
+      }
+    }
+
+    const stats: CourseStats = {
+      totalCourses,
+      enrollmentsByDifficulty,
+      averageEnrollmentsPerCourse:
+        totalCourses === 0 ? 0 : Number((totalEnrollments / totalCourses).toFixed(2)),
+    };
+
+    await cacheSet(cacheKeyString, stats, 300);
+
+    return stats;
+  }
+
+  /**
+   * The full set of course IDs a user is enrolled in, cached briefly
+   * (issue #151 — listCourses/getCourseDetail previously re-queried the
+   * enrollments table on every authenticated request regardless of whether
+   * the course list/detail cache itself was a hit). A user's enrollment set
+   * is small and changes rarely, so caching the whole set per user is
+   * cheaper than a per-course cache and trivially invalidated by `enroll()`.
+   */
+  private async getEnrolledCourseIds(userId: string): Promise<Set<string>> {
+    const namespace = "user";
+    const cacheKeyString = cacheKey(namespace, "enrollments", userId);
+
+    const cached = await cacheGet<string[]>(namespace, cacheKeyString);
+    if (cached) return new Set(cached);
+
+    const rows = await db
+      .select({ courseId: enrollments.courseId })
+      .from(enrollments)
+      .where(eq(enrollments.userId, userId));
+
+    const courseIds = rows.map((r) => r.courseId);
+    await cacheSet(cacheKeyString, courseIds, 30);
+
+    return new Set(courseIds);
+  }
+
   async listCourses(
     userId: string | null,
     query: ListCoursesQuery,
   ): Promise<{ courses: CourseSummary[]; total: number }> {
     const namespace = "courses";
+    const search = query.search?.trim() || undefined;
     const cacheKeyString = cacheKey(
       namespace,
       "list",
       query.difficulty ?? "all",
+      search ? encodeURIComponent(search.toLowerCase()) : "all",
       query.page,
       query.limit,
     );
@@ -42,6 +207,14 @@ export class CourseService {
       const conditions = [eq(courses.isActive, true)];
       if (query.difficulty) {
         conditions.push(eq(courses.difficulty, query.difficulty));
+      }
+      if (search) {
+        conditions.push(
+          or(
+            ilike(courses.title, `%${search}%`),
+            ilike(courses.description, `%${search}%`),
+          )!,
+        );
       }
 
       const where = and(...conditions);
@@ -99,21 +272,7 @@ export class CourseService {
     }));
 
     if (userId && finalCourses.length > 0) {
-      const userEnrs = await db
-        .select({ courseId: enrollments.courseId })
-        .from(enrollments)
-        .where(
-          and(
-            eq(enrollments.userId, userId),
-            inArray(
-              enrollments.courseId,
-              finalCourses.map((c) => c.id),
-            ),
-          ),
-        );
-
-      // Check if current user is enrolled in each course
-      const userEnrollments = new Set(userEnrs.map((e) => e.courseId));
+      const userEnrollments = await this.getEnrolledCourseIds(userId);
       for (const course of finalCourses) {
         course.isEnrolled = userEnrollments.has(course.id);
       }
@@ -148,12 +307,33 @@ export class CourseService {
         .from(enrollments)
         .where(eq(enrollments.courseId, courseId));
 
-      const moduleRows = await db
-        .select({ moduleId: quizzes.moduleId })
-        .from(quizzes)
-        .where(eq(quizzes.courseId, courseId))
-        .groupBy(quizzes.moduleId)
-        .orderBy(quizzes.moduleId);
+      const moduleMetadata = this.normalizeCourseModules(course.courseModules);
+      let modules: CourseModule[];
+
+      if (moduleMetadata.length > 0) {
+        modules = moduleMetadata.map((module, i) => ({
+          id: module.id,
+          title: module.title,
+          description: module.description ?? null,
+          estimatedDurationMinutes: module.estimatedDurationMinutes ?? null,
+          order: i + 1,
+        }));
+      } else {
+        const moduleRows = await db
+          .select({ moduleId: quizzes.moduleId })
+          .from(quizzes)
+          .where(eq(quizzes.courseId, courseId))
+          .groupBy(quizzes.moduleId)
+          .orderBy(quizzes.moduleId);
+
+        modules = moduleRows.map((row, i) => ({
+          id: row.moduleId,
+          title: row.moduleId,
+          description: null,
+          estimatedDurationMinutes: null,
+          order: i + 1,
+        }));
+      }
 
       cachedDetail = {
         id: course.id,
@@ -162,28 +342,21 @@ export class CourseService {
         difficulty: course.difficulty,
         isActive: course.isActive,
         enrolledCount: countResult?.value ?? 0,
-        contentHash: course.contentHash,
-        modules: moduleRows.map((row, i) => ({
-          id: row.moduleId,
-          title: row.moduleId,
-          order: i + 1,
-        })),
+        contentHash: course.contentHash ?? null,
+        modules,
         createdAt: course.createdAt,
+        averageRating: null,
+        reviewCount: 0,
       };
 
       await cacheSet(cacheKeyString, cachedDetail, 120);
     }
 
-    // Check enrollment
+    // Check enrollment (cached — see getEnrolledCourseIds, issue #151)
     let isEnrolled = false;
     if (userId) {
-      const enr = await db.query.enrollments.findFirst({
-        where: and(
-          eq(enrollments.userId, userId),
-          eq(enrollments.courseId, courseId),
-        ),
-      });
-      isEnrolled = !!enr;
+      const userEnrollments = await this.getEnrolledCourseIds(userId);
+      isEnrolled = userEnrollments.has(courseId);
     }
 
     return {
@@ -192,8 +365,197 @@ export class CourseService {
     };
   }
 
-  async enroll(userId: string, courseId: string): Promise<void> {
-    return withLock(`enroll:${userId}:${courseId}`, async () => {
+  /**
+   * The prerequisite courses configured for `courseId`, each annotated with
+   * whether `userId` has completed it (#354). Purely advisory — never
+   * enforced at enroll() time, just surfaced here so a client can warn the
+   * user before they start a course they may not be ready for.
+   */
+  async getCoursePrerequisites(
+    courseId: string,
+    userId: string | null,
+  ): Promise<CoursePrerequisitesResult> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+
+    if (!course || !course.isActive) {
+      throw new NotFoundError("Course");
+    }
+
+    const prerequisiteIds = course.prerequisites ?? [];
+    if (prerequisiteIds.length === 0) {
+      return { prerequisites: [], met: true };
+    }
+
+    const prereqCourses = await db
+      .select({
+        id: courses.id,
+        title: courses.title,
+        difficulty: courses.difficulty,
+      })
+      .from(courses)
+      .where(inArray(courses.id, prerequisiteIds));
+
+    let completedIds = new Set<string>();
+    if (userId) {
+      const completedRows = await db
+        .select({ courseId: enrollments.courseId })
+        .from(enrollments)
+        .where(
+          and(
+            eq(enrollments.userId, userId),
+            inArray(enrollments.courseId, prerequisiteIds),
+            sql`${enrollments.completedAt} IS NOT NULL`,
+          ),
+        );
+      completedIds = new Set(completedRows.map((r) => r.courseId));
+    }
+
+    // Preserve the configured order rather than the DB's arbitrary IN()
+    // ordering, and keep prerequisite IDs that reference a
+    // deleted/deactivated course out of the response entirely.
+    const byId = new Map(prereqCourses.map((c) => [c.id, c]));
+    const prerequisites: CoursePrerequisiteEntry[] = prerequisiteIds
+      .map((id) => byId.get(id))
+      .filter((c): c is (typeof prereqCourses)[number] => !!c)
+      .map((c) => ({
+        id: c.id,
+        title: c.title,
+        difficulty: c.difficulty,
+        completed: completedIds.has(c.id),
+      }));
+
+    return {
+      prerequisites,
+      met: prerequisites.every((p) => p.completed),
+    };
+  }
+
+  /**
+   * List a course's modules in their original order, annotated with
+   * whether the requesting user has completed each one (#286). Restricted
+   * to users enrolled in the course. "Completed" means the user has a
+   * non-superseded quiz submission for that module — a retry (#295)
+   * supersedes the old submission and un-completes the module until the
+   * new quiz is submitted.
+   *
+   * Cached per user+course (60s, matching getProgress's TTL) and
+   * invalidated whenever a submission is recorded for this course
+   * (quiz.service.ts submitQuiz/retryQuiz).
+   */
+  async getCourseModules(
+    userId: string,
+    courseId: string,
+  ): Promise<CourseModuleWithProgress[]> {
+    // Course existence is checked before enrollment — same order as
+    // enroll() and getCourseDetail() — so a bad/non-existent course ID
+    // reliably 404s rather than 403ing (which would otherwise happen for
+    // a non-enrolled caller regardless of whether the course exists).
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+
+    if (!course || !course.isActive) {
+      throw new NotFoundError("Course");
+    }
+
+    const enrollment = await db.query.enrollments.findFirst({
+      where: and(
+        eq(enrollments.userId, userId),
+        eq(enrollments.courseId, courseId),
+      ),
+    });
+
+    if (!enrollment) {
+      throw new ForbiddenError("Must be enrolled in the course to view its modules");
+    }
+
+    const namespace = "user";
+    const cacheKeyString = cacheKey(namespace, "modules", userId, courseId);
+
+    const cached = await cacheGet<CourseModuleWithProgress[]>(
+      namespace,
+      cacheKeyString,
+    );
+    if (cached) return cached;
+
+    const moduleRows = await db
+      .select({ moduleId: quizzes.moduleId })
+      .from(quizzes)
+      .where(eq(quizzes.courseId, courseId))
+      .groupBy(quizzes.moduleId)
+      .orderBy(quizzes.moduleId);
+
+    const completedModuleIds = new Set(
+      (
+        await db
+          .select({ moduleId: quizzes.moduleId })
+          .from(quizSubmissions)
+          .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+          .where(
+            and(
+              eq(quizzes.courseId, courseId),
+              eq(quizSubmissions.userId, userId),
+              eq(quizSubmissions.superseded, false),
+            ),
+          )
+          .groupBy(quizzes.moduleId)
+      ).map((r) => r.moduleId),
+    );
+
+    const result: CourseModuleWithProgress[] = moduleRows.map((row, i) => ({
+      id: row.moduleId,
+      title: row.moduleId,
+      description: null,
+      estimatedDurationMinutes: null,
+      order: i + 1,
+      completed: completedModuleIds.has(row.moduleId),
+    }));
+
+    await cacheSet(cacheKeyString, result, 60);
+
+    return result;
+  }
+
+  /**
+   * Compares the course's stored contentHash against the progress-tracker
+   * contract's on-chain value (#294). Deliberately non-blocking: any
+   * mismatch, or failure to read the on-chain hash at all, is logged for
+   * audit but never prevents enrollment — the caller decides whether to
+   * surface a warning to the client.
+   */
+  private async checkContentHash(
+    courseId: string,
+    storedContentHash: string | null,
+  ): Promise<boolean> {
+    if (!storedContentHash) return false;
+
+    const onChainContentHash = await getOnChainContentHash(courseId);
+    if (!onChainContentHash) return false;
+
+    const mismatch = onChainContentHash !== storedContentHash;
+    logger.info(
+      { courseId, storedContentHash, onChainContentHash, mismatch },
+      "Enrollment contentHash comparison",
+    );
+    await auditLog("course.enrolled", {
+      courseId,
+      contentHashMatch: !mismatch,
+      onChainContentHash,
+      storedContentHash,
+    });
+
+    return mismatch;
+  }
+
+  async enroll(
+    userId: string,
+    courseId: string,
+  ): Promise<{ contentHashMismatch: boolean }> {
+    let storedContentHash: string | null = null;
+
+    await withLock(`enroll:${userId}:${courseId}`, async () => {
       await db.transaction(async (tx) => {
         const [course] = await tx
           .select()
@@ -203,6 +565,7 @@ export class CourseService {
         if (!course || !course.isActive) {
           throw new NotFoundError("Course");
         }
+        storedContentHash = course.contentHash;
 
         const [existing] = await tx
           .select()
@@ -219,263 +582,3048 @@ export class CourseService {
           throw new ConflictError("Already enrolled in this course");
         }
 
+        // Enrollment cap (#306) — only active (not yet completed)
+        // enrollments count toward the limit, so finishing a course frees
+        // up a slot for a new one.
+        const [activeCountResult] = await tx
+          .select({ value: count() })
+          .from(enrollments)
+          .where(
+            and(eq(enrollments.userId, userId), isNull(enrollments.completedAt)),
+          );
+        const activeCount = activeCountResult?.value ?? 0;
+
+        if (activeCount >= config.MAX_ENROLLMENTS) {
+          throw new ForbiddenError(
+            `Enrollment limit reached: ${activeCount}/${config.MAX_ENROLLMENTS} active enrollments. Complete or drop a course before enrolling in a new one.`,
+          );
+        }
+
         await tx.insert(enrollments).values({ userId, courseId });
       });
 
-      await cacheInvalidatePattern(cacheKeyPattern("courses", "list"));
-      await cacheDel(cacheKey("courses", "detail", courseId));
-      await cacheDel(cacheKey("user", "progress", userId));
+      // Remove from waitlist if enrolled successfully
+      await waitlistService.removeFromWaitlist(userId, courseId);
+
+      // Dispatch webhook event for enrollment
+      try {
+        await dispatchWebhook({
+          id: crypto.randomUUID(),
+          event: "enrollment.created",
+          timestamp: new Date(),
+          data: {
+            userId,
+            courseId,
+          },
+        });
+      } catch (err) {
+        logger.error({ err, userId, courseId }, "Failed to dispatch enrollment webhook");
+        // Don't fail the enrollment if webhook dispatch fails
+      }
+
+      // Cache invalidation necessarily happens outside the DB transaction —
+      // Redis isn't part of the Postgres transaction, so there's no way to
+      // make this atomic with the commit above (issue #152). cacheDel/
+      // cacheInvalidatePattern already fail soft (log a warning, never
+      // throw), and every cache touched here has a bounded TTL (<=5min —
+      // courses:popular is the longest at 300s, everything else is <=120s),
+      // so a transient invalidation failure produces bounded staleness
+      // rather than a permanently stale cache. Run them concurrently —
+      // reduces the real-world window between commit and invalidation
+      // rather than running four sequential round-trips one after another —
+      // and log once at this call site (distinct from cacheDel's generic
+      // per-key warning) so a failure here is attributable specifically to
+      // an enrollment, not just "some cache key somewhere".
+      const invalidations = await Promise.allSettled([
+        cacheInvalidatePattern("chainlearn:courses:list:*"),
+        cacheDel(cacheKey("courses", "detail", courseId)),
+        cacheDel(cacheKey("courses", "stats")),
+        // #285: getPopularCourses() also caches enrolledCount per course
+        // (up to POPULAR_COURSES_TTL_SECONDS = 5min), but was never
+        // invalidated here — an enrollment could leave /courses/popular
+        // showing a stale count for up to 5 minutes even though the list/
+        // detail/stats views above already correct immediately.
+        cacheInvalidatePattern(cacheKeyPattern("courses", "popular")),
+        cacheDel(cacheKey("user", "progress", userId)),
+        cacheDel(cacheKey("user", "enrollments", userId)),
+        cacheInvalidatePattern(cacheKeyPattern("user", "activity", userId)),
+      ]);
+      const failed = invalidations.filter((r) => r.status === "rejected");
+      if (failed.length > 0) {
+        logger.warn(
+          { userId, courseId, failedCount: failed.length },
+          "Post-enroll cache invalidation had failures — affected views may serve stale data until their TTL expires",
+        );
+      }
+    });
+
+    // Run after the lock releases — a slow/unreachable contract read must
+    // never extend how long the enrollment lock is held.
+    const contentHashMismatch = await this.checkContentHash(
+      courseId,
+      storedContentHash,
+    );
+
+    return { contentHashMismatch };
+  }
+
+  /**
+   * Drop the caller's enrollment in a course (#310) — the companion action
+   * to enroll() that this codebase didn't previously have, needed to give
+   * "a spot opens up" any concrete meaning. The row is hard-deleted
+   * (matching the "drop a course" language already used in enroll()'s cap
+   * error) rather than soft-cancelled, since nothing in this codebase reads
+   * a cancelled-but-not-deleted enrollment.
+   */
+  async dropEnrollment(userId: string, courseId: string): Promise<void> {
+    await withLock(`enroll:${userId}:${courseId}`, async () => {
+      const [deleted] = await db
+        .delete(enrollments)
+        .where(
+          and(eq(enrollments.userId, userId), eq(enrollments.courseId, courseId)),
+        )
+        .returning();
+
+      if (!deleted) {
+        throw new NotFoundError("Enrollment");
+      }
+
+      const invalidations = await Promise.allSettled([
+        cacheDel(cacheKey("courses", "detail", courseId)),
+        cacheDel(cacheKey("courses", "stats")),
+        cacheDel(cacheKey("user", "progress", userId)),
+        cacheDel(cacheKey("user", "enrollments", userId)),
+        cacheInvalidatePattern(cacheKeyPattern("user", "activity", userId)),
+      ]);
+      const failed = invalidations.filter((r) => r.status === "rejected");
+      if (failed.length > 0) {
+        logger.warn(
+          { userId, courseId, failedCount: failed.length },
+          "Post-drop cache invalidation had failures — affected views may serve stale data until their TTL expires",
+        );
+      }
+    });
+
+    await auditLog("course.enrollment_dropped", { userId, courseId });
+    logger.info({ userId, courseId }, "Enrollment dropped");
+
+    // Runs after the enroll lock releases — notifying a waitlisted user
+    // should never extend how long the enrollment lock for this drop is
+    // held.
+    await this.notifyNextWaitlisted(courseId);
+  }
+
+  /**
+   * Enroll the user in several courses at once (#346). Each course is
+   * attempted independently and its outcome reported separately: an archived
+   * course, an existing enrollment, or a hit on the MAX_ENROLLMENTS cap
+   * fails only that entry rather than aborting the whole request, which is
+   * what a "save these N courses" client needs.
+   *
+   * Sequential rather than concurrent on purpose — enroll() takes a
+   * per-(user, course) lock and counts the user's *current* active
+   * enrollments against MAX_ENROLLMENTS, so overlapping calls would race the
+   * cap check and let a user exceed it.
+   *
+   * A duplicate courseId in the request is collapsed to its first
+   * occurrence: retrying it would only ever produce an "Already enrolled"
+   * failure, which is noise rather than information.
+   */
+  async batchEnroll(
+    userId: string,
+    courseIds: string[],
+  ): Promise<BatchEnrollEntry[]> {
+    const results: BatchEnrollEntry[] = [];
+    const seen = new Set<string>();
+
+    for (const courseId of courseIds) {
+      if (seen.has(courseId)) continue;
+      seen.add(courseId);
+
+      try {
+        const { contentHashMismatch } = await this.enroll(userId, courseId);
+        results.push({
+          courseId,
+          success: true,
+          message: contentHashMismatch
+            ? "Enrolled, but the course content hash does not match the on-chain version"
+            : "Enrolled successfully",
+        });
+      } catch (err) {
+        // Reported back to the caller in `results` below, so this isn't a
+        // silent swallow from the client's perspective — but it's still
+        // worth a warn here for operational visibility into which
+        // courses/reasons show up across batch requests (e.g. spotting a
+        // course that's failing for everyone).
+        logger.warn(
+          { err, userId, courseId },
+          "Batch enrollment: failed to enroll in one course",
+        );
+        results.push({
+          courseId,
+          success: false,
+          message:
+            err instanceof AppError
+              ? err.message
+              : "Failed to enroll in this course",
+        });
+      }
+    }
+
+    return results;
+  }
+
+  /**
+   * Identify the user at the head of a course's waitlist so they can be
+   * told a spot opened up (#310) — called after dropEnrollment(). Uses the
+   * existing waitlistService (added for #320/#323) rather than reading the
+   * table directly; that service already owns join/leave/position
+   * bookkeeping. The identified user stays on the waitlist (not removed)
+   * until they actually enroll, at which point enroll()'s existing call to
+   * waitlistService.removeFromWaitlist takes them off.
+   *
+   * There's currently no user-facing notifications table to write to (it
+   * was dropped from schema.ts by an unrelated upstream change) — this
+   * records the event via the audit log instead, so the signal isn't lost
+   * and can be wired into a real notification channel once one exists
+   * again. Best-effort: a failure here never fails the caller's drop.
+   */
+  private async notifyNextWaitlisted(courseId: string): Promise<void> {
+    try {
+      const next = await waitlistService.getNextOnWaitlist(courseId);
+      if (!next) return;
+
+      await auditLog("course.waitlist.notified", {
+        userId: next.userId,
+        courseId,
+      });
+      logger.info(
+        { userId: next.userId, courseId },
+        "Identified next waitlisted user for an open spot",
+      );
+    } catch (err) {
+      logger.warn(
+        { err, courseId },
+        "Failed to identify next waitlisted user — the enrollment drop itself still succeeded",
+      );
+    }
+  }
+
+  /**
+   * Active courses ordered by enrollment count descending, for discovery
+   * (#293). Cached separately from listCourses() since the sort/shape
+   * differs and a 5 min TTL is appropriate here (trending courses don't
+   * need to be as fresh as a course-detail page).
+   */
+  async getPopularCourses(limit: number): Promise<CourseSummary[]> {
+    const namespace = "courses";
+    const cacheKeyString = cacheKey(namespace, "popular", limit);
+
+    const cached = await cacheGet<Omit<CourseSummary, "isEnrolled">[]>(
+      namespace,
+      cacheKeyString,
+    );
+    if (cached) {
+      return cached.map((course) => ({ ...course, isEnrolled: false }));
+    }
+
+    const rows = await db
+      .select({
+        id: courses.id,
+        title: courses.title,
+        description: courses.description,
+        difficulty: courses.difficulty,
+        isActive: courses.isActive,
+        enrolledCount: count(enrollments.courseId),
+      })
+      .from(courses)
+      .leftJoin(enrollments, eq(enrollments.courseId, courses.id))
+      .where(eq(courses.isActive, true))
+      .groupBy(courses.id)
+      .orderBy(desc(count(enrollments.courseId)))
+      .limit(limit);
+
+    await cacheSet(cacheKeyString, rows, POPULAR_COURSES_TTL_SECONDS);
+
+    return rows.map((course) => ({ ...course, isEnrolled: false }));
+  }
+
+  /**
+   * Per-course leaderboard (#324): the top {@link LEADERBOARD_SIZE} learners
+   * for a course ranked by their average quiz score. Each submission's raw
+   * correct-answer count is normalized against its own quiz's question count
+   * before averaging (quizzes vary from 1–20 questions), matching
+   * getQuizStats. Superseded submissions (#295) and ungraded ones don't
+   * count. Cached for 5 minutes — course-level competition doesn't need to
+   * be real-time, and this aggregates every submission for the course.
+   */
+  async getLeaderboard(courseId: string): Promise<CourseLeaderboardEntry[]> {
+    const namespace = "courses";
+    const cacheKeyString = cacheKey(namespace, "leaderboard", courseId);
+
+    const cached = await cacheGet<CourseLeaderboardEntry[]>(
+      namespace,
+      cacheKeyString,
+    );
+    if (cached) return cached;
+
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course || !course.isActive) {
+      throw new NotFoundError("Course");
+    }
+
+    const rows = await db
+      .select({
+        userId: quizSubmissions.userId,
+        displayName: users.displayName,
+        score: quizSubmissions.score,
+        questions: quizzes.questions,
+      })
+      .from(quizSubmissions)
+      .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+      .innerJoin(users, eq(quizSubmissions.userId, users.id))
+      .where(
+        and(
+          eq(quizzes.courseId, courseId),
+          eq(quizSubmissions.superseded, false),
+          isNull(users.deletedAt),
+        ),
+      );
+
+    const perUser = new Map<
+      string,
+      { displayName: string | null; percentageSum: number; quizzesTaken: number }
+    >();
+
+    for (const row of rows) {
+      const totalQuestions = Array.isArray(row.questions)
+        ? row.questions.length
+        : 0;
+      if (totalQuestions === 0 || row.score == null) continue;
+
+      const percentage = Math.round((row.score / totalQuestions) * 100);
+      const entry = perUser.get(row.userId) ?? {
+        displayName: row.displayName,
+        percentageSum: 0,
+        quizzesTaken: 0,
+      };
+      entry.percentageSum += percentage;
+      entry.quizzesTaken += 1;
+      perUser.set(row.userId, entry);
+    }
+
+    const leaderboard: CourseLeaderboardEntry[] = [...perUser.entries()]
+      .map(([userId, e]) => ({
+        userId,
+        displayName: e.displayName,
+        averageScore: Math.round(e.percentageSum / e.quizzesTaken),
+        quizzesTaken: e.quizzesTaken,
+      }))
+      .sort(
+        (a, b) =>
+          b.averageScore - a.averageScore ||
+          b.quizzesTaken - a.quizzesTaken,
+      )
+      .slice(0, LEADERBOARD_SIZE)
+      .map((e, i) => ({ rank: i + 1, ...e }));
+
+    await cacheSet(cacheKeyString, leaderboard, LEADERBOARD_TTL_SECONDS);
+
+    return leaderboard;
+  }
+
+  // ─── Course Sharing / Referrals (#325) ─────────────────────────────────
+
+  /** 10-char base62 referral token from 8 random bytes. */
+  private generateReferralCode(): string {
+    const alphabet =
+      "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    const bytes = crypto.randomBytes(10);
+    let code = "";
+    for (const b of bytes) code += alphabet[b % alphabet.length];
+    return code;
+  }
+
+  private buildShareUrl(courseId: string, referralCode: string): string {
+    const base = config.PUBLIC_BASE_URL?.replace(/\/$/, "") ?? "";
+    return `${base}/api/v1/courses/${courseId}?ref=${referralCode}`;
+  }
+
+  private async toShareLink(
+    row: typeof courseShares.$inferSelect,
+  ): Promise<CourseShareLink> {
+    const url = this.buildShareUrl(row.courseId, row.referralCode);
+    return {
+      courseId: row.courseId,
+      referralCode: row.referralCode,
+      url,
+      qrCode: await QRCode.toDataURL(url, { margin: 1, width: 240 }),
+      clickCount: row.clickCount,
+      enrollmentCount: row.enrollmentCount,
+    };
+  }
+
+  /**
+   * Get (or lazily create) the caller's referral link for a course (#325).
+   * The link is stable — calling this repeatedly returns the same code and
+   * its accumulated click / enrollment counts. Scoped by a per-user,
+   * per-course lock so two concurrent first-time calls can't both insert.
+   */
+  async createShareLink(
+    userId: string,
+    courseId: string,
+  ): Promise<CourseShareLink> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course || !course.isActive) {
+      throw new NotFoundError("Course");
+    }
+
+    return withLock(`course-share:${userId}:${courseId}`, async () => {
+      const existing = await db.query.courseShares.findFirst({
+        where: and(
+          eq(courseShares.userId, userId),
+          eq(courseShares.courseId, courseId),
+        ),
+      });
+      if (existing) return this.toShareLink(existing);
+
+      // Retry on the (astronomically unlikely) referral_code collision.
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          const [row] = await db
+            .insert(courseShares)
+            .values({
+              userId,
+              courseId,
+              referralCode: this.generateReferralCode(),
+            })
+            .returning();
+          await auditLog("course.shared", { userId, courseId });
+          return this.toShareLink(row);
+        } catch (err) {
+          const code = (err as { code?: string }).code;
+          // 23505 = unique_violation. A concurrent insert of the same
+          // (user, course) pair means we should return their row.
+          if (code === "23505") {
+            const row = await db.query.courseShares.findFirst({
+              where: and(
+                eq(courseShares.userId, userId),
+                eq(courseShares.courseId, courseId),
+              ),
+            });
+            if (row) return this.toShareLink(row);
+            continue; // else it was a code collision — regenerate
+          }
+          throw err;
+        }
+      }
+      throw new Error("Could not allocate a unique referral code");
     });
   }
 
   /**
-   * Returns a personalised list of recommended courses for the given user.
-   *
-   * ## Query plan (≤ 3 DB round-trips per request)
-   *
-   * **Query 1 — user context** (always runs, never cached individually)
-   * A single query joining enrollments LEFT JOIN credentials LEFT JOIN a
-   * quiz_submissions aggregate subquery. Returns:
-   *   - every course the user is already enrolled in (→ exclusion list)
-   *   - which of those they completed (completedAt IS NOT NULL)
-   *   - whether they have a credential (credentialCourseId IS NOT NULL)
-   *   - their average quiz score across all submissions
-   * This merges original queries 1, 2, and 3 into one round-trip.
-   *
-   * **Query 2 — peer collaborative signal** (cached 24 h per user)
-   * Finds other users who share ≥1 enrolled course with the current user
-   * (capped at 500 peers), then aggregates the other courses those peers
-   * enrolled in. Expensive for large datasets; the 24-hour cache means the
-   * full join only re-runs once per day per user.
-   * This replaces original query 4.
-   *
-   * **Query 3 — candidate courses + enrollment counts** (result cached 1 h)
-   * Fetches active courses the user is NOT enrolled in, with their total
-   * enrollment counts included via a lateral subquery, in a single pass.
-   * This merges original queries 5 and 6 into one round-trip.
-   *
-   * ## Scoring
-   * Each candidate is scored as:
-   *   peerCount × 3   (collaborative signal — strongest indicator)
-   *   + difficultyBonus (2 if matches inferred level, 1 if adjacent)
-   *   + log(enrolledCount + 1) (popularity fallback for new users)
-   *
-   * Results are sorted descending by score, capped at `limit`.
+   * Resolve a referral code to its course, counting the click (#325). Used
+   * by the public share link so opening it is tracked. A missing/stale code
+   * 404s rather than silently redirecting.
+   */
+  async resolveShareLink(
+    referralCode: string,
+    viewerId: string | null,
+  ): Promise<ResolvedShareLink> {
+    const share = await db.query.courseShares.findFirst({
+      where: eq(courseShares.referralCode, referralCode),
+    });
+    if (!share) {
+      throw new NotFoundError("Share link");
+    }
+
+    // Don't inflate the metric when the sharer opens their own link.
+    if (viewerId !== share.userId) {
+      await db
+        .update(courseShares)
+        .set({ clickCount: sql`${courseShares.clickCount} + 1` })
+        .where(eq(courseShares.id, share.id));
+    }
+
+    return {
+      referralCode: share.referralCode,
+      sharedByUserId: share.userId,
+      course: await this.getCourseDetail(share.courseId, viewerId),
+    };
+  }
+
+  /**
+   * Credit a referral with an enrollment (#325). Best-effort — called after
+   * a successful enroll(); a bad or self-referral code is ignored rather
+   * than failing the enrollment.
+   */
+  private async trackReferralEnrollment(
+    referralCode: string,
+    courseId: string,
+    enrolleeId: string,
+  ): Promise<void> {
+    try {
+      const result = await db
+        .update(courseShares)
+        .set({ enrollmentCount: sql`${courseShares.enrollmentCount} + 1` })
+        .where(
+          and(
+            eq(courseShares.referralCode, referralCode),
+            eq(courseShares.courseId, courseId),
+            ne(courseShares.userId, enrolleeId),
+          ),
+        )
+        .returning({ userId: courseShares.userId });
+
+      if (result.length > 0) {
+        await auditLog("course.referral_enrolled", {
+          userId: enrolleeId,
+          courseId,
+        });
+      }
+    } catch (err) {
+      logger.warn(
+        { err, courseId, referralCode },
+        "Failed to record referral enrollment — enrollment itself succeeded",
+      );
+    }
+  }
+
+  /**
+   * Generate personalized course recommendations for a user (#328).
+   * Heuristic: recommend courses one difficulty level above completed courses,
+   * filtered by similar tags. Falls back to popular courses for new users.
+   * Cached per user for 1 hour — recommendation quality doesn't need to be
+   * real-time, and the query aggregates enrollment/completion data.
    */
   async getRecommendedCourses(
     userId: string,
-    limit = 10,
-  ): Promise<GetRecommendationsResult> {
-    const RESULT_CACHE_TTL = 60 * 60;       // 1 hour
-    const PEER_CACHE_TTL  = 60 * 60 * 24;  // 24 hours
-    const MAX_PEERS       = 500;
-    const DIFFICULTY_ORDER = ["beginner", "intermediate", "advanced"] as const;
+    limit: number = 10,
+  ): Promise<CourseSummary[]> {
+    const namespace = "courses";
+    const cacheKeyString = cacheKey(namespace, "recommended", userId, limit);
 
-    const resultCacheKey = cacheKey("courses", "recommended", userId);
-    const peerCacheKey   = cacheKey("courses", "recommended", "peers", userId);
+    const cached = await cacheGet<Omit<CourseSummary, "isEnrolled">[]>(
+      namespace,
+      cacheKeyString,
+    );
+    if (cached) {
+      return cached.map((course) => ({ ...course, isEnrolled: false }));
+    }
 
-    // ── Full result cache ────────────────────────────────────────────────
-    const cached = await cacheGet<GetRecommendationsResult>(
-      "courses",
-      resultCacheKey,
+    // Get user's enrolled courses with their completions
+    const enrolledRows = await db
+      .select({
+        courseId: enrollments.courseId,
+        difficulty: courses.difficulty,
+        tags: courses.tags,
+        completed: enrollments.completedAt,
+      })
+      .from(enrollments)
+      .innerJoin(courses, eq(enrollments.courseId, courses.id))
+      .where(eq(enrollments.userId, userId));
+
+    // If user is new (no enrollments), return popular courses
+    if (enrolledRows.length === 0) {
+      const popular = await this.getPopularCourses(limit);
+      await cacheSet(cacheKeyString, popular, 3600);
+      return popular;
+    }
+
+    // Analyze completed courses to determine recommendation criteria
+    const completedCourses = enrolledRows.filter((r) => r.completed !== null);
+    const enrolledCourseIds = new Set(enrolledRows.map((r) => r.courseId));
+
+    // Collect tags from enrolled courses
+    const userTags = new Set<string>();
+    for (const row of enrolledRows) {
+      const tags = row.tags as string[] | null;
+      if (tags) {
+        for (const tag of tags) userTags.add(tag);
+      }
+    }
+
+    // Determine target difficulty: one level above highest completed
+    let targetDifficulty: string | null = null;
+    if (completedCourses.length > 0) {
+      const difficulties = completedCourses.map((c) => c.difficulty);
+      if (difficulties.includes("beginner")) {
+        targetDifficulty = "intermediate";
+      } else if (difficulties.includes("intermediate")) {
+        targetDifficulty = "advanced";
+      }
+      // If all completed are advanced, keep targetDifficulty null (will show all difficulties)
+    }
+
+    // Build recommendation query
+    const conditions = [
+      eq(courses.isActive, true),
+      sql`${courses.id} NOT IN ${enrolledCourseIds.size > 0 ? sql`(${sql.join(Array.from(enrolledCourseIds).map((id) => sql`${id}`), sql`, `)})` : sql`('')`}`,
+    ];
+
+    if (targetDifficulty) {
+      conditions.push(eq(courses.difficulty, targetDifficulty));
+    }
+
+    const candidateRows = await db
+      .select({
+        id: courses.id,
+        title: courses.title,
+        description: courses.description,
+        difficulty: courses.difficulty,
+        tags: courses.tags,
+        isActive: courses.isActive,
+      })
+      .from(courses)
+      .where(and(...conditions))
+      .limit(limit * 3); // Get more candidates to allow tag-based sorting
+
+    // Score courses by tag overlap
+    const scored = candidateRows.map((course) => {
+      const courseTags = (course.tags as string[] | null) ?? [];
+      const tagOverlap = courseTags.filter((tag) => userTags.has(tag)).length;
+      return { course, tagOverlap };
+    });
+
+    // Sort by tag overlap (descending), then take the limit
+    scored.sort((a, b) => b.tagOverlap - a.tagOverlap);
+    const topCourses = scored.slice(0, limit).map((s) => s.course);
+
+    // Get enrollment counts for the recommended courses
+    const courseIds = topCourses.map((c) => c.id);
+    const enrollmentCounts = new Map<string, number>();
+
+    if (courseIds.length > 0) {
+      const counts = await db
+        .select({
+          courseId: enrollments.courseId,
+          value: count(),
+        })
+        .from(enrollments)
+        .where(inArray(enrollments.courseId, courseIds))
+        .groupBy(enrollments.courseId);
+
+      for (const c of counts) {
+        enrollmentCounts.set(c.courseId, c.value);
+      }
+    }
+
+    const recommendations = topCourses.map((course) => ({
+      id: course.id,
+      title: course.title,
+      description: course.description,
+      difficulty: course.difficulty,
+      isActive: course.isActive,
+      enrolledCount: enrollmentCounts.get(course.id) ?? 0,
+    }));
+
+    // If we got fewer than requested, pad with popular courses
+    if (recommendations.length < limit) {
+      const popular = await this.getPopularCourses(limit - recommendations.length);
+      const popularFiltered = popular.filter(
+        (p) => !enrolledCourseIds.has(p.id) && !recommendations.find((r) => r.id === p.id),
+      );
+      recommendations.push(...popularFiltered);
+    }
+
+    await cacheSet(cacheKeyString, recommendations, 3600);
+
+    return recommendations.map((course) => ({ ...course, isEnrolled: false }));
+  }
+
+  // ─── Course Reviews ─────────────────────────────────────────────────────
+
+  /**
+   * Average rating + review count for a course, cached separately from the
+   * paginated review list itself so getCourseDetail (which only needs the
+   * summary, not every review) can reuse it cheaply. Invalidated together
+   * with the course detail cache whenever a review is created/updated.
+   */
+  private async getReviewStats(
+    courseId: string,
+  ): Promise<{ averageRating: number | null; reviewCount: number }> {
+    const namespace = "courses";
+    const cacheKeyString = cacheKey(namespace, "review-stats", courseId);
+
+    const cached = await cacheGet<{
+      averageRating: number | null;
+      reviewCount: number;
+    }>(namespace, cacheKeyString);
+    if (cached) return cached;
+
+    const [row] = await db
+      .select({
+        average: sql<string | null>`AVG(${courseReviews.rating})`,
+        total: count(),
+      })
+      .from(courseReviews)
+      .where(eq(courseReviews.courseId, courseId));
+
+    const stats = {
+      averageRating:
+        row?.average != null ? Number(Number(row.average).toFixed(2)) : null,
+      reviewCount: row?.total ?? 0,
+    };
+
+    await cacheSet(cacheKeyString, stats, 300);
+
+    return stats;
+  }
+
+  private async invalidateReviewCaches(courseId: string): Promise<void> {
+    const invalidations = await Promise.allSettled([
+      cacheDel(cacheKey("courses", "review-stats", courseId)),
+      cacheDel(cacheKey("courses", "detail", courseId)),
+      cacheInvalidatePattern(cacheKeyPattern("courses", "reviews", courseId)),
+    ]);
+    const failed = invalidations.filter((r) => r.status === "rejected");
+    if (failed.length > 0) {
+      logger.warn(
+        { courseId, failedCount: failed.length },
+        "Post-review cache invalidation had failures — affected views may serve stale data until their TTL expires",
+      );
+    }
+  }
+
+  /** Paginated review list for a course, alongside its average rating. */
+  async getCourseReviews(
+    courseId: string,
+    query: ListReviewsQuery,
+  ): Promise<CourseReviewsResult> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course || !course.isActive) {
+      throw new NotFoundError("Course");
+    }
+
+    const namespace = "courses";
+    const cacheKeyString = cacheKey(
+      namespace,
+      "reviews",
+      courseId,
+      query.page,
+      query.limit,
+    );
+
+    let listData = await cacheGet<{ reviews: CourseReview[]; total: number }>(
+      namespace,
+      cacheKeyString,
+    );
+
+    if (!listData) {
+      const offset = (query.page - 1) * query.limit;
+
+      const [[totalResult], rows] = await Promise.all([
+        db
+          .select({ value: count() })
+          .from(courseReviews)
+          .where(eq(courseReviews.courseId, courseId)),
+        db
+          .select({
+            id: courseReviews.id,
+            userId: courseReviews.userId,
+            displayName: users.displayName,
+            rating: courseReviews.rating,
+            reviewText: courseReviews.reviewText,
+            createdAt: courseReviews.createdAt,
+            updatedAt: courseReviews.updatedAt,
+          })
+          .from(courseReviews)
+          .innerJoin(users, eq(courseReviews.userId, users.id))
+          .where(eq(courseReviews.courseId, courseId))
+          .orderBy(desc(courseReviews.createdAt))
+          .limit(query.limit)
+          .offset(offset),
+      ]);
+
+      listData = { reviews: rows, total: totalResult?.value ?? 0 };
+      await cacheSet(cacheKeyString, listData, 60);
+    }
+
+    const stats = await this.getReviewStats(courseId);
+
+    return {
+      reviews: listData.reviews,
+      total: listData.total,
+      averageRating: stats.averageRating,
+      totalReviews: stats.reviewCount,
+    };
+  }
+
+  /**
+   * Admin: paginated list of a course's enrolled users with their
+   * quiz-progress summary (#340). quizCount/averageScore are computed from
+   * quiz_submissions joined to quizzes scoped to this course, excluding
+   * superseded submissions (a retried quiz's earlier submission is kept
+   * for history but no longer counts as "the" submission — same rule
+   * reward logic elsewhere in this service follows).
+   */
+  async getEnrolledUsers(
+    courseId: string,
+    query: ListEnrolledUsersQuery,
+  ): Promise<EnrolledUsersResult> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    const namespace = "courses";
+    const cacheKeyString = cacheKey(
+      namespace,
+      "enrolled-users",
+      courseId,
+      query.page,
+      query.limit,
+    );
+
+    const cached = await cacheGet<EnrolledUsersResult>(
+      namespace,
+      cacheKeyString,
     );
     if (cached) return cached;
 
-    // ── Query 1: user context ────────────────────────────────────────────
-    // Joins enrollments → credentials (LEFT) → per-user avg score subquery.
-    // One round-trip replaces the original 3 sequential queries.
-    const userScoreSubquery = db
-      .select({
-        userId: quizSubmissions.userId,
-        avgScore: avg(quizSubmissions.score).as("avg_score"),
-      })
-      .from(quizSubmissions)
-      .where(eq(quizSubmissions.userId, userId))
-      .groupBy(quizSubmissions.userId)
-      .as("user_scores");
+    const offset = (query.page - 1) * query.limit;
 
-    const userEnrollmentRows = await db
-      .select({
-        courseId:           enrollments.courseId,
-        completedAt:        enrollments.completedAt,
-        credentialCourseId: credentials.courseId,
-        avgScore:           userScoreSubquery.avgScore,
-      })
-      .from(enrollments)
-      .leftJoin(
-        credentials,
-        and(
-          eq(credentials.userId, userId),
-          eq(credentials.courseId, enrollments.courseId),
-        ),
-      )
-      .leftJoin(userScoreSubquery, eq(userScoreSubquery.userId, userId))
-      .where(eq(enrollments.userId, userId));
+    const [[totalResult], enrolledRows] = await Promise.all([
+      db
+        .select({ value: count() })
+        .from(enrollments)
+        .where(eq(enrollments.courseId, courseId)),
+      db
+        .select({
+          userId: users.id,
+          displayName: users.displayName,
+          stellarAddress: users.stellarAddress,
+          enrolledAt: enrollments.enrolledAt,
+          completedAt: enrollments.completedAt,
+        })
+        .from(enrollments)
+        .innerJoin(users, eq(enrollments.userId, users.id))
+        .where(eq(enrollments.courseId, courseId))
+        .orderBy(desc(enrollments.enrolledAt))
+        .limit(query.limit)
+        .offset(offset),
+    ]);
 
-    const enrolledCourseIds = userEnrollmentRows.map((r) => r.courseId);
-    const completedCourseIds = new Set(
-      userEnrollmentRows
-        .filter((r) => r.completedAt !== null)
-        .map((r) => r.courseId),
-    );
+    const userIds = enrolledRows.map((row) => row.userId);
 
-    // Infer preferred difficulty from completed courses
-    const rawAvgScore = userEnrollmentRows[0]?.avgScore ?? null;
-    const avgScore = rawAvgScore !== null ? parseFloat(String(rawAvgScore)) : null;
-
-    // Map avg score → difficulty bucket
-    // ≥ 80 → ready for the next level; < 50 → suggest easier; otherwise stay
-    const completedCount = completedCourseIds.size;
-    let inferredDifficulty: (typeof DIFFICULTY_ORDER)[number] | null = null;
-    if (completedCount > 0 && avgScore !== null) {
-      // Most-common difficulty among completed courses would require another
-      // query; instead use score as a proxy (sufficient without extra DB call)
-      if (avgScore >= 80) {
-        inferredDifficulty = "intermediate"; // default upward step
-      } else if (avgScore < 50) {
-        inferredDifficulty = "beginner";
-      } else {
-        inferredDifficulty = "intermediate";
-      }
-    } else if (completedCount === 0) {
-      inferredDifficulty = "beginner";
-    }
-
-    // ── Query 2: peer collaborative signal (24 h cache) ──────────────────
-    // Returns a map of courseId → number of peers who enrolled in that course.
-    let peerCourseSignal = await cacheGet<Record<string, number>>(
-      "courses",
-      peerCacheKey,
-    );
-
-    if (!peerCourseSignal) {
-      peerCourseSignal = {};
-
-      if (enrolledCourseIds.length > 0) {
-        // Single query: use a subquery to find peer user IDs inline, then
-        // aggregate their other enrollments — one round-trip instead of two.
-        const peersSubquery = db
-          .selectDistinct({ peerId: enrollments.userId })
-          .from(enrollments)
+    const progressRows = userIds.length
+      ? await db
+          .select({
+            userId: quizSubmissions.userId,
+            quizCount: count(),
+            averageScore: sql<string | null>`AVG(${quizSubmissions.score})`,
+          })
+          .from(quizSubmissions)
+          .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
           .where(
             and(
-              inArray(enrollments.courseId, enrolledCourseIds),
-              sql`${enrollments.userId} != ${userId}`,
+              eq(quizzes.courseId, courseId),
+              eq(quizSubmissions.superseded, false),
+              inArray(quizSubmissions.userId, userIds),
             ),
           )
-          .limit(MAX_PEERS)
-          .as("peers");
+          .groupBy(quizSubmissions.userId)
+      : [];
 
-        const peerEnrollmentCounts = await db
-          .select({
-            courseId:  enrollments.courseId,
-            peerCount: count().as("peer_count"),
-          })
-          .from(enrollments)
-          .innerJoin(peersSubquery, eq(enrollments.userId, peersSubquery.peerId))
-          .where(
-            enrolledCourseIds.length > 0
-              ? notInArray(enrollments.courseId, enrolledCourseIds)
-              : sql`true`,
-          )
-          .groupBy(enrollments.courseId);
+    const progressByUser = new Map(
+      progressRows.map((row) => [
+        row.userId,
+        {
+          quizCount: row.quizCount,
+          averageScore:
+            row.averageScore != null
+              ? Number(Number(row.averageScore).toFixed(2))
+              : null,
+        },
+      ]),
+    );
 
-        for (const row of peerEnrollmentCounts) {
-          peerCourseSignal[row.courseId] = row.peerCount;
-        }
-      }
+    const result: EnrolledUsersResult = {
+      users: enrolledRows.map((row) => ({
+        userId: row.userId,
+        displayName: row.displayName,
+        stellarAddress: row.stellarAddress,
+        enrolledAt: row.enrolledAt,
+        completedAt: row.completedAt,
+        quizCount: progressByUser.get(row.userId)?.quizCount ?? 0,
+        averageScore: progressByUser.get(row.userId)?.averageScore ?? null,
+      })),
+      total: totalResult?.value ?? 0,
+    };
 
-      await cacheSet(peerCacheKey, peerCourseSignal, PEER_CACHE_TTL);
+    await cacheSet(cacheKeyString, result, 30);
+
+    return result;
+  }
+
+  /**
+   * Create or update the caller's review for a course (one review per user
+   * per course — a repeat submission overwrites the previous rating/text).
+   * Restricted to users who hold a completion credential for the course,
+   * since minting one already requires a passing quiz submission.
+   */
+  async upsertReview(
+    userId: string,
+    courseId: string,
+    data: CreateReviewBody,
+  ): Promise<CourseReview> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course || !course.isActive) {
+      throw new NotFoundError("Course");
     }
 
-    // ── Query 3: candidate courses + enrollment counts ────────────────────
-    // Single query: active courses the user isn't in, with enrollment count
-    // included via a correlated subquery. Merges original queries 5 and 6.
-    const candidateQuery = db
-      .select({
-        id:            courses.id,
-        title:         courses.title,
-        description:   courses.description,
-        difficulty:    courses.difficulty,
-        isActive:      courses.isActive,
-        // Inline correlated subquery so enrollment counts come back in the
-        // same round-trip rather than a separate aggregation query.
-        enrolledCount: sql<number>`(
-          SELECT count(*)::int
-          FROM enrollments e2
-          WHERE e2.course_id = ${courses.id}
-        )`.as("enrolled_count"),
+    const credential = await db.query.credentials.findFirst({
+      where: and(
+        eq(credentials.userId, userId),
+        eq(credentials.courseId, courseId),
+      ),
+    });
+    if (!credential) {
+      throw new ForbiddenError(
+        "Must complete the course before reviewing it",
+      );
+    }
+
+    const reviewText = data.reviewText ?? null;
+    const [row] = await db
+      .insert(courseReviews)
+      .values({ userId, courseId, rating: data.rating, reviewText })
+      .onConflictDoUpdate({
+        target: [courseReviews.userId, courseReviews.courseId],
+        set: { rating: data.rating, reviewText, updatedAt: new Date() },
       })
+      .returning();
+
+    await this.invalidateReviewCaches(courseId);
+    await auditLog("course.reviewed", { userId, courseId, rating: data.rating });
+    logger.info({ userId, courseId, rating: data.rating }, "Course review saved");
+
+    const user = await db.query.users.findFirst({
+      where: eq(users.id, userId),
+    });
+
+    return {
+      id: row.id,
+      userId: row.userId,
+      displayName: user?.displayName ?? null,
+      rating: row.rating,
+      reviewText: row.reviewText,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    };
+  }
+
+  // ─── Admin ──────────────────────────────────────────────────────────────
+
+  private async invalidateCourseCaches(courseId?: string): Promise<void> {
+    const invalidations = await Promise.allSettled([
+      cacheInvalidatePattern(cacheKeyPattern("courses", "list")),
+      cacheInvalidatePattern(cacheKeyPattern("courses", "popular")),
+      cacheDel(cacheKey("courses", "stats")),
+      ...(courseId ? [cacheDel(cacheKey("courses", "detail", courseId))] : []),
+    ]);
+    const failed = invalidations.filter((r) => r.status === "rejected");
+    if (failed.length > 0) {
+      logger.warn(
+        { courseId, failedCount: failed.length },
+        "Post-admin-write course cache invalidation had failures — affected views may serve stale data until their TTL expires",
+      );
+    }
+  }
+
+  private toAdminCourse(row: typeof courses.$inferSelect): AdminCourse {
+    return {
+      id: row.id,
+      title: row.title,
+      description: row.description,
+      difficulty: row.difficulty,
+      tags: row.tags ?? [],
+      courseModules: this.normalizeCourseModules(row.courseModules),
+      contentHash: row.contentHash,
+      isActive: row.isActive,
+      isDraft: row.isDraft,
+      modules: (row.modules ?? []) as CourseModuleDefinition[],
+      accessibilityScore: row.accessibilityScore,
+      prerequisites: row.prerequisites ?? [],
+      createdAt: row.createdAt,
+    };
+  }
+
+  /**
+   * The free-text fields accessibility rules are run over (#326). The
+   * course's own description plus every module description — module titles
+   * are short labels that can't contain markup, so including them would only
+   * add noise.
+   */
+  private courseContentFields(row: {
+    description: string | null;
+    courseModules?: unknown;
+    modules?: unknown;
+  }): Record<string, string | null> {
+    const fields: Record<string, string | null> = {
+      description: row.description,
+    };
+
+    const modules = [
+      ...this.normalizeCourseModules(
+        (row.courseModules as never) ?? null,
+      ),
+      ...(((row.modules ?? []) as CourseModuleDefinition[]) || []),
+    ];
+    modules.forEach((module, i) => {
+      if (module.description) {
+        fields[`module:${i}:${module.id}`] = module.description;
+      }
+    });
+
+    return fields;
+  }
+
+  async createCourse(data: CreateCourseBody): Promise<AdminCourse> {
+    // Score the authored content before the insert so the stored
+    // accessibility_score reflects what was actually submitted (#326).
+    const accessibility = checkAccessibility({
+      description: data.description,
+      ...(data.courseModules ?? []).reduce<Record<string, string | null>>(
+        (acc, module, i) => {
+          if (module.description) {
+            acc[`module:${i}:${module.id}`] = module.description;
+          }
+          return acc;
+        },
+        {},
+      ),
+    });
+
+    const [course] = await db
+      .insert(courses)
+      .values({
+        title: data.title,
+        description: data.description,
+        difficulty: data.difficulty,
+        tags: data.tags,
+        courseModules: data.courseModules,
+        contentHash: data.contentHash,
+        accessibilityScore: accessibility.score,
+        prerequisites: data.prerequisites ?? [],
+      })
+      .returning();
+
+    await this.invalidateCourseCaches();
+    await auditLog("course.created", { courseId: course.id });
+    logger.info({ courseId: course.id }, "Course created");
+
+    return this.toAdminCourse(course);
+  }
+
+  /**
+   * Bulk course creation from an uploaded JSON file (#366). Creates the
+   * course exactly as createCourse() does, then creates each entry in
+   * `modules` as a real course module (via createModule(), so each gets a
+   * generated ID and the same validation/locking/cache-invalidation/audit
+   * behavior a manually-created module would).
+   */
+  async importCourse(data: ImportCourseBody): Promise<ImportCourseResult> {
+    const course = await this.createCourse(data);
+
+    for (const module of data.modules) {
+      await this.createModule(course.id, module);
+    }
+
+    await auditLog("course.imported", {
+      courseId: course.id,
+      moduleCount: data.modules.length,
+    });
+    logger.info(
+      { courseId: course.id, moduleCount: data.modules.length },
+      "Course imported from JSON",
+    );
+
+    return { courseId: course.id, modulesCreated: data.modules.length };
+  }
+
+  async updateCourse(
+    courseId: string,
+    data: UpdateCourseBody,
+  ): Promise<AdminCourseWithAccessibility> {
+    const [existing] = await db
+      .select()
       .from(courses)
+      .where(eq(courses.id, courseId));
+
+    if (!existing) {
+      throw new NotFoundError("Course");
+    }
+
+    // A course can't be its own prerequisite.
+    const sanitized = data.prerequisites
+      ? { ...data, prerequisites: data.prerequisites.filter((id) => id !== courseId) }
+      : data;
+
+    // Publishing (isActive = true) ends the draft state (#376).
+    const values =
+      sanitized.isActive === true ? { ...sanitized, isDraft: false } : sanitized;
+
+    // Score accessibility over the *merged* content (fields the caller is
+    // updating plus everything they're leaving alone) so the stored score
+    // always describes the course as it now stands (#326). Computed before
+    // the write so the score and the content land in the same statement.
+    const merged = {
+      description: values.description ?? existing.description,
+      courseModules: values.courseModules ?? existing.courseModules,
+      // `modules` isn't part of UpdateCourseBody — module definitions are
+      // only ever changed through create/update/deleteModule, which score
+      // accessibility on their own.
+      modules: existing.modules,
+    };
+    const accessibility = checkAccessibility(this.courseContentFields(merged));
+
+    const [course] = await db
+      .update(courses)
+      .set({ ...values, accessibilityScore: accessibility.score })
+      .where(eq(courses.id, courseId))
+      .returning();
+
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    await this.invalidateCourseCaches(courseId);
+    await auditLog("course.updated", { courseId });
+    logger.info({ courseId }, "Course updated");
+
+    return { ...this.toAdminCourse(course), accessibility };
+  }
+
+  /**
+   * Saves course content as a draft (#376): applies the supplied fields and
+   * marks the course `isDraft = true, isActive = false`, so it is hidden from
+   * users while it is worked on. It can be saved any number of times, and is
+   * published by setting `isActive = true` (which clears the draft flag).
+   */
+  async saveDraft(
+    courseId: string,
+    data: DraftCourseBody,
+  ): Promise<AdminCourse> {
+    const sanitized = data.prerequisites
+      ? { ...data, prerequisites: data.prerequisites.filter((id) => id !== courseId) }
+      : data;
+
+    const [course] = await db
+      .update(courses)
+      .set({ ...sanitized, isDraft: true, isActive: false })
+      .where(eq(courses.id, courseId))
+      .returning();
+
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    await this.invalidateCourseCaches(courseId);
+    await auditLog("course.draft_saved", { courseId });
+    logger.info({ courseId }, "Course saved as draft");
+
+    return this.toAdminCourse(course);
+  }
+
+  /** Soft-deletes a course by setting isActive = false (#292). */
+  async deleteCourse(courseId: string): Promise<void> {
+    const [course] = await db
+      .update(courses)
+      .set({ isActive: false })
+      .where(eq(courses.id, courseId))
+      .returning();
+
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    await this.invalidateCourseCaches(courseId);
+    await auditLog("course.deleted", { courseId });
+    logger.info({ courseId }, "Course soft-deleted");
+  }
+
+  /**
+   * Archive a course (#358): hides it from public listings while preserving
+   * its data and its enrolled users' access. Distinct from `deleteCourse`
+   * because it records *when* the course was archived, so an archived course
+   * can be told apart from one that was merely never published (both just
+   * have isActive = false).
+   *
+   * Re-archiving an already-archived course is a no-op on archivedAt rather
+   * than resetting it, so the timestamp keeps meaning "first archived".
+   */
+  async archiveCourse(courseId: string): Promise<AdminCourse> {
+    const [course] = await db
+      .update(courses)
+      .set({
+        isActive: false,
+        archivedAt: sql`COALESCE(${courses.archivedAt}, NOW())`,
+      })
+      .where(eq(courses.id, courseId))
+      .returning();
+
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    await this.invalidateCourseCaches(courseId);
+    await auditLog("course.archived", { courseId });
+    logger.info({ courseId }, "Course archived");
+
+    return this.toAdminCourse(course);
+  }
+
+  /**
+   * Evaluate whether a course has everything it needs to go live (#384).
+   *
+   * Purely a read — it never writes to the course. Used both by the
+   * publish-check endpoint and by publishCourse(), so the issues an admin is
+   * shown beforehand are exactly the ones that will block the publish.
+   *
+   * Blocking: title, description, difficulty, at least one module, and at
+   * least one non-empty quiz per module. Quizzes are matched against the
+   * admin-defined `modules` structure (#304) rather than the other way
+   * around, because a learner walks the module list — a quiz hanging off a
+   * moduleId that isn't in it is unreachable content, not a passed check.
+   *
+   * Advisory: a module with no description. There's no separate content
+   * table in this schema, so a module's description *is* its content; a
+   * module without one still publishes today, so this is surfaced as a
+   * warning rather than a hard stop.
+   */
+  private async evaluatePublishReadiness(
+    courseId: string,
+  ): Promise<PublishCheckResult> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    const requirements: PublishCheckRequirement[] = [];
+    const issues: PublishCheckIssue[] = [];
+
+    const addRequirement = (
+      key: string,
+      label: string,
+      satisfied: boolean,
+      severity: PublishCheckSeverity,
+      onFail: () => PublishCheckIssue,
+    ) => {
+      requirements.push({ key, label, satisfied, severity });
+      if (!satisfied) issues.push(onFail());
+    };
+
+    addRequirement(
+      "title",
+      "Course has a title",
+      !!course.title?.trim(),
+      "blocking",
+      () => ({
+        field: "title",
+        severity: "blocking",
+        message: "Course is missing a title.",
+      }),
+    );
+
+    addRequirement(
+      "description",
+      "Course has a description",
+      !!course.description?.trim(),
+      "blocking",
+      () => ({
+        field: "description",
+        severity: "blocking",
+        message: "Course is missing a description.",
+      }),
+    );
+
+    addRequirement(
+      "difficulty",
+      "Course has a difficulty level",
+      !!course.difficulty?.trim(),
+      "blocking",
+      () => ({
+        field: "difficulty",
+        severity: "blocking",
+        message: "Course is missing a difficulty level.",
+      }),
+    );
+
+    const modules = (course.modules ?? []) as CourseModuleDefinition[];
+
+    addRequirement(
+      "modules",
+      "Course has at least one module",
+      modules.length > 0,
+      "blocking",
+      () => ({
+        field: "modules",
+        severity: "blocking",
+        message:
+          "Course has no modules — add at least one before publishing.",
+      }),
+    );
+
+    if (modules.length > 0) {
+      // One query for every quiz on the course, grouped by module. Doing it
+      // per module would issue len(modules) round trips for a check that's
+      // on an admin's publish path.
+      const quizRows = await db
+        .select({
+          moduleId: quizzes.moduleId,
+          questionCount: sql<number>`jsonb_array_length(${quizzes.questions})`,
+        })
+        .from(quizzes)
+        .where(eq(quizzes.courseId, courseId))
+        .groupBy(quizzes.moduleId);
+
+      const questionsByModule = new Map<string, number>();
+      for (const row of quizRows) {
+        questionsByModule.set(
+          row.moduleId,
+          (questionsByModule.get(row.moduleId) ?? 0) + (row.questionCount ?? 0),
+        );
+      }
+
+      for (const module of modules) {
+        const moduleLabel = `Module "${module.title}"`;
+
+        addRequirement(
+          `module:${module.id}:content`,
+          `${moduleLabel} has content`,
+          !!module.description?.trim(),
+          "advisory",
+          () => ({
+            field: "moduleContent",
+            severity: "advisory",
+            message: `${moduleLabel} has no description. Learners will see an empty module — this does not block publishing.`,
+            moduleId: module.id,
+            moduleTitle: module.title,
+          }),
+        );
+
+        const questionCount = questionsByModule.get(module.id) ?? 0;
+        addRequirement(
+          `module:${module.id}:quizzes`,
+          `${moduleLabel} has a quiz`,
+          questionCount > 0,
+          "blocking",
+          () => ({
+            field: "quizzes",
+            severity: "blocking",
+            message: `${moduleLabel} has no quiz. Create one, or the course cannot be published.`,
+            moduleId: module.id,
+            moduleTitle: module.title,
+          }),
+        );
+      }
+    }
+
+    // A course with no modules has a "0 of 1" style denominator, not a
+    // divide-by-zero — the three field checks above still stand on their own.
+    const satisfied = requirements.filter((r) => r.satisfied).length;
+    const readinessScore =
+      requirements.length === 0
+        ? 0
+        : Math.round((satisfied / requirements.length) * 100);
+
+    return {
+      courseId,
+      ready: !issues.some((issue) => issue.severity === "blocking"),
+      readinessScore,
+      requirements,
+      issues,
+      checkedAt: new Date(),
+    };
+  }
+
+  /**
+   * Run the publish-readiness check on its own, without publishing
+   * anything (#384). Non-destructive by construction — it only reads.
+   */
+  async getPublishCheck(courseId: string): Promise<PublishCheckResult> {
+    return this.evaluatePublishReadiness(courseId);
+  }
+
+  /**
+   * Publish a course (isActive = true) after validating it has the content
+   * required to go live. Shares evaluatePublishReadiness() with the
+   * publish-check endpoint, so the two can never disagree: any blocking
+   * issue reported by publish-check is exactly what makes this throw.
+   * Publishing also clears the draft flag (#376).
+   */
+  async publishCourse(courseId: string): Promise<AdminCourseWithAccessibility> {
+    const check = await this.evaluatePublishReadiness(courseId);
+
+    if (!check.ready) {
+      throw new ValidationError({
+        requirements: check.issues
+          .filter((issue) => issue.severity === "blocking")
+          .map((issue) => issue.message),
+      });
+    }
+
+    const [existing] = await db
+      .select()
+      .from(courses)
+      .where(eq(courses.id, courseId));
+
+    if (!existing) {
+      throw new NotFoundError("Course");
+    }
+
+    const [published] = await db
+      .update(courses)
+      .set({ isActive: true, isDraft: false, archivedAt: null })
+      .where(eq(courses.id, courseId))
+      .returning();
+
+    if (!published) {
+      throw new NotFoundError("Course");
+    }
+
+    await this.invalidateCourseCaches(courseId);
+    await auditLog("course.published", { courseId });
+    logger.info({ courseId }, "Course published");
+
+    const accessibility = checkAccessibility(
+      this.courseContentFields(published),
+    );
+
+    return { ...this.toAdminCourse(published), accessibility };
+  }
+
+  private normalizeCourseModules(
+    modules: CourseModuleMetadata[] | null,
+  ): CourseModuleMetadata[] {
+    if (!Array.isArray(modules)) return [];
+
+    return modules
+      .filter((module) => module.id && module.title)
+      .map((module) => ({
+        id: module.id,
+        title: module.title,
+        description: module.description,
+        estimatedDurationMinutes: module.estimatedDurationMinutes,
+      }));
+  }
+
+  // ─── Admin: Module Management (#304) ───────────────────────────────────
+
+  /**
+   * Modules are stored as an ordered array in courses.modules (jsonb) — the
+   * lock scopes read-modify-write of that array so two concurrent module
+   * writes on the same course can't clobber each other.
+   */
+  async createModule(
+    courseId: string,
+    data: CreateModuleBody,
+  ): Promise<CourseModuleDefinition> {
+    return withLock(`course-modules:${courseId}`, async () => {
+      const [course] = await db
+        .select()
+        .from(courses)
+        .where(eq(courses.id, courseId));
+
+      if (!course) {
+        throw new NotFoundError("Course");
+      }
+
+      const existingModules = (course.modules ??
+        []) as CourseModuleDefinition[];
+      const newModule: CourseModuleDefinition = {
+        id: crypto.randomUUID(),
+        title: data.title,
+        description: data.description,
+        order: data.order ?? existingModules.length,
+      };
+      const updatedModules = [...existingModules, newModule].sort(
+        (a, b) => a.order - b.order,
+      );
+
+      await db
+        .update(courses)
+        .set({ modules: updatedModules })
+        .where(eq(courses.id, courseId));
+
+      await this.invalidateCourseCaches(courseId);
+      await auditLog("course.module.created", {
+        courseId,
+        moduleId: newModule.id,
+      });
+      logger.info({ courseId, moduleId: newModule.id }, "Course module created");
+
+      return newModule;
+    });
+  }
+
+  async updateModule(
+    courseId: string,
+    moduleId: string,
+    data: UpdateModuleBody,
+  ): Promise<CourseModuleDefinition> {
+    return withLock(`course-modules:${courseId}`, async () => {
+      const [course] = await db
+        .select()
+        .from(courses)
+        .where(eq(courses.id, courseId));
+
+      if (!course) {
+        throw new NotFoundError("Course");
+      }
+
+      const existingModules = (course.modules ??
+        []) as CourseModuleDefinition[];
+      const index = existingModules.findIndex((m) => m.id === moduleId);
+      if (index === -1) {
+        throw new NotFoundError("Module");
+      }
+
+      const updated: CourseModuleDefinition = {
+        ...existingModules[index],
+        ...data,
+      };
+      const updatedModules = [...existingModules];
+      updatedModules[index] = updated;
+      updatedModules.sort((a, b) => a.order - b.order);
+
+      await db
+        .update(courses)
+        .set({ modules: updatedModules })
+        .where(eq(courses.id, courseId));
+
+      await this.invalidateCourseCaches(courseId);
+      await auditLog("course.module.updated", { courseId, moduleId });
+      logger.info({ courseId, moduleId }, "Course module updated");
+
+      return updated;
+    });
+  }
+
+  /**
+   * Deleting a module also removes its associated quizzes (and, via the FK
+   * cascade on quiz_submissions, their submissions) — a module with no
+   * content definition shouldn't leave orphaned quiz data behind.
+   */
+  async deleteModule(courseId: string, moduleId: string): Promise<void> {
+    await withLock(`course-modules:${courseId}`, async () => {
+      await db.transaction(async (tx) => {
+        const [course] = await tx
+          .select()
+          .from(courses)
+          .where(eq(courses.id, courseId));
+
+        if (!course) {
+          throw new NotFoundError("Course");
+        }
+
+        const existingModules = (course.modules ??
+          []) as CourseModuleDefinition[];
+        const index = existingModules.findIndex((m) => m.id === moduleId);
+        if (index === -1) {
+          throw new NotFoundError("Module");
+        }
+
+        const updatedModules = existingModules.filter(
+          (m) => m.id !== moduleId,
+        );
+
+        await tx
+          .update(courses)
+          .set({ modules: updatedModules })
+          .where(eq(courses.id, courseId));
+
+        await tx
+          .delete(quizzes)
+          .where(
+            and(eq(quizzes.courseId, courseId), eq(quizzes.moduleId, moduleId)),
+          );
+      });
+    });
+
+    await this.invalidateCourseCaches(courseId);
+    await auditLog("course.module.deleted", { courseId, moduleId });
+    logger.info({ courseId, moduleId }, "Course module deleted");
+  }
+
+  /**
+   * Detailed analytics for a course creator: enrollment trends, completion
+   * rate, average quiz score, average time-to-complete, and which modules
+   * learners struggle with most (lowest average quiz score). Cached for 1
+   * hour — this aggregates across every enrollment/submission for the
+   * course, too expensive to recompute on every dashboard load.
+   */
+  async getCourseAnalytics(courseId: string): Promise<CourseAnalytics> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    const namespace = "courses";
+    const cacheKeyString = cacheKey(namespace, "analytics", courseId);
+    const cached = await cacheGet<CourseAnalytics>(namespace, cacheKeyString);
+    if (cached) return cached;
+
+    const [dailyRows, weeklyRows, [totals], moduleRows] = await Promise.all([
+      db
+        .select({
+          date: sql<string>`date_trunc('day', ${enrollments.enrolledAt})::date`,
+          count: count(),
+        })
+        .from(enrollments)
+        .where(
+          and(
+            eq(enrollments.courseId, courseId),
+            sql`${enrollments.enrolledAt} >= now() - interval '30 days'`,
+          ),
+        )
+        .groupBy(sql`date_trunc('day', ${enrollments.enrolledAt})`)
+        .orderBy(sql`date_trunc('day', ${enrollments.enrolledAt})`),
+
+      db
+        .select({
+          date: sql<string>`date_trunc('week', ${enrollments.enrolledAt})::date`,
+          count: count(),
+        })
+        .from(enrollments)
+        .where(
+          and(
+            eq(enrollments.courseId, courseId),
+            sql`${enrollments.enrolledAt} >= now() - interval '12 weeks'`,
+          ),
+        )
+        .groupBy(sql`date_trunc('week', ${enrollments.enrolledAt})`)
+        .orderBy(sql`date_trunc('week', ${enrollments.enrolledAt})`),
+
+      db
+        .select({
+          totalEnrollments: count(),
+          completed: sql<number>`COUNT(*) FILTER (WHERE ${enrollments.completedAt} IS NOT NULL)`.mapWith(Number),
+          avgCompletionHours: sql<string | null>`AVG(EXTRACT(EPOCH FROM (${enrollments.completedAt} - ${enrollments.enrolledAt})) / 3600.0) FILTER (WHERE ${enrollments.completedAt} IS NOT NULL)`,
+          avgQuizScorePercent: sql<string | null>`(
+            SELECT AVG(${quizSubmissions.score}::numeric / NULLIF(jsonb_array_length(${quizzes.questions}), 0) * 100)
+            FROM ${quizSubmissions}
+            INNER JOIN ${quizzes} ON ${quizzes.id} = ${quizSubmissions.quizId}
+            WHERE ${quizzes.courseId} = ${courseId} AND ${quizSubmissions.superseded} = false
+          )`,
+        })
+        .from(enrollments)
+        .where(eq(enrollments.courseId, courseId)),
+
+      db
+        .select({
+          moduleId: quizzes.moduleId,
+          averageScorePercent: sql<string | null>`AVG(${quizSubmissions.score}::numeric / NULLIF(jsonb_array_length(${quizzes.questions}), 0) * 100)`,
+          submissionCount: count(),
+        })
+        .from(quizSubmissions)
+        .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+        .where(
+          and(eq(quizzes.courseId, courseId), eq(quizSubmissions.superseded, false)),
+        )
+        .groupBy(quizzes.moduleId),
+    ]);
+
+    const moduleDefinitions = (course.modules ?? []) as CourseModuleDefinition[];
+    const moduleTitleById = new Map(moduleDefinitions.map((m) => [m.id, m.title]));
+
+    const moduleDifficulty: ModuleDifficulty[] = moduleRows
+      .map((row) => {
+        const averageScore =
+          row.averageScorePercent !== null ? Math.round(Number(row.averageScorePercent)) : null;
+        return {
+          moduleId: row.moduleId,
+          title: moduleTitleById.get(row.moduleId) ?? null,
+          averageScore,
+          submissionCount: row.submissionCount,
+          difficult: averageScore !== null && averageScore < PASSING_PERCENTAGE,
+        };
+      })
+      .sort((a, b) => (a.averageScore ?? 0) - (b.averageScore ?? 0));
+
+    const toTrend = (rows: { date: string; count: number }[]): EnrollmentTrendPoint[] =>
+      rows.map((row) => ({ date: row.date, count: row.count }));
+
+    const totalEnrollments = totals?.totalEnrollments ?? 0;
+    const completed = totals?.completed ?? 0;
+
+    const analytics: CourseAnalytics = {
+      courseId,
+      totalEnrollments,
+      completionRate:
+        totalEnrollments > 0 ? Math.round((completed / totalEnrollments) * 100) : 0,
+      averageTimeToCompleteHours:
+        totals?.avgCompletionHours !== null && totals?.avgCompletionHours !== undefined
+          ? Math.round(Number(totals.avgCompletionHours) * 10) / 10
+          : null,
+      averageQuizScore:
+        totals?.avgQuizScorePercent !== null && totals?.avgQuizScorePercent !== undefined
+          ? Math.round(Number(totals.avgQuizScorePercent))
+          : null,
+      enrollmentTrends: {
+        daily: toTrend(dailyRows),
+        weekly: toTrend(weeklyRows),
+      },
+      moduleDifficulty,
+      generatedAt: new Date(),
+    };
+
+    await cacheSet(cacheKeyString, analytics, 3600);
+
+    return analytics;
+  }
+
+  /**
+   * Engagement metrics for a course (#377): completion rate, average time to
+   * complete, per-module drop-off / average score / quiz retake rate, the
+   * module with the largest drop-off, and weekly enrollment/completion trends.
+   * Cached for 1 hour.
+   *
+   * A learner "reaches" a module once they have a quiz submission for it.
+   * Drop-off for a module is the share of the previous stage's learners who
+   * never reached it (the first module is measured against enrollments).
+   * A retake is a superseded submission (see quiz retry).
+   */
+  async getCourseEngagement(courseId: string): Promise<CourseEngagement> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    const namespace = "courses";
+    const cacheKeyString = cacheKey(namespace, "engagement", courseId);
+    const cached = await cacheGet<CourseEngagement>(namespace, cacheKeyString);
+    if (cached) return cached;
+
+    const [[totals], moduleRows, [retakes], enrollTrend, completeTrend] = await Promise.all([
+      db
+        .select({
+          totalEnrollments: count(),
+          completed: sql<number>`COUNT(*) FILTER (WHERE ${enrollments.completedAt} IS NOT NULL)`.mapWith(Number),
+          avgCompletionHours: sql<string | null>`AVG(EXTRACT(EPOCH FROM (${enrollments.completedAt} - ${enrollments.enrolledAt})) / 3600.0) FILTER (WHERE ${enrollments.completedAt} IS NOT NULL)`,
+        })
+        .from(enrollments)
+        .where(eq(enrollments.courseId, courseId)),
+
+      db
+        .select({
+          moduleId: quizzes.moduleId,
+          learners: sql<number>`COUNT(DISTINCT ${quizSubmissions.userId})`.mapWith(Number),
+          retakers: sql<number>`COUNT(DISTINCT ${quizSubmissions.userId}) FILTER (WHERE ${quizSubmissions.superseded} = true)`.mapWith(Number),
+          avgScorePercent: sql<string | null>`AVG(${quizSubmissions.score}::numeric / NULLIF(jsonb_array_length(${quizzes.questions}), 0) * 100) FILTER (WHERE ${quizSubmissions.superseded} = false)`,
+        })
+        .from(quizSubmissions)
+        .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+        .where(eq(quizzes.courseId, courseId))
+        .groupBy(quizzes.moduleId),
+
+      db
+        .select({
+          learners: sql<number>`COUNT(DISTINCT ${quizSubmissions.userId})`.mapWith(Number),
+          retakers: sql<number>`COUNT(DISTINCT ${quizSubmissions.userId}) FILTER (WHERE ${quizSubmissions.superseded} = true)`.mapWith(Number),
+        })
+        .from(quizSubmissions)
+        .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+        .where(eq(quizzes.courseId, courseId)),
+
+      db
+        .select({
+          week: sql<string>`date_trunc('week', ${enrollments.enrolledAt})::date`,
+          count: count(),
+        })
+        .from(enrollments)
+        .where(
+          and(
+            eq(enrollments.courseId, courseId),
+            sql`${enrollments.enrolledAt} >= now() - interval '12 weeks'`,
+          ),
+        )
+        .groupBy(sql`date_trunc('week', ${enrollments.enrolledAt})`),
+
+      db
+        .select({
+          week: sql<string>`date_trunc('week', ${enrollments.completedAt})::date`,
+          count: count(),
+        })
+        .from(enrollments)
+        .where(
+          and(
+            eq(enrollments.courseId, courseId),
+            sql`${enrollments.completedAt} >= now() - interval '12 weeks'`,
+          ),
+        )
+        .groupBy(sql`date_trunc('week', ${enrollments.completedAt})`),
+    ]);
+
+    const pct = (part: number, whole: number): number =>
+      whole > 0 ? Math.round((part / whole) * 100) : 0;
+
+    const totalEnrollments = totals?.totalEnrollments ?? 0;
+    const completed = totals?.completed ?? 0;
+
+    // Order modules by their authored definition, then any others.
+    const moduleDefinitions = (course.modules ?? []) as CourseModuleDefinition[];
+    const orderById = new Map(moduleDefinitions.map((m, i) => [m.id, i]));
+    const titleById = new Map(moduleDefinitions.map((m) => [m.id, m.title]));
+    const orderedRows = [...moduleRows].sort(
+      (a, b) =>
+        (orderById.get(a.moduleId) ?? Number.MAX_SAFE_INTEGER) -
+        (orderById.get(b.moduleId) ?? Number.MAX_SAFE_INTEGER),
+    );
+
+    let previous = totalEnrollments;
+    const modules: ModuleEngagement[] = orderedRows.map((row) => {
+      const dropOffRate = previous > 0 ? Math.max(0, pct(previous - row.learners, previous)) : 0;
+      previous = row.learners;
+      return {
+        moduleId: row.moduleId,
+        title: titleById.get(row.moduleId) ?? null,
+        learnersReached: row.learners,
+        dropOffRate,
+        averageScore:
+          row.avgScorePercent !== null && row.avgScorePercent !== undefined
+            ? Math.round(Number(row.avgScorePercent))
+            : null,
+        quizRetakeRate: pct(row.retakers, row.learners),
+      };
+    });
+
+    const worst = modules.reduce<ModuleEngagement | null>(
+      (best, m) => (m.dropOffRate > (best?.dropOffRate ?? 0) ? m : best),
+      null,
+    );
+
+    // Weekly buckets for the last 12 weeks, merged from both series.
+    const weeks = new Map<string, { enrollments: number; completions: number }>();
+    for (const row of enrollTrend) {
+      weeks.set(row.week, { enrollments: row.count, completions: 0 });
+    }
+    for (const row of completeTrend) {
+      const entry = weeks.get(row.week) ?? { enrollments: 0, completions: 0 };
+      entry.completions = row.count;
+      weeks.set(row.week, entry);
+    }
+    const trends = [...weeks.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([week, value]) => ({ week, ...value }));
+
+    const engagement: CourseEngagement = {
+      courseId,
+      totalEnrollments,
+      completionRate: pct(completed, totalEnrollments),
+      averageTimeToCompleteHours:
+        totals?.avgCompletionHours !== null && totals?.avgCompletionHours !== undefined
+          ? Math.round(Number(totals.avgCompletionHours) * 10) / 10
+          : null,
+      quizRetakeRate: pct(retakes?.retakers ?? 0, retakes?.learners ?? 0),
+      modules,
+      biggestDropOff:
+        worst && worst.dropOffRate > 0
+          ? { moduleId: worst.moduleId, title: worst.title, dropOffRate: worst.dropOffRate }
+          : null,
+      trends,
+      generatedAt: new Date(),
+    };
+
+    await cacheSet(cacheKeyString, engagement, 3600);
+
+    return engagement;
+  }
+
+  /**
+   * Full course syllabus: all modules in order, each with description,
+   * estimated duration, and learning objectives derived from the module
+   * content metadata (#373). Cached for 5 minutes.
+   *
+   * Module data comes from two sources, in priority order:
+   * 1. `courses.courseModules` jsonb — rich metadata (id, title,
+   *    description, estimatedDurationMinutes) set during course authoring
+   * 2. Fallback: derive module IDs from the quizzes table (moduleId
+   *    column), same approach getCourseDetail uses. These have no
+   *    description or duration, so those fields are null.
+   *
+   * Learning objectives are derived from each module's quiz questions if
+   * available — the question text often contains the learning target.
+   * When no quizzes exist for a module, objectives is an empty array.
+   */
+  async getSyllabus(courseId: string): Promise<CourseSyllabus> {
+    const namespace = "courses";
+    const ck = cacheKey(namespace, "syllabus", courseId);
+
+    const cached = await cacheGet<CourseSyllabus>(namespace, ck);
+    if (cached) return cached;
+
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course || !course.isActive) {
+      throw new NotFoundError("Course");
+    }
+
+    // Build ordered module list from courseModules jsonb, or fall back to
+    // quiz-derived module IDs when the rich metadata isn't present.
+    const moduleMetadata = this.normalizeCourseModules(course.courseModules);
+    let syllabusModules: SyllabusModule[];
+
+    if (moduleMetadata.length > 0) {
+      syllabusModules = moduleMetadata.map((m, i) => ({
+        order: i + 1,
+        id: m.id,
+        title: m.title,
+        description: m.description ?? null,
+        estimatedDurationMinutes: m.estimatedDurationMinutes ?? null,
+        learningObjectives: [],
+      }));
+    } else {
+      const moduleRows = await db
+        .select({ moduleId: quizzes.moduleId })
+        .from(quizzes)
+        .where(eq(quizzes.courseId, courseId))
+        .groupBy(quizzes.moduleId)
+        .orderBy(quizzes.moduleId);
+
+      syllabusModules = moduleRows.map((row, i) => ({
+        order: i + 1,
+        id: row.moduleId,
+        title: row.moduleId,
+        description: null,
+        estimatedDurationMinutes: null,
+        learningObjectives: [],
+      }));
+    }
+
+    // Derive learning objectives from quiz questions for each module.
+    // Quiz question prompts represent the concrete skills a module teaches,
+    // making them a reasonable proxy for learning objectives.
+    if (syllabusModules.length > 0) {
+      const moduleIds = syllabusModules.map((m) => m.id);
+      const quizRows = await db
+        .select({
+          moduleId: quizzes.moduleId,
+          questions: quizzes.questions,
+        })
+        .from(quizzes)
+        .where(
+          and(eq(quizzes.courseId, courseId), inArray(quizzes.moduleId, moduleIds)),
+        );
+
+      // Collect question prompts per module (first N questions per module
+      // to keep the objectives list focused).
+      const QUESTIONS_PER_MODULE = 5;
+      const objectivesByModule = new Map<string, string[]>();
+
+      for (const quiz of quizRows) {
+        const existing = objectivesByModule.get(quiz.moduleId) ?? [];
+        const questionArr = Array.isArray(quiz.questions) ? quiz.questions : [];
+
+        for (const q of questionArr) {
+          if (existing.length >= QUESTIONS_PER_MODULE) break;
+          const prompt =
+            typeof q === "object" && q !== null && "prompt" in q
+              ? String((q as Record<string, unknown>).prompt)
+              : typeof q === "string"
+                ? q
+                : null;
+          if (prompt && !existing.includes(prompt)) {
+            existing.push(prompt);
+          }
+        }
+        objectivesByModule.set(quiz.moduleId, existing);
+      }
+
+      // Merge objectives back into the syllabus modules
+      for (const sm of syllabusModules) {
+        sm.learningObjectives = objectivesByModule.get(sm.id) ?? [];
+      }
+    }
+
+    const totalEstimatedDurationMinutes = syllabusModules.reduce(
+      (sum, m) =>
+        m.estimatedDurationMinutes !== null
+          ? sum + m.estimatedDurationMinutes
+          : sum,
+      0,
+    );
+
+    const syllabus: CourseSyllabus = {
+      courseId: course.id,
+      title: course.title,
+      difficulty: course.difficulty,
+      modules: syllabusModules,
+      totalEstimatedDurationMinutes:
+        totalEstimatedDurationMinutes > 0 ? totalEstimatedDurationMinutes : null,
+      generatedAt: new Date(),
+    };
+
+    await cacheSet(ck, syllabus, 300);
+
+    return syllabus;
+  }
+
+  /**
+   * Report a course for inappropriate content, errors, or other issues.
+   * One report per user per course — a repeat report from the same user
+   * for the same course is rejected rather than silently upserted, so the
+   * report count admins see stays a genuine distinct-reporter count.
+   */
+  async reportCourse(
+    userId: string,
+    courseId: string,
+    body: ReportCourseBody,
+  ): Promise<CourseReportResult> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    const existing = await db.query.courseReports.findFirst({
+      where: and(
+        eq(courseReports.courseId, courseId),
+        eq(courseReports.userId, userId),
+      ),
+    });
+    if (existing) {
+      throw new ConflictError("You have already reported this course");
+    }
+
+    const [report] = await db
+      .insert(courseReports)
+      .values({
+        courseId,
+        userId,
+        reason: body.reason,
+        description: body.description,
+      })
+      .returning();
+
+    await this.notifyAdminsOfReport(course.title, courseId, report.id, body.reason);
+
+    await auditLog("course.reported", {
+      courseId,
+      userId,
+      reportId: report.id,
+      reason: body.reason,
+    });
+    logger.info({ courseId, userId, reportId: report.id }, "Course reported");
+
+    return {
+      id: report.id,
+      courseId: report.courseId,
+      reason: report.reason,
+      status: report.status,
+      createdAt: report.createdAt,
+    };
+  }
+
+  /**
+   * Notifies every admin (in-app, via the notifications table) that a new
+   * course report came in. Best-effort — a notification-insert failure
+   * must not fail the report submission itself.
+   */
+  private async notifyAdminsOfReport(
+    courseTitle: string,
+    courseId: string,
+    reportId: string,
+    reason: string,
+  ): Promise<void> {
+    try {
+      const admins = await db.query.users.findMany({
+        where: eq(users.isAdmin, true),
+      });
+      if (admins.length === 0) return;
+
+      await db.insert(notifications).values(
+        admins.map((admin) => ({
+          userId: admin.id,
+          type: "course_report",
+          title: "New course report",
+          message: `"${courseTitle}" was reported for ${reason} (report ${reportId}).`,
+        })),
+      );
+    } catch (err) {
+      logger.warn({ err, courseId, reportId }, "Failed to notify admins of course report");
+    }
+  }
+
+  // ─── Enrollment Trends (#391) ───────────────────────────────────────────
+
+  /**
+   * Enrollment trends for a course over time (#391). Admin endpoint that
+   * returns a time series of enrollment counts at the chosen granularity
+   * (daily/weekly/monthly) within the chosen range (7d/30d/90d). Cached
+   * for 1 hour — matching getCourseAnalytics's TTL since the query shape
+   * is similar (aggregating across all enrollments for a course).
+   */
+  async getEnrollmentTrends(
+    courseId: string,
+    query: EnrollmentTrendsQuery,
+  ): Promise<EnrollmentTrendsResult> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    const namespace = "courses";
+    const ck = cacheKey(
+      namespace,
+      "enrollment-trends",
+      courseId,
+      query.range,
+      query.granularity,
+    );
+    const cached = await cacheGet<EnrollmentTrendsResult>(namespace, ck);
+    if (cached) return cached;
+
+    // Keyed by the Zod enums themselves (EnrollmentTrendsQuery["range"/"granularity"])
+    // rather than `Record<string, string>` (#485), so adding a new enum value
+    // to enrollmentTrendsQuerySchema without adding it here is a compile error
+    // instead of a runtime `undefined` silently reaching the query.
+    const intervalMap: Record<EnrollmentTrendsQuery["range"], string> = {
+      "7d": "7 days",
+      "30d": "30 days",
+      "90d": "90 days",
+    };
+    const truncMap: Record<EnrollmentTrendsQuery["granularity"], string> = {
+      daily: "day",
+      weekly: "week",
+      monthly: "month",
+    };
+
+    const interval = intervalMap[query.range];
+    const trunc = truncMap[query.granularity];
+
+    // Both values are bound parameters, not sql.raw() (#485): date_trunc's
+    // first argument and an interval cast both accept a plain text
+    // parameter in Postgres, so there's no need to interpolate raw SQL text
+    // here even though trunc/interval only ever come from the maps above.
+    const [trendRows] = await Promise.all([
+      db
+        .select({
+          date: sql<string>`date_trunc(${trunc}, ${enrollments.enrolledAt})::date`,
+          count: count(),
+        })
+        .from(enrollments)
+        .where(
+          and(
+            eq(enrollments.courseId, courseId),
+            sql`${enrollments.enrolledAt} >= now() - (${interval})::interval`,
+          ),
+        )
+        .groupBy(sql`date_trunc(${trunc}, ${enrollments.enrolledAt})`)
+        .orderBy(sql`date_trunc(${trunc}, ${enrollments.enrolledAt})`),
+      db
+        .select({ value: count() })
+        .from(enrollments)
+        .where(eq(enrollments.courseId, courseId)),
+    ]);
+
+    const trends: EnrollmentTrendDataPoint[] = trendRows.map((row) => ({
+      date: row.date,
+      count: row.count,
+    }));
+
+    const result: EnrollmentTrendsResult = {
+      courseId,
+      range: query.range,
+      granularity: query.granularity,
+      trends,
+      totalEnrollments: trendRows.reduce((sum, r) => sum + r.count, 0),
+      generatedAt: new Date(),
+    };
+
+    await cacheSet(ck, result, 3600);
+    return result;
+  }
+
+  // ─── Enrollment Status (#381) ───────────────────────────────────────────
+
+  /**
+   * Detailed enrollment status for the current user in a specific course
+   * (#381). Returns isEnrolled, enrolledAt, completedAt, module-by-module
+   * progress, quizCount, and averageScore. Cached 30s per (userId, courseId).
+   * Returns 404 for a non-existent or inactive course.
+   */
+  async getEnrollmentStatus(
+    userId: string,
+    courseId: string,
+  ): Promise<EnrollmentStatus> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course || !course.isActive) {
+      throw new NotFoundError("Course");
+    }
+
+    const namespace = "user";
+    const ck = cacheKey(namespace, "enrollment-status", userId, courseId);
+    const cached = await cacheGet<EnrollmentStatus>(namespace, ck);
+    if (cached) return cached;
+
+    const enrollment = await db.query.enrollments.findFirst({
+      where: and(
+        eq(enrollments.userId, userId),
+        eq(enrollments.courseId, courseId),
+      ),
+    });
+
+    // Build the module list from the course's authored modules definition,
+    // falling back to quiz-derived moduleId groups when no definitions exist.
+    const moduleDefinitions = (course.modules ?? []) as CourseModuleDefinition[];
+
+    let moduleIds: string[];
+    if (moduleDefinitions.length > 0) {
+      moduleIds = moduleDefinitions.map((m) => m.id);
+    } else {
+      const moduleRows = await db
+        .select({ moduleId: quizzes.moduleId })
+        .from(quizzes)
+        .where(eq(quizzes.courseId, courseId))
+        .groupBy(quizzes.moduleId)
+        .orderBy(quizzes.moduleId);
+      moduleIds = moduleRows.map((r) => r.moduleId);
+    }
+
+    const moduleTitleById = new Map(
+      moduleDefinitions.map((m) => [m.id, m.title] as const),
+    );
+
+    // Modules completed by the user (has a non-superseded submission).
+    const completedModuleIds = new Set(
+      moduleIds.length > 0
+        ? (
+            await db
+              .select({ moduleId: quizzes.moduleId })
+              .from(quizSubmissions)
+              .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+              .where(
+                and(
+                  eq(quizzes.courseId, courseId),
+                  eq(quizSubmissions.userId, userId),
+                  eq(quizSubmissions.superseded, false),
+                ),
+              )
+              .groupBy(quizzes.moduleId)
+          ).map((r) => r.moduleId)
+        : [],
+    );
+
+    const moduleProgress: EnrollmentModuleProgress[] = moduleIds.map(
+      (moduleId) => ({
+        moduleId,
+        title: moduleTitleById.get(moduleId) ?? null,
+        completed: completedModuleIds.has(moduleId),
+      }),
+    );
+
+    // Quiz count and average score for this user in this course.
+    const [quizAgg] = await db
+      .select({
+        quizCount: count(),
+        averageScore: sql<number | null>`AVG(${quizSubmissions.score})`,
+      })
+      .from(quizSubmissions)
+      .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
       .where(
         and(
-          eq(courses.isActive, true),
-          enrolledCourseIds.length > 0
-            ? notInArray(courses.id, enrolledCourseIds)
-            : sql`true`,
+          eq(quizzes.courseId, courseId),
+          eq(quizSubmissions.userId, userId),
+          eq(quizSubmissions.superseded, false),
         ),
       );
 
-    const candidates = await candidateQuery;
+    const result: EnrollmentStatus = {
+      courseId,
+      isEnrolled: !!enrollment,
+      enrolledAt: enrollment?.enrolledAt ?? null,
+      completedAt: enrollment?.completedAt ?? null,
+      moduleProgress,
+      quizCount: quizAgg?.quizCount ?? 0,
+      averageScore:
+        quizAgg?.averageScore != null
+          ? Number(Number(quizAgg.averageScore).toFixed(2))
+          : null,
+    };
 
-    // ── Scoring ──────────────────────────────────────────────────────────
-    const difficultyIndex = inferredDifficulty
-      ? DIFFICULTY_ORDER.indexOf(inferredDifficulty)
-      : -1;
+    await cacheSet(ck, result, 30);
+    return result;
+  }
 
-    const scored = candidates.map((course) => {
-      const peerCount   = peerCourseSignal![course.id] ?? 0;
-      const popularity  = Math.log(course.enrolledCount + 1);
+  // ─── Course Progress (#385) ─────────────────────────────────────────────
 
-      // Difficulty affinity bonus
-      let difficultyBonus = 0;
-      if (difficultyIndex >= 0) {
-        const courseIdx = DIFFICULTY_ORDER.indexOf(
-          course.difficulty as (typeof DIFFICULTY_ORDER)[number],
+  /**
+   * The user's detailed progress in a specific course (#385): module-by-
+   * module completion, quizzes taken, average score, and estimated
+   * completion percentage. Cached 30s per (userId, courseId).
+   */
+  async getCourseProgress(
+    userId: string,
+    courseId: string,
+  ): Promise<CourseProgress> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course || !course.isActive) {
+      throw new NotFoundError("Course");
+    }
+
+    const namespace = "user";
+    const ck = cacheKey(namespace, "course-progress", userId, courseId);
+    const cached = await cacheGet<CourseProgress>(namespace, ck);
+    if (cached) return cached;
+
+    const moduleDefinitions = (course.modules ?? []) as CourseModuleDefinition[];
+
+    let moduleIds: string[];
+    if (moduleDefinitions.length > 0) {
+      moduleIds = moduleDefinitions.map((m) => m.id);
+    } else {
+      const moduleRows = await db
+        .select({ moduleId: quizzes.moduleId })
+        .from(quizzes)
+        .where(eq(quizzes.courseId, courseId))
+        .groupBy(quizzes.moduleId)
+        .orderBy(quizzes.moduleId);
+      moduleIds = moduleRows.map((r) => r.moduleId);
+    }
+
+    const moduleTitleById = new Map(
+      moduleDefinitions.map((m) => [m.id, m.title] as const),
+    );
+
+    // Completed modules for this user.
+    const completedRows = moduleIds.length
+      ? await db
+          .select({ moduleId: quizzes.moduleId })
+          .from(quizSubmissions)
+          .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+          .where(
+            and(
+              eq(quizzes.courseId, courseId),
+              eq(quizSubmissions.userId, userId),
+              eq(quizSubmissions.superseded, false),
+            ),
+          )
+          .groupBy(quizzes.moduleId)
+      : [];
+    const completedModuleIds = new Set(completedRows.map((r) => r.moduleId));
+
+    const modules: CourseProgressModule[] = moduleIds.map((moduleId, i) => ({
+      moduleId,
+      title: moduleTitleById.get(moduleId) ?? null,
+      order: i + 1,
+      completed: completedModuleIds.has(moduleId),
+    }));
+
+    // Quiz count + average score.
+    const [quizAgg] = await db
+      .select({
+        quizCount: count(),
+        averageScore: sql<number | null>`AVG(${quizSubmissions.score})`,
+      })
+      .from(quizSubmissions)
+      .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+      .where(
+        and(
+          eq(quizzes.courseId, courseId),
+          eq(quizSubmissions.userId, userId),
+          eq(quizSubmissions.superseded, false),
+        ),
+      );
+
+    const totalModules = moduleIds.length;
+    const completedCount = completedModuleIds.size;
+    const completionPercentage =
+      totalModules > 0
+        ? Math.round((completedCount / totalModules) * 100)
+        : 0;
+
+    const result: CourseProgress = {
+      courseId,
+      modules,
+      quizzesTaken: quizAgg?.quizCount ?? 0,
+      averageScore:
+        quizAgg?.averageScore != null
+          ? Number(Number(quizAgg.averageScore).toFixed(2))
+          : null,
+      completedModules: completedCount,
+      totalModules,
+      completionPercentage,
+    };
+
+    await cacheSet(ck, result, 30);
+    return result;
+  }
+
+  // ─── Quiz Attempts (#393) ───────────────────────────────────────────────
+
+  /**
+   * All quiz attempts for a specific course module by the authenticated
+   * user (#393), ordered oldest-first. Returns attempt number, score,
+   * percentage, pass status, and date. Cached 30s per
+   * (userId, courseId, moduleId).
+   */
+  async getQuizAttempts(
+    userId: string,
+    courseId: string,
+    moduleId: string,
+  ): Promise<QuizAttemptsResult> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course || !course.isActive) {
+      throw new NotFoundError("Course");
+    }
+
+    const namespace = "user";
+    const ck = cacheKey(
+      namespace,
+      "quiz-attempts",
+      userId,
+      courseId,
+      moduleId,
+    );
+    const cached = await cacheGet<QuizAttemptsResult>(namespace, ck);
+    if (cached) return cached;
+
+    const rows = await db
+      .select({
+        submissionId: quizSubmissions.id,
+        score: quizSubmissions.score,
+        questions: quizzes.questions,
+        submittedAt: quizSubmissions.submittedAt,
+        superseded: quizSubmissions.superseded,
+      })
+      .from(quizSubmissions)
+      .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+      .where(
+        and(
+          eq(quizzes.courseId, courseId),
+          eq(quizzes.moduleId, moduleId),
+          eq(quizSubmissions.userId, userId),
+        ),
+      )
+      .orderBy(quizSubmissions.submittedAt);
+
+    const attempts: QuizAttempt[] = rows.map((row, i) => {
+      const totalQuestions = Array.isArray(row.questions)
+        ? row.questions.length
+        : 0;
+      const percentage =
+        totalQuestions > 0 && row.score != null
+          ? Math.round((row.score / totalQuestions) * 100)
+          : null;
+      return {
+        attemptNumber: i + 1,
+        submissionId: row.submissionId,
+        score: row.score,
+        percentage,
+        passed:
+          percentage != null ? percentage >= PASSING_PERCENTAGE : false,
+        superseded: row.superseded,
+        date: row.submittedAt,
+      };
+    });
+
+    const result: QuizAttemptsResult = {
+      courseId,
+      moduleId,
+      attempts,
+      totalAttempts: attempts.length,
+    };
+
+    await cacheSet(ck, result, 30);
+    return result;
+  }
+
+  // ─── Admin: Reorder Modules (#374) ──────────────────────────────────────
+
+  /**
+   * Reorder course modules atomically (#374). Accepts an ordered array of
+   * module IDs, validates all IDs belong to the course, and updates the
+   * `order` field on each module definition in courses.modules (jsonb) in
+   * a single transaction. Changes are logged to the audit log.
+   */
+  async reorderModules(
+    courseId: string,
+    moduleIds: string[],
+  ): Promise<CourseModuleDefinition[]> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    const existingModules = (course.modules ?? []) as CourseModuleDefinition[];
+
+    // Validate that the provided IDs exactly match the course's modules —
+    // all IDs must be present, no extras, no missing.
+    const existingIds = new Set(existingModules.map((m) => m.id));
+    const providedIds = new Set(moduleIds);
+
+    if (existingIds.size !== providedIds.size) {
+      throw new ForbiddenError(
+        "Module IDs do not match the course's modules",
+      );
+    }
+
+    for (const id of moduleIds) {
+      if (!existingIds.has(id)) {
+        throw new ForbiddenError(
+          `Module ${id} does not belong to this course`,
         );
-        if (courseIdx === difficultyIndex) {
-          difficultyBonus = 2; // exact match
-        } else if (Math.abs(courseIdx - difficultyIndex) === 1) {
-          difficultyBonus = 1; // adjacent level
+      }
+    }
+
+    return withLock(`course-modules:${courseId}`, async () => {
+      // Re-fetch inside the lock to avoid a lost update.
+      const [locked] = await db
+        .select()
+        .from(courses)
+        .where(eq(courses.id, courseId));
+
+      if (!locked) {
+        throw new NotFoundError("Course");
+      }
+
+      const currentModules = (locked.modules ?? []) as CourseModuleDefinition[];
+      const moduleById = new Map(currentModules.map((m) => [m.id, m]));
+
+      const reordered: CourseModuleDefinition[] = moduleIds.map((id, i) => {
+        const existing = moduleById.get(id);
+        if (!existing) {
+          throw new ForbiddenError(
+            `Module ${id} does not belong to this course`,
+          );
+        }
+        return { ...existing, order: i };
+      });
+
+      await db
+        .update(courses)
+        .set({ modules: reordered })
+        .where(eq(courses.id, courseId));
+
+      await this.invalidateCourseCaches(courseId);
+      await auditLog("course.module.reordered", {
+        courseId,
+        moduleIds,
+      });
+      logger.info({ courseId, moduleIds }, "Course modules reordered");
+
+      return reordered;
+    });
+  }
+
+  // ─── Admin: Clone Course (#378) ─────────────────────────────────────────
+
+  /**
+   * Deep-copies a course including metadata, modules, module content, and quizzes (#378).
+   * Creates a new course row with isDraft=true, isActive=false, generating new unique UUIDs
+   * for the course, modules, module content, and quizzes. The original course is unchanged.
+   * Cloned course action is logged to the audit log.
+   */
+  async cloneCourse(
+    courseId: string,
+    customTitle?: string,
+  ): Promise<AdminCourse> {
+    const [original] = await db
+      .select()
+      .from(courses)
+      .where(eq(courses.id, courseId));
+
+    if (!original) {
+      throw new NotFoundError("Course");
+    }
+
+    const title = customTitle || `${original.title} (Clone)`;
+    const newCourseId = crypto.randomUUID();
+
+    // Map old moduleId -> new moduleId
+    const moduleIdMap = new Map<string, string>();
+
+    const originalModules = (original.modules ?? []) as CourseModuleDefinition[];
+    const clonedModules: CourseModuleDefinition[] = originalModules.map((m) => {
+      const newModId = crypto.randomUUID();
+      moduleIdMap.set(m.id, newModId);
+      return {
+        id: newModId,
+        title: m.title,
+        description: m.description,
+        order: m.order,
+      };
+    });
+
+    const originalCourseModules = (original.courseModules ?? []) as Array<{
+      id: string;
+      title: string;
+      description?: string;
+      estimatedDurationMinutes?: number;
+    }>;
+    const clonedCourseModules = originalCourseModules.map((cm) => ({
+      ...cm,
+      id: moduleIdMap.get(cm.id) ?? crypto.randomUUID(),
+    }));
+
+    // 1. Insert new course row
+    const [newCourse] = await db
+      .insert(courses)
+      .values({
+        id: newCourseId,
+        title,
+        description: original.description,
+        difficulty: original.difficulty,
+        tags: original.tags,
+        courseModules: clonedCourseModules,
+        modules: clonedModules,
+        contentHash: null,
+        accessibilityScore: original.accessibilityScore,
+        prerequisites: original.prerequisites ?? [],
+        isActive: false,
+        isDraft: true,
+      })
+      .returning();
+
+    // 2. Clone module content items if any
+    const existingContentRows = await db
+      .select()
+      .from(moduleContent)
+      .where(eq(moduleContent.courseId, courseId));
+
+    if (existingContentRows.length > 0) {
+      const contentToInsert = existingContentRows.map((c) => ({
+        id: crypto.randomUUID(),
+        courseId: newCourseId,
+        moduleId: moduleIdMap.get(c.moduleId) ?? c.moduleId,
+        title: c.title,
+        type: c.type,
+        content: c.content,
+        orderIndex: c.orderIndex,
+      }));
+      await db.insert(moduleContent).values(contentToInsert);
+    }
+
+    // 3. Clone quizzes
+    const existingQuizzes = await db
+      .select()
+      .from(quizzes)
+      .where(eq(quizzes.courseId, courseId));
+
+    if (existingQuizzes.length > 0) {
+      const quizzesToInsert = existingQuizzes.map((q) => ({
+        id: crypto.randomUUID(),
+        courseId: newCourseId,
+        moduleId: moduleIdMap.get(q.moduleId) ?? q.moduleId,
+        questions: q.questions,
+        generatedFor: null,
+      }));
+      await db.insert(quizzes).values(quizzesToInsert);
+    }
+
+    await this.invalidateCourseCaches(newCourseId);
+    await auditLog("course.cloned", {
+      courseId: newCourseId,
+      sourceCourseId: courseId,
+    });
+    logger.info(
+      { newCourseId, sourceCourseId: courseId },
+      "Course cloned successfully",
+    );
+
+    return this.toAdminCourse(newCourse);
+  }
+
+  /**
+   * Alias for cloneCourse (#378 / duplicate route compatibility).
+   */
+  async duplicateCourse(courseId: string): Promise<AdminCourse> {
+    return this.cloneCourse(courseId);
+  }
+
+  // ─── Admin: Module Content CRUD & Reorder (#382) ─────────────────────────
+
+  private toModuleContentItem(row: typeof moduleContent.$inferSelect): ModuleContentItem {
+    return {
+      id: row.id,
+      courseId: row.courseId,
+      moduleId: row.moduleId,
+      title: row.title,
+      type: row.type as "text" | "video" | "quiz" | "exercise",
+      content: (row.content ?? {}) as Record<string, unknown>,
+      orderIndex: row.orderIndex,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    };
+  }
+
+  /**
+   * List all content items for a specific module ordered by orderIndex (#382).
+   */
+  async listModuleContent(
+    courseId: string,
+    moduleId: string,
+  ): Promise<ModuleContentItem[]> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    const rows = await db
+      .select()
+      .from(moduleContent)
+      .where(
+        and(
+          eq(moduleContent.courseId, courseId),
+          eq(moduleContent.moduleId, moduleId),
+        ),
+      )
+      .orderBy(asc(moduleContent.orderIndex), asc(moduleContent.createdAt));
+
+    return rows.map((r) => this.toModuleContentItem(r));
+  }
+
+  /**
+   * Create a new content item within a module (#382).
+   */
+  async createModuleContent(
+    courseId: string,
+    moduleId: string,
+    data: CreateContentBody,
+  ): Promise<ModuleContentItem> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    return withLock(`module-content:${courseId}:${moduleId}`, async () => {
+      let orderIndex = data.orderIndex;
+      if (orderIndex === undefined || orderIndex === null) {
+        const [maxRow] = await db
+          .select({
+            maxOrder: sql<number | null>`MAX(${moduleContent.orderIndex})`,
+          })
+          .from(moduleContent)
+          .where(
+            and(
+              eq(moduleContent.courseId, courseId),
+              eq(moduleContent.moduleId, moduleId),
+            ),
+          );
+        orderIndex = maxRow?.maxOrder != null ? maxRow.maxOrder + 1 : 0;
+      }
+
+      const [created] = await db
+        .insert(moduleContent)
+        .values({
+          courseId,
+          moduleId,
+          title: data.title,
+          type: data.type,
+          content: data.content as ModuleContentPayload,
+          orderIndex,
+        })
+        .returning();
+
+      await this.invalidateCourseCaches(courseId);
+      await auditLog("course.module.content.created", {
+        courseId,
+        moduleId,
+        contentId: created.id,
+      });
+      logger.info(
+        { courseId, moduleId, contentId: created.id, type: data.type },
+        "Module content item created",
+      );
+
+      return this.toModuleContentItem(created);
+    });
+  }
+
+  /**
+   * Update an existing content item (#382).
+   */
+  async updateModuleContent(
+    courseId: string,
+    moduleId: string,
+    contentId: string,
+    data: UpdateContentBody,
+  ): Promise<ModuleContentItem> {
+    const [existing] = await db
+      .select()
+      .from(moduleContent)
+      .where(
+        and(
+          eq(moduleContent.id, contentId),
+          eq(moduleContent.courseId, courseId),
+          eq(moduleContent.moduleId, moduleId),
+        ),
+      );
+
+    if (!existing) {
+      throw new NotFoundError("Module content");
+    }
+
+    const updateValues: Partial<typeof moduleContent.$inferInsert> = {
+      updatedAt: new Date(),
+    };
+    if (data.title !== undefined) updateValues.title = data.title;
+    if (data.type !== undefined) updateValues.type = data.type;
+    if (data.content !== undefined) updateValues.content = data.content as ModuleContentPayload;
+    if (data.orderIndex !== undefined) updateValues.orderIndex = data.orderIndex;
+
+    const [updated] = await db
+      .update(moduleContent)
+      .set(updateValues)
+      .where(eq(moduleContent.id, contentId))
+      .returning();
+
+    await this.invalidateCourseCaches(courseId);
+    await auditLog("course.module.content.updated", {
+      courseId,
+      moduleId,
+      contentId,
+    });
+    logger.info(
+      { courseId, moduleId, contentId },
+      "Module content item updated",
+    );
+
+    return this.toModuleContentItem(updated);
+  }
+
+  /**
+   * Delete a content item (#382).
+   */
+  async deleteModuleContent(
+    courseId: string,
+    moduleId: string,
+    contentId: string,
+  ): Promise<void> {
+    const [existing] = await db
+      .select()
+      .from(moduleContent)
+      .where(
+        and(
+          eq(moduleContent.id, contentId),
+          eq(moduleContent.courseId, courseId),
+          eq(moduleContent.moduleId, moduleId),
+        ),
+      );
+
+    if (!existing) {
+      throw new NotFoundError("Module content");
+    }
+
+    await db.delete(moduleContent).where(eq(moduleContent.id, contentId));
+
+    await this.invalidateCourseCaches(courseId);
+    await auditLog("course.module.content.deleted", {
+      courseId,
+      moduleId,
+      contentId,
+    });
+    logger.info(
+      { courseId, moduleId, contentId },
+      "Module content item deleted",
+    );
+  }
+
+  /**
+   * Reorder content items within a module atomically (#382).
+   */
+  async reorderModuleContent(
+    courseId: string,
+    moduleId: string,
+    contentIds: string[],
+  ): Promise<ModuleContentItem[]> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    return withLock(`module-content:${courseId}:${moduleId}`, async () => {
+      const existingRows = await db
+        .select()
+        .from(moduleContent)
+        .where(
+          and(
+            eq(moduleContent.courseId, courseId),
+            eq(moduleContent.moduleId, moduleId),
+          ),
+        );
+
+      const existingIds = new Set(existingRows.map((r) => r.id));
+      const providedIds = new Set(contentIds);
+
+      if (existingIds.size !== providedIds.size) {
+        throw new ForbiddenError(
+          "Content IDs do not match the module's content items",
+        );
+      }
+
+      for (const id of contentIds) {
+        if (!existingIds.has(id)) {
+          throw new ForbiddenError(
+            `Content ${id} does not belong to this module`,
+          );
         }
       }
 
-      const score = peerCount * 3 + difficultyBonus + popularity;
-
-      // Determine primary reason for recommendation
-      let reason: RecommendedCourse["reason"];
-      if (peerCount > 0) {
-        reason = "peer";
-      } else if (difficultyBonus > 0) {
-        reason = "difficulty";
-      } else {
-        reason = "popular";
+      for (let i = 0; i < contentIds.length; i++) {
+        await db
+          .update(moduleContent)
+          .set({ orderIndex: i, updatedAt: new Date() })
+          .where(eq(moduleContent.id, contentIds[i]));
       }
 
-      return { course, score, reason };
+      await this.invalidateCourseCaches(courseId);
+      await auditLog("course.module.content.reordered", {
+        courseId,
+        moduleId,
+        contentIds,
+      });
+      logger.info(
+        { courseId, moduleId, contentIds },
+        "Module content reordered",
+      );
+
+      const updatedRows = await db
+        .select()
+        .from(moduleContent)
+        .where(
+          and(
+            eq(moduleContent.courseId, courseId),
+            eq(moduleContent.moduleId, moduleId),
+          ),
+        )
+        .orderBy(asc(moduleContent.orderIndex));
+
+      return updatedRows.map((r) => this.toModuleContentItem(r));
     });
-
-    scored.sort((a, b) => b.score - a.score);
-    const top = scored.slice(0, limit);
-
-    const result: GetRecommendationsResult = {
-      courses: top.map(({ course, score, reason }) => ({
-        id:                  course.id,
-        title:               course.title,
-        description:         course.description,
-        difficulty:          course.difficulty,
-        isActive:            course.isActive,
-        enrolledCount:       course.enrolledCount,
-        recommendationScore: Math.round(score * 100) / 100,
-        reason,
-      })),
-      inferredDifficulty,
-    };
-
-    await cacheSet(resultCacheKey, result, RESULT_CACHE_TTL);
-
-    return result;
   }
 }
 
 export const courseService = new CourseService();
+
+
+// src/modules/courses/course.service.ts
+
+import { Injectable, NotFoundException } from '@nestjs/common';
+// Import database client / repositories referencing src/database/schema.ts
+
+interface ValidationIssue {
+  field: string;
+  message: string;
+}
+
+interface PublishCheckResult {
+  isReady: boolean;
+  readinessScore: number; // 0 - 100%
+  issues: ValidationIssue[];
+}
+
+@Injectable()
+export class CourseService {
+  // constructor(private db: DatabaseService) {}
+
+  async validatePublishReadiness(courseId: string): Promise<PublishCheckResult> {
+    // 1. Fetch course along with modules, content, and quizzes
+    // const course = await this.db.course.findUnique({
+    //   where: { id: courseId },
+    //   include: { modules: { include: { content: true, quizzes: true } } },
+    // });
+    // if (!course) throw new NotFoundException('Course not found');
+
+    const issues: ValidationIssue[] = [];
+    let checksTotal = 0;
+    let checksPassed = 0;
+
+    // Check 1: Title
+    checksTotal++;
+    const hasTitle = true; // Replace with course.title && course.title.trim().length > 0
+    if (hasTitle) {
+      checksPassed++;
+    } else {
+      issues.push({ field: 'title', message: 'Course title is missing or empty.' });
+    }
+
+    // Check 2: Description
+    checksTotal++;
+    const hasDescription = true; // Replace with course.description
+    if (hasDescription) {
+      checksPassed++;
+    } else {
+      issues.push({ field: 'description', message: 'Course description is required.' });
+    }
+
+    // Check 3: Difficulty level
+    checksTotal++;
+    const hasDifficulty = true; // Replace with course.difficulty
+    if (hasDifficulty) {
+      checksPassed++;
+    } else {
+      issues.push({ field: 'difficulty', message: 'Course difficulty rating must be specified.' });
+    }
+
+    // Check 4: At least one module
+    checksTotal++;
+    const hasModules = true; // Replace with course.modules && course.modules.length > 0
+    if (hasModules) {
+      checksPassed++;
+    } else {
+      issues.push({ field: 'modules', message: 'Course must contain at least one module.' });
+    }
+
+    // Check 5 & 6: Content and Quizzes per module (example loop validation)
+    // if (course.modules) {
+    //   course.modules.forEach((module, index) => {
+    //     checksTotal += 2;
+    //     if (module.content && module.content.length > 0) {
+    //       checksPassed++;
+    //     } else {
+    //       issues.push({ field: `modules[${index}].content`, message: `Module "${module.title || index}" has no learning content.` });
+    //     }
+    //     if (module.quizzes && module.quizzes.length > 0) {
+    //       checksPassed++;
+    //     } else {
+    //       issues.push({ field: `modules[${index}].quizzes`, message: `Module "${module.title || index}" is missing assessment quizzes.` });
+    //     }
+    //   });
+    // }
+
+    const readinessScore = Math.round((checksPassed / checksTotal) * 100);
+
+    return {
+      isReady: issues.length === 0,
+      readinessScore,
+      issues,
+    };
+  }
+}

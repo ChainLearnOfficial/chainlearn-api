@@ -4,11 +4,16 @@ import { redis } from "../../config/redis.js";
 import { db } from "../../config/database.js";
 import { users } from "../../database/schema.js";
 import { getNetworkPassphrase } from "../../config/stellar.js";
-import { UnauthorizedError } from "../../utils/errors.js";
+import { RateLimitError, UnauthorizedError } from "../../utils/errors.js";
 import { logger } from "../../utils/logger.js";
 import { eq } from "drizzle-orm";
 import { auditLog } from "../../audit/index.js";
 import type { ChallengeResponse, AuthResponse } from "./auth.types.js";
+import {
+  checkAuthLockout,
+  clearAuthFailures,
+  recordAuthFailure,
+} from "../../utils/auth-attempt-tracker.js";
 
 const CHALLENGE_TTL_SECONDS = 300; // 5 minutes
 const CHALLENGE_PREFIX = "sep10:challenge:";
@@ -20,6 +25,17 @@ export class AuthService {
    * Stores the challenge transaction in Redis for later verification.
    */
   async createChallenge(stellarAddress: string): Promise<ChallengeResponse> {
+    // #488: an address locked out from repeated verify failures can't even
+    // draw a fresh challenge until the lockout expires — otherwise lockout
+    // would only block the verify step, not the attempt itself.
+    const lockout = await checkAuthLockout(stellarAddress);
+    if (lockout.lockedOut) {
+      throw new RateLimitError(
+        "Too many failed authentication attempts for this account. Please try again later.",
+        lockout.retryAfterSeconds,
+      );
+    }
+
     const now = Math.floor(Date.now() / 1000);
     const minTime = now;
     const maxTime = now + CHALLENGE_TTL_SECONDS;
@@ -77,24 +93,44 @@ export class AuthService {
   /**
    * Verify a signed SEP-10 challenge transaction and issue a JWT.
    * Looks up or creates the user record.
+   *
+   * Wraps verifyChallengeInternal with per-account failure tracking (#488):
+   * locked-out addresses are rejected before any verification work runs;
+   * every UnauthorizedError from the inner method counts as a failure and
+   * can trigger a lockout; success clears the address's failure history.
+   * The inner method's own verification logic (signature, nonce, time
+   * bounds) is unchanged — this only wraps it.
    */
   async verifyChallenge(
     stellarAddress: string,
     challengeId: string,
     signedChallenge: string
   ): Promise<AuthResponse> {
+    const lockout = await checkAuthLockout(stellarAddress);
+    if (lockout.lockedOut) {
+      throw new RateLimitError(
+        "Too many failed authentication attempts for this account. Please try again later.",
+        lockout.retryAfterSeconds,
+      );
+    }
+
     try {
-      return await this._verifyChallenge(stellarAddress, challengeId, signedChallenge);
+      const result = await this.verifyChallengeInternal(
+        stellarAddress,
+        challengeId,
+        signedChallenge,
+      );
+      await clearAuthFailures(stellarAddress);
+      return result;
     } catch (err) {
-      // Audit every authentication failure in one place so individual
-      // throw sites don't each need their own auditLog call. Re-throw
-      // unchanged so the HTTP layer still returns the correct status.
-      auditLog("auth.login_failed", { stellarAddress });
+      if (err instanceof UnauthorizedError) {
+        await recordAuthFailure(stellarAddress, { challengeId });
+      }
       throw err;
     }
   }
 
-  private async _verifyChallenge(
+  private async verifyChallengeInternal(
     stellarAddress: string,
     challengeId: string,
     signedChallenge: string
@@ -111,7 +147,14 @@ export class AuthService {
     let storedChallenge: { challengeEnvelope: string };
     try {
       storedChallenge = JSON.parse(challengeData);
-    } catch {
+    } catch (err) {
+      // This is the server's own Redis-stored value, not client input, so
+      // a parse failure here is an internal anomaly worth tracking.
+      logger.warn(
+        { err, stellarAddress, challengeId },
+        "Corrupt stored SEP-10 challenge record",
+      );
+      logger.debug({ err, stellarAddress }, "Stored challenge is not valid JSON");
       throw new UnauthorizedError("Corrupt stored challenge");
     }
 
@@ -126,7 +169,14 @@ export class AuthService {
         storedChallenge.challengeEnvelope,
         getNetworkPassphrase()
       ) as StellarSdk.Transaction;
-    } catch {
+    } catch (err) {
+      // Same as above — this decodes the server's own issued envelope, not
+      // client input, so a decode failure here is an internal anomaly.
+      logger.warn(
+        { err, stellarAddress, challengeId },
+        "Failed to decode server-issued SEP-10 challenge envelope",
+      );
+      logger.debug({ err, stellarAddress }, "Stored challenge envelope failed to decode from XDR");
       throw new UnauthorizedError("Corrupt stored challenge");
     }
     const issuedNonceOp = issuedTransaction.operations.find(
@@ -144,7 +194,8 @@ export class AuthService {
         signedChallenge,
         getNetworkPassphrase()
       ) as StellarSdk.Transaction;
-    } catch {
+    } catch (err) {
+      logger.debug({ err, stellarAddress }, "Signed challenge envelope failed to decode from XDR");
       throw new UnauthorizedError("Invalid transaction envelope");
     }
 
@@ -207,18 +258,27 @@ export class AuthService {
       throw new UnauthorizedError("Signature verification failed");
     }
 
-    // Find or create user
-    let user = await db.query.users.findFirst({
+    // Find or create user atomically. A plain findFirst + insert is a
+    // TOCTOU race: two concurrent registrations for the same address both
+    // see no row, both attempt the insert, and the second throws a unique-
+    // constraint error (500). ON CONFLICT DO UPDATE makes the upsert atomic
+    // so concurrent requests converge on the same row.
+    const existingBefore = await db.query.users.findFirst({
       where: eq(users.stellarAddress, stellarAddress),
     });
 
-    let isNewUser = false;
-    if (!user) {
-      [user] = await db
-        .insert(users)
-        .values({ stellarAddress })
-        .returning();
-      isNewUser = true;
+    const isNewUser = !existingBefore;
+
+    const [user] = await db
+      .insert(users)
+      .values({ stellarAddress })
+      .onConflictDoUpdate({
+        target: users.stellarAddress,
+        set: { updatedAt: new Date() },
+      })
+      .returning();
+
+    if (isNewUser) {
       logger.info({ stellarAddress, userId: user.id }, "New user created");
     }
 

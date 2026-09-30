@@ -2,11 +2,15 @@ import { z } from "zod";
 import { config } from "../../config/index.js";
 import { logger } from "../../utils/logger.js";
 import { createTransientRetryPolicy, createCircuitBreaker } from "../../utils/resilience.js";
+import { context, propagation } from "@opentelemetry/api";
+import { getRequestId } from "../../utils/request-context.js";
 
 const aiQuizQuestionSchema = z.object({
   prompt: z.string(),
   options: z.array(z.string()),
   correct_index: z.number().int(),
+  correct_feedback: z.string().optional(),
+  incorrect_feedback: z.string().optional(),
 });
 
 const aiQuizResponseSchema = z.object({
@@ -36,9 +40,14 @@ async function requestQuiz(
   const timeout = setTimeout(() => controller.abort(), config.AI_TIMEOUT_MS);
 
   try {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const requestId = getRequestId();
+    if (requestId) headers["X-Request-ID"] = requestId;
+    propagation.inject(context.active(), headers);
+
     const response = await fetch(`${config.AI_SERVICE_URL}/generate-quiz`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({
         user_id: params.userId,
         course_id: params.courseId,
@@ -51,7 +60,7 @@ async function requestQuiz(
 
     if (!response.ok) {
       logger.error(
-        { status: response.status },
+        { requestId, status: response.status },
         "AI service quiz generation failed"
       );
       throw new Error(`AI service returned ${response.status}`);
@@ -61,7 +70,7 @@ async function requestQuiz(
     const parsed = aiQuizResponseSchema.safeParse(raw);
     if (!parsed.success) {
       logger.error(
-        { issues: parsed.error.issues },
+        { requestId, issues: parsed.error.issues },
         "AI service returned a malformed response"
       );
       throw new Error("AI service returned a malformed response");
@@ -70,7 +79,7 @@ async function requestQuiz(
     return parsed.data.questions;
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") {
-      logger.error({ timeout: config.AI_TIMEOUT_MS }, "AI service request timed out");
+      logger.error({ requestId: getRequestId(), timeout: config.AI_TIMEOUT_MS }, "AI service request timed out");
       throw new Error(`AI service request timed out after ${config.AI_TIMEOUT_MS}ms`);
     }
     throw err;

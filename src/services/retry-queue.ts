@@ -2,10 +2,11 @@ import crypto from "node:crypto";
 import { redis } from "../config/redis.js";
 import { db } from "../config/database.js";
 import { quizSubmissions } from "../database/schema.js";
-import { eq } from "drizzle-orm";
+import { eq, and, lte } from "drizzle-orm";
 import { logger } from "../utils/logger.js";
 
 const QUEUE_KEY = "chainlearn:retry:rewards";
+const DEAD_LETTER_QUEUE_KEY = "chainlearn:retry:rewards:dead-letter";
 const MAX_RETRIES = 10;
 const BASE_RETRY_DELAY_MS = 30_000;
 const MAX_RETRY_DELAY_MS = 5 * 60_000;
@@ -18,7 +19,6 @@ export interface RetryJob {
   id: string;
   submissionId: string;
   userId: string;
-  score: number;
   retryCount: number;
   createdAt: string;
 }
@@ -53,7 +53,35 @@ export async function dequeueReadyBatch(limit: number = BATCH_SIZE): Promise<Ret
     Date.now(),
     limit
   )) as string[];
-  return raw.map((entry) => JSON.parse(entry) as RetryJob);
+  
+  const jobs: RetryJob[] = [];
+  
+  for (const entry of raw) {
+    try {
+      const job = JSON.parse(entry) as RetryJob;
+      jobs.push(job);
+    } catch (err) {
+      // Job was already removed from the main queue by the atomic script.
+      // Log the error and push to dead-letter queue for manual recovery.
+      logger.error(
+        { err, rawEntry: entry.substring(0, 200) },
+        "Failed to parse retry job JSON — moving to dead-letter queue"
+      );
+      
+      try {
+        await redis.lpush(DEAD_LETTER_QUEUE_KEY, entry);
+      } catch (dlqErr) {
+        // If we can't even write to DLQ, log and continue - better to process
+        // other valid jobs than crash the entire batch.
+        logger.error(
+          { err: dlqErr, rawEntry: entry.substring(0, 200) },
+          "Failed to write malformed job to dead-letter queue"
+        );
+      }
+    }
+  }
+  
+  return jobs;
 }
 
 // Exponential backoff, capped so a job is always retried well within the
@@ -70,7 +98,7 @@ export async function requeueReward(job: RetryJob): Promise<void> {
     );
     await db
       .update(quizSubmissions)
-      .set({ rewardFailed: true, rewardClaimed: true })
+      .set({ rewardFailed: true, rewardClaimed: false })
       .where(eq(quizSubmissions.id, job.submissionId));
     return;
   }
@@ -135,4 +163,120 @@ export function stopRetryProcessor(): void {
     processorTimer = null;
   }
   logger.info("Retry processor stopped");
+}
+
+// How old a submission must be before we consider it "lost" and re-enqueue it.
+// In-flight submissions (still within this window) are not re-enqueued so we
+// don't double-process a claim that is legitimately in progress (#208).
+const LOST_JOB_AGE_MINUTES = 15;
+
+/**
+ * Re-enqueue reward claims that are in the database but absent from Redis.
+ *
+ * After a Redis restart the sorted-set queue is empty but the database still
+ * has unclaimed submissions (rewardClaimed=false, rewardFailed=false,
+ * rewardPending=false) whose original enqueue time has long passed.  This
+ * function finds those rows and pushes them back onto the queue so the retry
+ * processor can attempt them again.
+ *
+ * Call this on startup and optionally on a periodic schedule.
+ */
+export async function recoverLostJobs(): Promise<void> {
+  try {
+    const cutoff = new Date(Date.now() - LOST_JOB_AGE_MINUTES * 60 * 1_000);
+
+    const lost = await db
+      .select({
+        id: quizSubmissions.id,
+        userId: quizSubmissions.userId,
+        score: quizSubmissions.score,
+      })
+      .from(quizSubmissions)
+      .where(
+        and(
+          eq(quizSubmissions.rewardClaimed, false),
+          eq(quizSubmissions.rewardFailed, false),
+          eq(quizSubmissions.rewardPending, false),
+          lte(quizSubmissions.submittedAt, cutoff)
+        )
+      )
+      .limit(100);
+
+    if (lost.length === 0) return;
+
+    for (const row of lost) {
+      if (row.score === null) continue;
+      await enqueueReward({
+        submissionId: row.id,
+        userId: row.userId,
+      });
+    }
+
+    logger.info({ count: lost.length }, "recoverLostJobs: re-enqueued lost reward claims after Redis restart");
+  } catch (err) {
+    logger.error({ err }, "recoverLostJobs failed");
+  }
+}
+
+export interface QueuedRewardJob extends RetryJob {
+  /** Zero-based position in the queue, ordered by scheduled ready time. */
+  position: number;
+  /** Epoch ms at which the retry processor will next consider this job. */
+  readyAt: number;
+}
+
+/**
+ * Snapshot of the reward retry queue (#327), ordered by scheduled ready
+ * time. Used to show users where a queued reward claim sits and roughly
+ * when it will be processed. Malformed entries are skipped rather than
+ * throwing — this is a read-only introspection path.
+ */
+export async function getQueuedRewardJobs(): Promise<QueuedRewardJob[]> {
+  const raw = await redis.zrange(QUEUE_KEY, 0, -1, "WITHSCORES");
+  const jobs: QueuedRewardJob[] = [];
+  for (let i = 0; i < raw.length; i += 2) {
+    try {
+      const job = JSON.parse(raw[i]) as RetryJob;
+      jobs.push({
+        ...job,
+        position: i / 2,
+        readyAt: Number(raw[i + 1]),
+      });
+    } catch (err) {
+      // Malformed entry — dequeueReadyBatch handles moving it to the DLQ;
+      // this is just a read-only introspection path so it skips rather
+      // than throwing. Still logged here since a malformed queue entry is
+      // an anomaly worth tracking even though it self-heals elsewhere.
+      logger.warn({ err }, "Skipped malformed reward retry queue entry");
+      // this read-only view just can't render it, so log rather than
+      // silently omitting it from what the caller sees.
+      logger.warn({ err, index: i / 2 }, "Skipping malformed queue entry in getQueuedRewardJobs");
+    }
+  }
+  return jobs;
+}
+
+/** Rough seconds until the retry processor reaches a job at `position` whose
+ * earliest ready time is `readyAt`. Combines the job's own backoff delay with
+ * how many full batches sit ahead of it. */
+export function estimateProcessingSeconds(
+  position: number,
+  readyAt: number,
+): number {
+  const waitForReady = Math.max(0, readyAt - Date.now());
+  const batchesAhead = Math.floor(position / BATCH_SIZE);
+  return Math.ceil((waitForReady + batchesAhead * POLL_INTERVAL_MS) / 1_000);
+}
+
+/**
+ * Get the count and first few entries from the dead-letter queue.
+ * Used for monitoring and alerting on malformed jobs.
+ */
+export async function inspectDeadLetterQueue(limit: number = 10): Promise<{
+  count: number;
+  entries: string[];
+}> {
+  const count = await redis.llen(DEAD_LETTER_QUEUE_KEY);
+  const entries = await redis.lrange(DEAD_LETTER_QUEUE_KEY, 0, limit - 1);
+  return { count, entries };
 }

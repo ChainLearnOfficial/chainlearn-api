@@ -50,8 +50,8 @@ describe("Quizzes API", () => {
         },
       });
 
-      // 403 (not enrolled), 401 (auth rejected), 404 (course not found), 500 (DB unavailable)
-      expect([401, 403, 404, 500]).toContain(response.statusCode);
+      // 403 (not enrolled), 401 (auth rejected), 404 (course not found)
+      expect([401, 403, 404]).toContain(response.statusCode);
       if (response.statusCode === 403) {
         const body = JSON.parse(response.payload);
         expect(body.error).toBe("FORBIDDEN");
@@ -90,8 +90,8 @@ describe("Quizzes API", () => {
             },
           });
 
-          // 200/201 (generated), 401 (auth rejected), 403 (not enrolled), 500 (DB/AI unavailable)
-          expect([200, 201, 401, 403, 500]).toContain(response.statusCode);
+          // 200/201 (generated), 401 (auth rejected), 403 (not enrolled)
+          expect([200, 201, 401, 403]).toContain(response.statusCode);
           if (response.statusCode === 200 || response.statusCode === 201) {
             const body = JSON.parse(response.payload);
             expect(body.success).toBe(true);
@@ -232,7 +232,7 @@ describe("Quizzes API", () => {
               payload: { answers },
             });
 
-            expect([401, 403, 500]).toContain(response.statusCode);
+            expect([401, 403]).toContain(response.statusCode);
             if (response.statusCode === 403) {
               const body = JSON.parse(response.payload);
               expect(body.error).toBe("FORBIDDEN");
@@ -292,7 +292,7 @@ describe("Quizzes API", () => {
               payload: { answers },
             });
 
-            expect([200, 401, 500]).toContain(response.statusCode);
+            expect([200, 401]).toContain(response.statusCode);
             if (response.statusCode === 200) {
               const body = JSON.parse(response.payload);
               expect(body.success).toBe(true);
@@ -488,7 +488,7 @@ describe("Quizzes API", () => {
               payload: { answers },
             });
 
-            expect([401, 409, 500]).toContain(response.statusCode);
+            expect([401, 409]).toContain(response.statusCode);
             if (response.statusCode === 409) {
               const body = JSON.parse(response.payload);
               expect(body.error).toBe("CONFLICT");

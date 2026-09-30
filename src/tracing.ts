@@ -3,6 +3,7 @@ import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
 import { FastifyInstrumentation } from "@opentelemetry/instrumentation-fastify";
+import { HttpInstrumentation } from "@opentelemetry/instrumentation-http";
 import { PgInstrumentation } from "@opentelemetry/instrumentation-pg";
 import { IORedisInstrumentation } from "@opentelemetry/instrumentation-ioredis";
 
@@ -21,6 +22,7 @@ export function initTracing(serviceName = "chainlearn-api"): void {
     traceExporter: new OTLPTraceExporter({ url: endpoint }),
     instrumentations: [
       new FastifyInstrumentation(),
+      new HttpInstrumentation(),
       new PgInstrumentation(),
       new IORedisInstrumentation(),
     ],

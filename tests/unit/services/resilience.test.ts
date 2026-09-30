@@ -11,6 +11,7 @@ import {
   isCircuitBreakerError,
   resetCircuitBreaker,
 } from "../../../src/stellar/resilience.js";
+import { createCircuitBreaker, CircuitState } from "../../../src/utils/resilience.js";
 
 describe("Stellar Resilience", () => {
   beforeEach(() => {
@@ -66,6 +67,49 @@ describe("Stellar Resilience", () => {
       } catch (err) {
         expect(isCircuitBreakerError(err)).toBe(true);
       }
+    });
+
+    it("should allow only one probe request when transitioning from open to half-open", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2024-01-01T00:00:00.000Z"));
+
+      try {
+        const breaker = createCircuitBreaker({ label: "test", threshold: 1, halfOpenAfterMs: 1000 });
+        const probeFn = vi.fn().mockImplementation(async () => {
+          await Promise.resolve();
+          return "probe";
+        });
+
+        await expect(breaker.execute(() => Promise.reject(new Error("ECONNREFUSED")))).rejects.toThrow();
+        expect(breaker.getState()).toBe(CircuitState.Open);
+
+        vi.setSystemTime(new Date("2024-01-01T00:00:01.500Z"));
+
+        const first = breaker.execute(probeFn);
+        const second = breaker.execute(probeFn);
+
+        await Promise.allSettled([first, second]);
+
+        expect(probeFn).toHaveBeenCalledTimes(1);
+        expect(breaker.getState()).toBe(CircuitState.Closed);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("should isolate breaker state between read and write operations", async () => {
+      const readFailure = vi.fn().mockRejectedValue(new Error("ECONNREFUSED"));
+      const writeSuccess = vi.fn().mockResolvedValue("write-ok");
+
+      for (let i = 0; i < 5; i++) {
+        try {
+          await circuitBreakerExecute(readFailure, "read");
+        } catch {
+          // expected
+        }
+      }
+
+      await expect(circuitBreakerExecute(writeSuccess, "write")).resolves.toBe("write-ok");
     });
   });
 

@@ -1,7 +1,13 @@
+import { GrantCreditsDto } from './dto/grant-credits.dto';
+import { AdminAuthGuard } from '../../common/guards/admin-auth.guard';
 import type { FastifyRequest, FastifyReply } from "fastify";
 import { rewardService } from "./reward.service.js";
 import type { AuthenticatedRequest } from "../../middleware/auth.js";
-import type { ClaimRewardBody } from "./reward.types.js";
+import type {
+  ClaimRewardBody,
+  GetHistoryQuery,
+  GetTransactionsQuery,
+} from "./reward.types.js";
 import {
   checkIdempotency,
   storeIdempotentResponse,
@@ -36,6 +42,8 @@ export class RewardController {
 
       await storeIdempotentResponse(
         idempotencyKey,
+        authUser.id,
+        "/rewards/claim",
         200,
         { success: true, data: result },
         result.txHash ?? undefined
@@ -49,27 +57,111 @@ export class RewardController {
           : 500;
 
       // Store generic error message in cache to avoid leaking internal details
-      await storeIdempotentResponse(idempotencyKey, statusCode, {
-        success: false,
-        error: "Failed to process reward claim",
-      });
+      await storeIdempotentResponse(
+        idempotencyKey,
+        authUser.id,
+        "/rewards/claim",
+        statusCode,
+        {
+          success: false,
+          error: { code: "REQUEST_FAILED", message: "Failed to process reward claim" },
+        }
+      );
 
       throw err;
     }
   }
 
   /**
-   * GET /api/rewards/history
-   * Get reward claim history for the authenticated user.
+   * GET /api/v1/rewards/pending
+   * List the authenticated user's queued / awaiting-confirmation reward
+   * claims (#327).
    */
-  async history(
+  async pending(
     request: FastifyRequest,
     reply: FastifyReply
   ): Promise<void> {
     const { authUser } = request as AuthenticatedRequest;
-    const history = await rewardService.getHistory(authUser.id);
+    const pending = await rewardService.getPendingRewards(authUser.id);
 
-    reply.send({ success: true, data: history });
+    reply.send({ success: true, data: pending });
+  }
+
+  /**
+   * GET /api/rewards/history
+   * Get reward claim history for the authenticated user, paginated.
+   */
+  async history(
+    request: FastifyRequest<{ Querystring: GetHistoryQuery }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { authUser } = request as AuthenticatedRequest;
+    const { page, limit } = request.query;
+    const { history, total } = await rewardService.getHistory(
+      authUser.id,
+      page,
+      limit
+    );
+
+    reply.send({
+      success: true,
+      data: history,
+      pagination: { page, limit, total },
+    });
+  }
+
+  /**
+   * GET /api/v1/rewards/transactions
+   * List the authenticated user's reward-related blockchain transactions,
+   * each with its on-chain verification status against Stellar Horizon.
+   */
+  async transactions(
+    request: FastifyRequest<{ Querystring: GetTransactionsQuery }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { authUser } = request as AuthenticatedRequest;
+    const { page, limit } = request.query;
+    const { transactions, total } = await rewardService.getTransactions(
+      authUser.id,
+      page,
+      limit
+    );
+
+    reply.send({
+      success: true,
+      data: transactions,
+      pagination: { page, limit, total },
+    });
+  }
+
+
+  @Post(':id/credits/grant')
+  async grantCredits(
+    @Param('id') userId: string,
+    @Body() dto: GrantCreditsDto,
+    @Req() req: any,
+  ) {
+    const adminId = req.user?.id; // Assumes admin user is attached to request by guard
+    return this.rewardService.grantCreditsToUser(userId, dto, adminId);
+  }
+  /**
+   * GET /api/rewards/leaderboard
+   * Get the top earners by total credits. No authentication required.
+   */
+  async leaderboard(
+    request: FastifyRequest<{ Querystring: import("./reward.types.js").GetLeaderboardQuery }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { limit } = request.query;
+    const entries = await rewardService.getLeaderboard(limit);
+
+    reply.send({
+      success: true,
+      data: {
+        entries,
+        generatedAt: new Date(),
+      },
+    });
   }
 }
 

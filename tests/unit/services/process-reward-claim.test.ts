@@ -70,6 +70,7 @@ vi.mock("../../../src/cache/index.js", () => ({
   cacheSet: vi.fn().mockResolvedValue(undefined),
   cacheDel: vi.fn().mockResolvedValue(undefined),
   cacheKey: vi.fn((...parts: string[]) => parts.join(":")),
+  cacheKeyPattern: vi.fn((...parts: string[]) => `${parts.join(":")}:*`),
   cacheInvalidatePattern: vi.fn().mockResolvedValue(undefined),
   cacheHits: { labels: vi.fn().mockReturnValue({ inc: vi.fn() }) },
   cacheMisses: { labels: vi.fn().mockReturnValue({ inc: vi.fn() }) },
@@ -80,14 +81,31 @@ vi.mock("../../../src/utils/lock.js", () => ({
 }));
 
 import { db } from "../../../src/config/database.js";
-import { processRewardClaim } from "../../../src/modules/rewards/reward.service.js";
+import { processRewardClaim, selectSubmissionForUpdate } from "../../../src/modules/rewards/reward.service.js";
 import { invokeContract } from "../../../src/stellar/transactions.js";
 
 const mockDb = vi.mocked(db);
 
+// `Promise.resolve(result)` infers `Promise<any[]>`, so `Promise.then` demands
+// `(value: any[]) => …` callbacks — a `Function`-typed parameter is not
+// assignable to that. Alias the loose callback type used by the fakes below.
+type ThenCallback = (value: any[]) => any;
+
+// Drizzle's `PgUpdateBuilder` carries a pile of `undefined`-typed "unavailable
+// in this mode" members, so a purpose-built fake can never satisfy it
+// structurally. These fakes intentionally model only the `.set().where()`
+// subset the reward service touches, so hand them over loosely.
+function fakeUpdateBuilder(): any {
+  return {
+    set: vi.fn().mockReturnValue({
+      where: vi.fn().mockResolvedValue(undefined),
+    }),
+  };
+}
+
 function makeThenable(result: any[]) {
   const obj: any = {};
-  obj.then = (resolve: Function, reject: Function) =>
+  obj.then = (resolve: ThenCallback, reject: (reason: any) => any) =>
     Promise.resolve(result).then(resolve, reject);
   obj.select = vi.fn().mockReturnValue(obj);
   obj.from = vi.fn().mockReturnValue(obj);
@@ -111,28 +129,39 @@ describe("processRewardClaim", () => {
           from: vi.fn().mockReturnValue({
             where: vi.fn().mockReturnValue({
               for: vi.fn().mockResolvedValue(result),
-              then: (r: Function) => Promise.resolve(result).then(r),
+              then: (r: ThenCallback) => Promise.resolve(result).then(r),
             }),
-            then: (r: Function) => Promise.resolve(result).then(r),
+            then: (r: ThenCallback) => Promise.resolve(result).then(r),
           }),
-          then: (r: Function) => Promise.resolve(result).then(r),
+          then: (r: ThenCallback) => Promise.resolve(result).then(r),
         };
         tx.select = tx.select
           ? tx.select.mockReturnValueOnce(chain)
           : vi.fn().mockReturnValueOnce(chain);
       }
-      tx.update = vi.fn().mockReturnValue({
-        set: vi.fn().mockReturnValue({
-          where: vi.fn().mockResolvedValue(undefined),
-        }),
-      });
+      tx.update = vi.fn().mockReturnValue(fakeUpdateBuilder());
       return fn(tx);
     });
   }
 
+  it("should row-lock the submission lookup for reward claims", async () => {
+    const forSpy = vi.fn().mockResolvedValue([{ id: "sub-1" }]);
+    const whereSpy = vi.fn().mockReturnValue({ for: forSpy });
+    const fromSpy = vi.fn().mockReturnValue({ where: whereSpy });
+    const selectSpy = vi.fn().mockReturnValue({ from: fromSpy });
+    const tx = { select: selectSpy } as any;
+
+    await selectSubmissionForUpdate(tx, "sub-1", "user-1");
+
+    expect(selectSpy).toHaveBeenCalled();
+    expect(fromSpy).toHaveBeenCalled();
+    expect(whereSpy).toHaveBeenCalled();
+    expect(forSpy).toHaveBeenCalledWith("update");
+  });
+
   it("should return true when submission does not exist", async () => {
     mockTxWithSelects([[]]);
-    const result = await processRewardClaim("sub-1", "user-1", 5);
+    const result = await processRewardClaim("sub-1", "user-1");
     expect(result).toBe(true);
   });
 
@@ -140,7 +169,7 @@ describe("processRewardClaim", () => {
     mockTxWithSelects([
       [{ id: "sub-1", userId: "user-1", score: 5, rewardClaimed: true, quizId: "quiz-1" }],
     ]);
-    const result = await processRewardClaim("sub-1", "user-1", 5);
+    const result = await processRewardClaim("sub-1", "user-1");
     expect(result).toBe(true);
   });
 
@@ -149,7 +178,7 @@ describe("processRewardClaim", () => {
       [{ id: "sub-1", userId: "user-1", score: 5, rewardClaimed: false, quizId: "quiz-1" }],
       [],
     ]);
-    const result = await processRewardClaim("sub-1", "user-1", 5);
+    const result = await processRewardClaim("sub-1", "user-1");
     expect(result).toBe(true);
   });
 
@@ -159,7 +188,7 @@ describe("processRewardClaim", () => {
       [{ id: "quiz-1", courseId: "course-1", questions: [{ id: "q1" }] }],
       [],
     ]);
-    const result = await processRewardClaim("sub-1", "user-1", 5);
+    const result = await processRewardClaim("sub-1", "user-1");
     expect(result).toBe(true);
   });
 
@@ -170,16 +199,58 @@ describe("processRewardClaim", () => {
       [{ id: "user-1", stellarAddress: "GALICE0000000000000000000000000000000000000000000000000000000" }],
     ]);
 
-    const result = await processRewardClaim("sub-1", "user-1", 5);
+    const result = await processRewardClaim("sub-1", "user-1");
 
     expect(result).toBe(true);
-    // Two transactions: one for validation/pending, one for updating result
+    // One transaction for validation/pending and one for updating result
     expect(mockDb.transaction).toHaveBeenCalledTimes(2);
     expect(invokeContract).toHaveBeenCalledWith(
       "test-reward-contract",
       "claim_reward",
       expect.any(Array)
     );
+  });
+
+  it("should perform the Stellar invocation after the validation transaction closes", async () => {
+    let txActive = false;
+    mockDb.transaction.mockImplementation(async (fn: Function) => {
+      txActive = true;
+      try {
+        const selectResults = [
+          [{ id: "sub-1", userId: "user-1", score: 5, rewardClaimed: false, rewardPending: false, quizId: "quiz-1" }],
+          [{ id: "quiz-1", courseId: "course-1", questions: [{ id: "q1" }] }],
+          [{ id: "user-1", stellarAddress: "GALICE0000000000000000000000000000000000000000000000000000000" }],
+        ];
+        let resultIndex = 0;
+
+        const makeQueryChain = (result: any[]) => {
+          const chain: any = {
+            then: (resolve: ThenCallback) => Promise.resolve(result).then(resolve),
+            for: vi.fn().mockImplementation(() => Promise.resolve(result)),
+          };
+          chain.select = vi.fn().mockReturnValue(chain);
+          chain.from = vi.fn().mockReturnValue(chain);
+          chain.where = vi.fn().mockImplementation(() => chain);
+          return chain;
+        };
+
+        const tx = {
+          select: vi.fn().mockImplementation(() => makeQueryChain(selectResults[resultIndex++] ?? [])),
+          update: vi.fn().mockReturnValue(fakeUpdateBuilder()),
+        } as any;
+
+        return await fn(tx);
+      } finally {
+        txActive = false;
+      }
+    });
+
+    vi.mocked(invokeContract).mockImplementation(async () => {
+      expect(txActive).toBe(false);
+      return "tx-hash-123";
+    });
+
+    await processRewardClaim("sub-1", "user-1");
   });
 
   it("should throw when on-chain transaction fails", async () => {
@@ -192,14 +263,10 @@ describe("processRewardClaim", () => {
     vi.mocked(invokeContract).mockRejectedValue(new Error("Stellar error"));
 
     // Mock the update call that marks the submission as failed
-    mockDb.update.mockReturnValue({
-      set: vi.fn().mockReturnValue({
-        where: vi.fn().mockResolvedValue(undefined),
-      }),
-    });
+    mockDb.update.mockReturnValue(fakeUpdateBuilder());
 
     await expect(
-      processRewardClaim("sub-1", "user-1", 5)
+      processRewardClaim("sub-1", "user-1")
     ).rejects.toThrow("Stellar error");
   });
 });

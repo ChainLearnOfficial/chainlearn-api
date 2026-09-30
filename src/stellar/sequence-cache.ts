@@ -52,16 +52,20 @@ export class SequenceCache {
 
     // Cache miss (never seeded, expired, or invalidated) — load the
     // authoritative sequence from Horizon and seed the shared cache.
+    // We seed with the *current* sequence (N) so that callers pass it
+    // directly to `new Account(publicKey, N)`.  TransactionBuilder
+    // internally adds 1, producing a transaction with sequence N+1.
+    // Seeding with N+1 (the old behaviour) caused Account(N+1) →
+    // TransactionBuilder → sequence N+2, which is off by one — #206.
     const account = await stellarClient.getAccount(accountId);
     const seq = BigInt(account.sequence);
-    const next = (seq + 1n).toString();
 
     const result = (await redis.eval(
       SEED_AND_INCREMENT_SCRIPT,
       1,
       key,
       TTL_SECONDS,
-      next
+      seq.toString()
     )) as string | number;
     return result.toString();
   }

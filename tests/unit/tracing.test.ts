@@ -29,7 +29,7 @@ vi.mock("@opentelemetry/instrumentation-ioredis", () => ({
   IORedisInstrumentation: vi.fn(),
 }));
 
-import { initTracing, shutdownTracing } from "../../../src/tracing.js";
+import { initTracing, shutdownTracing } from "../../src/tracing.js";
 import { NodeSDK } from "@opentelemetry/sdk-node";
 
 describe("Tracing", () => {

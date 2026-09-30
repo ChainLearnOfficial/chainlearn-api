@@ -14,6 +14,9 @@ vi.mock("../../../src/config/redis.js", () => ({
     ping: vi.fn().mockResolvedValue("PONG"),
     zadd: vi.fn().mockResolvedValue(1),
     eval: vi.fn().mockResolvedValue([]),
+    lpush: vi.fn().mockResolvedValue(1),
+    llen: vi.fn().mockResolvedValue(0),
+    lrange: vi.fn().mockResolvedValue([]),
   },
 }));
 
@@ -50,12 +53,21 @@ import {
   requeueReward,
   startRetryProcessor,
   stopRetryProcessor,
+  inspectDeadLetterQueue,
 } from "../../../src/services/retry-queue.js";
 import { redis } from "../../../src/config/redis.js";
 import { db } from "../../../src/config/database.js";
 
 const mockRedis = vi.mocked(redis);
 const mockDb = vi.mocked(db);
+
+// ioredis' `zadd` is heavily overloaded, and `vi.mocked()` collapses a mock's
+// recorded calls to the *last* overload's parameters — the `INCR` variant, in
+// which the second positional argument is the literal `"INCR"` rather than the
+// score. Read the recorded calls through the shape this suite actually inspects
+// (`zadd(key, score, payload)`) instead of casting each destructured argument.
+const zaddCallArgs = (index: number): [string, number, string] =>
+  mockRedis.zadd.mock.calls[index] as unknown as [string, number, string];
 
 function jobPayload(overrides: Partial<Record<string, unknown>> = {}) {
   return {
@@ -79,11 +91,18 @@ describe("Retry Queue", () => {
   });
 
   it("should enqueue a reward job scored for immediate processing", async () => {
-    await enqueueReward({
+    // `score` here is leftover fixture data: `enqueueReward` spreads whatever it
+    // is handed straight into the queued payload, so it is kept here and passed
+    // through a variable. (A variable rather than an inline literal because the
+    // declared parameter type is `Omit<RetryJob, "id" | "retryCount" | "createdAt">`,
+    // and only object *literals* are subject to excess-property checking.)
+    const job = {
       submissionId: "sub-1",
       userId: "user-1",
       score: 5,
-    });
+    };
+
+    await enqueueReward(job);
 
     expect(mockRedis.zadd).toHaveBeenCalledWith(
       "chainlearn:retry:rewards",
@@ -124,19 +143,19 @@ describe("Retry Queue", () => {
       expect.any(Number),
       expect.stringContaining('"retryCount":4')
     );
-    const [, score] = mockRedis.zadd.mock.calls[0];
-    expect(score as number).toBeGreaterThan(before); // scheduled in the future, not immediate
+    const [, score] = zaddCallArgs(0);
+    expect(score).toBeGreaterThan(before); // scheduled in the future, not immediate
   });
 
   it("should back off further on later retries, up to the cap", async () => {
     await requeueReward(jobPayload({ retryCount: 0 }));
-    const [, firstScore] = mockRedis.zadd.mock.calls[0];
+    const [, firstScore] = zaddCallArgs(0);
 
     mockRedis.zadd.mockClear();
     await requeueReward(jobPayload({ retryCount: 5 }));
-    const [, laterScore] = mockRedis.zadd.mock.calls[0];
+    const [, laterScore] = zaddCallArgs(0);
 
-    expect(laterScore as number).toBeGreaterThan(firstScore as number);
+    expect(laterScore).toBeGreaterThan(firstScore);
   });
 
   it("should not requeue when max retries exceeded", async () => {
@@ -259,5 +278,74 @@ describe("Retry Queue", () => {
       stopRetryProcessor();
       vi.useRealTimers();
     }
+  });
+
+  it("should handle malformed JSON and move to dead-letter queue", async () => {
+    const validJob = jobPayload({ id: "valid", submissionId: "sub-valid" });
+    const malformedJson = "{broken json";
+    
+    mockRedis.eval.mockResolvedValueOnce([JSON.stringify(validJob), malformedJson]);
+
+    const result = await dequeueReadyBatch();
+
+    // Should return only the valid job
+    expect(result).toEqual([validJob]);
+    expect(result.length).toBe(1);
+    
+    // Malformed job should be pushed to dead-letter queue
+    expect(mockRedis.lpush).toHaveBeenCalledWith(
+      "chainlearn:retry:rewards:dead-letter",
+      malformedJson
+    );
+  });
+
+  it("should continue processing valid jobs even when one is malformed", async () => {
+    const job1 = jobPayload({ id: "job-1", submissionId: "sub-1" });
+    const job2 = jobPayload({ id: "job-2", submissionId: "sub-2" });
+    const malformed = "not-valid-json";
+    
+    mockRedis.eval.mockResolvedValueOnce([
+      JSON.stringify(job1),
+      malformed,
+      JSON.stringify(job2)
+    ]);
+
+    const result = await dequeueReadyBatch();
+
+    expect(result).toEqual([job1, job2]);
+    expect(result.length).toBe(2);
+    expect(mockRedis.lpush).toHaveBeenCalledWith(
+      "chainlearn:retry:rewards:dead-letter",
+      malformed
+    );
+  });
+
+  it("should handle dead-letter queue write failure gracefully", async () => {
+    const validJob = jobPayload();
+    const malformed = "{bad}";
+    
+    mockRedis.eval.mockResolvedValueOnce([JSON.stringify(validJob), malformed]);
+    mockRedis.lpush.mockRejectedValueOnce(new Error("Redis write failed"));
+
+    // Should not throw - continues processing other jobs
+    const result = await dequeueReadyBatch();
+    
+    expect(result).toEqual([validJob]);
+    expect(mockRedis.lpush).toHaveBeenCalled();
+  });
+
+  it("should inspect dead-letter queue", async () => {
+    mockRedis.llen.mockResolvedValueOnce(5);
+    mockRedis.lrange.mockResolvedValueOnce(["{bad1}", "{bad2}", "{bad3}"]);
+
+    const result = await inspectDeadLetterQueue(3);
+
+    expect(result.count).toBe(5);
+    expect(result.entries).toEqual(["{bad1}", "{bad2}", "{bad3}"]);
+    expect(mockRedis.lrange).toHaveBeenCalledWith(
+      "chainlearn:retry:rewards:dead-letter",
+      0,
+      2
+    );
   });
 });

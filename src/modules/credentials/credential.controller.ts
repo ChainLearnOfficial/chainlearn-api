@@ -88,7 +88,7 @@ export class CredentialController {
         statusCode,
         {
           success: false,
-          error: "Failed to mint credential",
+          error: { code: "REQUEST_FAILED", message: "Failed to mint credential" },
         }
       );
 

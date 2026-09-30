@@ -248,6 +248,9 @@ export async function getQueuedRewardJobs(): Promise<QueuedRewardJob[]> {
       // than throwing. Still logged here since a malformed queue entry is
       // an anomaly worth tracking even though it self-heals elsewhere.
       logger.warn({ err }, "Skipped malformed reward retry queue entry");
+      // this read-only view just can't render it, so log rather than
+      // silently omitting it from what the caller sees.
+      logger.warn({ err, index: i / 2 }, "Skipping malformed queue entry in getQueuedRewardJobs");
     }
   }
   return jobs;

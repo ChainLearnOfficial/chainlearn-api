@@ -1,4 +1,4 @@
-import { and, count, desc, ilike, isNull, or, eq, sql } from "drizzle-orm";
+import { and, count, desc, gte, ilike, isNull, or, eq, sql } from "drizzle-orm";
 import { db } from "../../config/database.js";
 import {
   users,
@@ -202,6 +202,14 @@ export class AdminUsersService {
    * the error message be precise without reintroducing the TOCTOU: it can
    * only ever make this method THROW SOONER on a case that would have
    * failed anyway, never allow an over-deduction to slip through.
+   * The balance check and the deduction are a single atomic UPDATE (#476):
+   * `WHERE credits >= amount` guards the row itself, so a concurrent grant or
+   * deduction between "check" and "act" can no longer let credits go
+   * negative — there is no window between the two, because there's no
+   * "two" anymore. A `returning` miss means either the user doesn't exist
+   * (or is soft-deleted) or the balance was insufficient; a follow-up read
+   * distinguishes those two only to pick the right error, not to decide
+   * whether to deduct.
    *
    * @param actorId The admin who made the deduction, recorded for the audit trail.
    */
@@ -238,6 +246,7 @@ export class AdminUsersService {
           eq(users.id, userId),
           isNull(users.deletedAt),
           sql`${users.credits} >= ${amount}`,
+          gte(users.credits, amount),
         ),
       )
       .returning({
@@ -263,6 +272,18 @@ export class AdminUsersService {
           current
             ? `Insufficient credits. User has ${current.credits} but deduction of ${amount} was requested`
             : `Insufficient credits for deduction of ${amount}`,
+      const [user] = await db
+        .select({ credits: users.credits })
+        .from(users)
+        .where(and(eq(users.id, userId), isNull(users.deletedAt)));
+
+      if (!user) {
+        throw new NotFoundError("User");
+      }
+
+      throw new ValidationError({
+        amount: [
+          `Insufficient credits. User has ${user.credits} but deduction of ${amount} was requested`,
         ],
       });
     }

@@ -47,7 +47,8 @@ export async function authGuard(
       stellarAddress: string;
       jti?: string;
     }>();
-  } catch {
+  } catch (err) {
+    logger.debug({ err }, "JWT verification failed");
     throw new UnauthorizedError("Invalid or expired token");
   }
 

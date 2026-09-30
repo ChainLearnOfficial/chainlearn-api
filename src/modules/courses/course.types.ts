@@ -42,8 +42,8 @@ export const shareCodeParamsSchema = z.object({
 
 export const courseModuleSchema = z.object({
   id: z.string().min(1).max(100),
-  title: z.string().min(1).max(255),
-  description: z.string().max(1000).optional(),
+  title: z.string().min(1).max(255).transform(sanitizeText),
+  description: z.string().max(1000).transform(sanitizeText).optional(),
   estimatedDurationMinutes: z.coerce.number().int().positive().max(1440).optional(),
 });
 
@@ -52,8 +52,8 @@ export const courseModuleSchema = z.object({
 const prerequisitesSchema = z.array(z.string().uuid()).max(20).default([]);
 
 export const createCourseSchema = z.object({
-  title: z.string().min(1).max(255),
-  description: z.string().min(1),
+  title: z.string().min(1).max(255).transform(sanitizeText),
+  description: z.string().min(1).transform(sanitizeText),
   difficulty: z.enum(["beginner", "intermediate", "advanced"]).default("beginner"),
   tags: z.array(z.string().min(1).max(50)).max(20).default([]),
   courseModules: z.array(courseModuleSchema).max(100).optional(),
@@ -63,8 +63,8 @@ export const createCourseSchema = z.object({
 
 export const updateCourseSchema = z
   .object({
-    title: z.string().min(1).max(255).optional(),
-    description: z.string().min(1).optional(),
+    title: z.string().min(1).max(255).transform(sanitizeText).optional(),
+    description: z.string().min(1).transform(sanitizeText).optional(),
     difficulty: z.enum(["beginner", "intermediate", "advanced"]).optional(),
     tags: z.array(z.string().min(1).max(50)).max(20).optional(),
     courseModules: z.array(courseModuleSchema).max(100).optional(),
@@ -79,15 +79,15 @@ export const updateCourseSchema = z
 // ─── Admin Module Request Schemas (#304) ────────────────────────────────────
 
 export const createModuleSchema = z.object({
-  title: z.string().min(1).max(255),
-  description: z.string().min(1).max(2000).default(""),
+  title: z.string().min(1).max(255).transform(sanitizeText),
+  description: z.string().min(1).max(2000).transform(sanitizeText).default(""),
   order: z.coerce.number().int().min(0).optional(),
 });
 
 export const updateModuleSchema = z
   .object({
-    title: z.string().min(1).max(255).optional(),
-    description: z.string().min(1).max(2000).optional(),
+    title: z.string().min(1).max(255).transform(sanitizeText).optional(),
+    description: z.string().min(1).max(2000).transform(sanitizeText).optional(),
     order: z.coerce.number().int().min(0).optional(),
   })
   .refine((data) => Object.keys(data).length > 0, {
@@ -106,8 +106,8 @@ export const moduleParamsSchema = z.object({
 // module definitions, distinct from `courseModules`' quiz-linked metadata)
 // created alongside the course in one call.
 export const importCourseSchema = z.object({
-  title: z.string().min(1).max(255),
-  description: z.string().min(1),
+  title: z.string().min(1).max(255).transform(sanitizeText),
+  description: z.string().min(1).transform(sanitizeText),
   difficulty: z.enum(["beginner", "intermediate", "advanced"]).default("beginner"),
   tags: z.array(z.string().min(1).max(50)).max(20).default([]),
   courseModules: z.array(courseModuleSchema).max(100).optional(),
@@ -116,8 +116,8 @@ export const importCourseSchema = z.object({
   modules: z
     .array(
       z.object({
-        title: z.string().min(1).max(255),
-        description: z.string().max(2000).default(""),
+        title: z.string().min(1).max(255).transform(sanitizeText),
+        description: z.string().max(2000).transform(sanitizeText).default(""),
         order: z.coerce.number().int().min(0).optional(),
       }),
     )
@@ -193,8 +193,8 @@ export type CreateCourseBody = z.infer<typeof createCourseSchema>;
  */
 export const draftCourseSchema = z
   .object({
-    title: z.string().min(1).max(255).optional(),
-    description: z.string().min(1).optional(),
+    title: z.string().min(1).max(255).transform(sanitizeText).optional(),
+    description: z.string().min(1).transform(sanitizeText).optional(),
     difficulty: z.enum(["beginner", "intermediate", "advanced"]).optional(),
     tags: z.array(z.string().min(1).max(50)).max(20).optional(),
     courseModules: z.array(courseModuleSchema).max(100).optional(),

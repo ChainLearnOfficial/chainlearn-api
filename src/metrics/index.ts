@@ -55,6 +55,15 @@ export const credentialsMintedTotal = new Counter({
   registers: [registry],
 });
 
+/** Per-dependency health check latency and outcome (#483). */
+export const dependencyHealthCheckSeconds = new Histogram({
+  name: "dependency_health_check_seconds",
+  help: "Latency of individual GET /health/:service dependency checks",
+  labelNames: ["service", "status"] as const,
+  buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
+  registers: [registry],
+});
+
 export function setupInfraMetrics(pool: Pool, redisClient: Redis): void {
   new Gauge({
     name: "db_active_connections",

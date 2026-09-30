@@ -1,5 +1,11 @@
 import { z } from "zod";
-import "dotenv/config";
+import dotenv from "dotenv";
+
+// Test mode gets its own optional .env.test file (#475), gitignored like
+// .env — see .env.test.example. dotenv never overwrites a value already set
+// in process.env, so real CI-provided environment variables still win over
+// anything in either file; this only fills in what's missing.
+dotenv.config({ path: process.env.NODE_ENV === "test" ? ".env.test" : ".env" });
 
 const envSchema = z.object({
   NODE_ENV: z
@@ -87,6 +93,30 @@ const envSchema = z.object({
 
 export type Env = z.infer<typeof envSchema>;
 
+/**
+ * Last-resort values for the schema fields that have no zod `.default()`
+ * (they're `required` in every other environment), used only when NODE_ENV
+ * is "test" and neither a real environment variable nor .env.test supplies
+ * one (#475). Fields the schema already defaults (RATE_LIMIT_MAX,
+ * REQUEST_TIMEOUT_MS, AI_SERVICE_URL, etc.) don't need an entry here —
+ * envSchema.parse() applies its own default when the field is undefined.
+ *
+ * These are placeholder shapes, not real credentials: STELLAR_PLATFORM_SECRET
+ * in particular must be syntactically valid (`/^S[A-Z2-7]{55}$/`) or every
+ * test run fails config validation before a single test executes, which is
+ * exactly what the literal string "test" used to do here.
+ */
+const TEST_FALLBACKS = {
+  DATABASE_URL: "postgresql://chainlearn_test:test_password@localhost:5432/chainlearn_test",
+  JWT_SECRET: "test-secret-key-that-is-at-least-sixty-four-characters-long-for-tests",
+  STELLAR_HORIZON_URL: "https://horizon-testnet.stellar.org",
+  STELLAR_SOROBAN_RPC_URL: "https://soroban-testnet.stellar.org",
+  STELLAR_PLATFORM_SECRET: "S" + "A".repeat(55),
+  STELLAR_QUIZ_CONTRACT_ID: "test-quiz-contract",
+  STELLAR_REWARD_CONTRACT_ID: "test-reward-contract",
+  STELLAR_CREDENTIAL_CONTRACT_ID: "test-credential-contract",
+} as const;
+
 let _config: Env | null = null;
 
 // Test-mode-only placeholders for non-critical vars (contract IDs, public
@@ -134,6 +164,12 @@ function loadConfig(): Env {
       // In test mode, warn but don't exit — tests mock what they need.
       // Merge with process.env so CI-provided values (DATABASE_URL, REDIS_URL, etc.)
       // are preserved; only non-critical vars get obviously-fake test defaults.
+      // Every field is passed through from process.env (populated above by
+      // real environment variables, then .env.test, in that precedence)
+      // consistently, not just the ones that happened to need a fallback —
+      // config.NODE_ENV itself was previously dropped this way and silently
+      // defaulted to "development", which meant logger.ts's test-mode branch
+      // never actually activated during a test run.
       console.warn(
         "Missing env vars in test mode (expected if mocking config):",
         result.error.flatten().fieldErrors
@@ -164,6 +200,17 @@ function loadConfig(): Env {
         AVATAR_UPLOAD_MAX_BYTES: process.env.AVATAR_UPLOAD_MAX_BYTES,
         AVATAR_UPLOAD_DIR: process.env.AVATAR_UPLOAD_DIR,
         PUBLIC_BASE_URL: process.env.PUBLIC_BASE_URL,
+        ...process.env,
+        NODE_ENV: "test",
+        DATABASE_URL: process.env.DATABASE_URL || TEST_FALLBACKS.DATABASE_URL,
+        JWT_SECRET: process.env.JWT_SECRET || TEST_FALLBACKS.JWT_SECRET,
+        STELLAR_HORIZON_URL: process.env.STELLAR_HORIZON_URL || TEST_FALLBACKS.STELLAR_HORIZON_URL,
+        STELLAR_SOROBAN_RPC_URL: process.env.STELLAR_SOROBAN_RPC_URL || TEST_FALLBACKS.STELLAR_SOROBAN_RPC_URL,
+        STELLAR_PLATFORM_SECRET: process.env.STELLAR_PLATFORM_SECRET || TEST_FALLBACKS.STELLAR_PLATFORM_SECRET,
+        STELLAR_QUIZ_CONTRACT_ID: process.env.STELLAR_QUIZ_CONTRACT_ID || TEST_FALLBACKS.STELLAR_QUIZ_CONTRACT_ID,
+        STELLAR_REWARD_CONTRACT_ID: process.env.STELLAR_REWARD_CONTRACT_ID || TEST_FALLBACKS.STELLAR_REWARD_CONTRACT_ID,
+        STELLAR_CREDENTIAL_CONTRACT_ID:
+          process.env.STELLAR_CREDENTIAL_CONTRACT_ID || TEST_FALLBACKS.STELLAR_CREDENTIAL_CONTRACT_ID,
       });
     }
     console.error(

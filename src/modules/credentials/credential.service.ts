@@ -26,6 +26,7 @@ import { invokeContract } from "../../stellar/transactions.js";
 import { createMintAuthorization } from "../../stellar/signatures.js";
 import { config } from "../../config/index.js";
 import { logger } from "../../utils/logger.js";
+import { getRequestId } from "../../utils/request-context.js";
 import crypto, { createHash } from "node:crypto";
 import StellarSdk from "@stellar/stellar-sdk";
 import {
@@ -179,7 +180,7 @@ export class CredentialService {
           Number(process.hrtime.bigint() - txStart) / 1e9,
         );
         logger.error(
-          { err, userId, courseId },
+          { err, requestId: getRequestId(), userId, courseId },
           "On-chain credential mint failed",
         );
         throw new Error("Failed to mint credential on-chain");

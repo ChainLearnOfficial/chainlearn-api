@@ -21,6 +21,7 @@ export class AuditController {
         limit: query.limit,
         offset: query.offset,
         total: result.total,
+        nextCursor: result.nextCursor,
       },
     });
   }

@@ -2695,12 +2695,16 @@ export class CourseService {
     const cached = await cacheGet<EnrollmentTrendsResult>(namespace, ck);
     if (cached) return cached;
 
-    const intervalMap: Record<string, string> = {
+    // Keyed by the Zod enums themselves (EnrollmentTrendsQuery["range"/"granularity"])
+    // rather than `Record<string, string>` (#485), so adding a new enum value
+    // to enrollmentTrendsQuerySchema without adding it here is a compile error
+    // instead of a runtime `undefined` silently reaching the query.
+    const intervalMap: Record<EnrollmentTrendsQuery["range"], string> = {
       "7d": "7 days",
       "30d": "30 days",
       "90d": "90 days",
     };
-    const truncMap: Record<string, string> = {
+    const truncMap: Record<EnrollmentTrendsQuery["granularity"], string> = {
       daily: "day",
       weekly: "week",
       monthly: "month",
@@ -2709,21 +2713,25 @@ export class CourseService {
     const interval = intervalMap[query.range];
     const trunc = truncMap[query.granularity];
 
+    // Both values are bound parameters, not sql.raw() (#485): date_trunc's
+    // first argument and an interval cast both accept a plain text
+    // parameter in Postgres, so there's no need to interpolate raw SQL text
+    // here even though trunc/interval only ever come from the maps above.
     const [trendRows] = await Promise.all([
       db
         .select({
-          date: sql<string>`date_trunc('${sql.raw(trunc)}', ${enrollments.enrolledAt})::date`,
+          date: sql<string>`date_trunc(${trunc}, ${enrollments.enrolledAt})::date`,
           count: count(),
         })
         .from(enrollments)
         .where(
           and(
             eq(enrollments.courseId, courseId),
-            sql`${enrollments.enrolledAt} >= now() - interval '${sql.raw(interval)}'`,
+            sql`${enrollments.enrolledAt} >= now() - (${interval})::interval`,
           ),
         )
-        .groupBy(sql`date_trunc('${sql.raw(trunc)}', ${enrollments.enrolledAt})`)
-        .orderBy(sql`date_trunc('${sql.raw(trunc)}', ${enrollments.enrolledAt})`),
+        .groupBy(sql`date_trunc(${trunc}, ${enrollments.enrolledAt})`)
+        .orderBy(sql`date_trunc(${trunc}, ${enrollments.enrolledAt})`),
       db
         .select({ value: count() })
         .from(enrollments)

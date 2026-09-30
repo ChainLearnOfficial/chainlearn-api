@@ -143,7 +143,8 @@ export async function rotateRefreshToken(token: string): Promise<{
   let record: RefreshTokenRecord;
   try {
     record = JSON.parse(raw) as RefreshTokenRecord;
-  } catch {
+  } catch (err) {
+    logger.warn({ err }, "Stored refresh token record is not valid JSON");
     throw new UnauthorizedError("Invalid or expired refresh token");
   }
 
@@ -194,5 +195,6 @@ export async function revokeRefreshToken(token: string): Promise<void> {
       { err, hash },
       "Corrupt refresh token record encountered during logout revoke",
     );
+    logger.debug({ err }, "Could not revoke refresh token family on logout — corrupt record");
   }
 }

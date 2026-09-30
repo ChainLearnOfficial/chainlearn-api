@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { db } from "../config/database.js";
 import { webhooks, webhookAttempts } from "../database/schema.js";
 import { logger } from "../utils/logger.js";
+import { getRequestId } from "../utils/request-context.js";
 import type { WebhookPayload, WebhookEventType } from "../modules/admin/webhook.types.js";
 
 const MAX_RETRIES = 5;
@@ -53,6 +54,7 @@ async function sendWebhook(
   const { timestamp, signature } = createSignature(payload, secret);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30_000); // 30 second timeout
+  const requestId = getRequestId();
 
   try {
     const response = await fetch(url, {
@@ -71,7 +73,7 @@ async function sendWebhook(
 
     if (response.ok) {
       logger.info(
-        { webhookId, url, event: payload.event, statusCode: response.status },
+        { requestId, webhookId, url, event: payload.event, statusCode: response.status },
         "Webhook delivered successfully"
       );
       return { success: true, statusCode: response.status };
@@ -80,7 +82,7 @@ async function sendWebhook(
     // 4xx errors (except 429) are not retried — client error, not server error
     if (response.status >= 400 && response.status < 500 && response.status !== 429) {
       logger.warn(
-        { webhookId, url, event: payload.event, statusCode: response.status },
+        { requestId, webhookId, url, event: payload.event, statusCode: response.status },
         "Webhook delivery failed with client error — will not retry"
       );
       return {
@@ -92,7 +94,7 @@ async function sendWebhook(
 
     // 5xx and 429 (rate limit) are retryable
     logger.warn(
-      { webhookId, url, event: payload.event, statusCode: response.status },
+      { requestId, webhookId, url, event: payload.event, statusCode: response.status },
       "Webhook delivery failed with server error — will retry"
     );
     return {
@@ -109,7 +111,7 @@ async function sendWebhook(
           : "Unknown error";
 
     logger.error(
-      { webhookId, url, event: payload.event, error: errorMsg },
+      { requestId, webhookId, url, event: payload.event, error: errorMsg },
       "Webhook delivery error"
     );
 

@@ -8,6 +8,7 @@ import {
   userCourseProgressParamsSchema,
 } from "./user.types.js";
 import { config } from "../../config/index.js";
+import { ROUTE_BODY_LIMITS } from "../../config/route-body-limits.js";
 import { notificationController } from "../notifications/notification.controller.js";
 import { credentialController } from "../credentials/credential.controller.js";
 import { badgeController } from "../badges/badge.controller.js";
@@ -34,6 +35,7 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
   app.put<{ Body: import("./user.types.js").UpdateProfileBody }>(
     "/me",
     {
+      config: { bodyLimit: ROUTE_BODY_LIMITS.profileUpdate },
       preHandler: [validate({ body: updateProfileSchema })],
       schema: {
         description: "Update authenticated user profile",

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { BadgeCriteria } from "../../database/schema.js";
+import { sanitizeText } from "../../utils/sanitize.js";
 
 export const badgeTypeSchema = z.enum([
   "enrollment",
@@ -22,8 +23,8 @@ export const badgeCriteriaSchema = z.object({
 }).passthrough();
 
 export const createBadgeSchema = z.object({
-  name: z.string().min(1).max(255),
-  description: z.string().min(1),
+  name: z.string().min(1).max(255).transform(sanitizeText),
+  description: z.string().min(1).transform(sanitizeText),
   iconUrl: z.string().min(1),
   type: badgeTypeSchema,
   criteria: badgeCriteriaSchema,
@@ -32,8 +33,8 @@ export const createBadgeSchema = z.object({
 export type CreateBadgeBody = z.infer<typeof createBadgeSchema>;
 
 export const updateBadgeSchema = z.object({
-  name: z.string().min(1).max(255).optional(),
-  description: z.string().min(1).optional(),
+  name: z.string().min(1).max(255).transform(sanitizeText).optional(),
+  description: z.string().min(1).transform(sanitizeText).optional(),
   iconUrl: z.string().min(1).optional(),
   type: badgeTypeSchema.optional(),
   criteria: badgeCriteriaSchema.optional(),

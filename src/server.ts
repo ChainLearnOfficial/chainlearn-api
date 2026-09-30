@@ -48,6 +48,7 @@ import { processRewardClaim } from "./modules/rewards/reward.service.js";
 import { warmCourseCache } from "./cache/warmer.js";
 import { runWithRequestContext } from "./utils/request-context.js";
 import { resolveSafeStaticPath } from "./utils/safe-static-path.js";
+import { checkServiceHealth } from "./utils/service-health.js";
 
 // Versioned route modules
 import { registerVersionedRoutes } from "./routes/versioning.js";
@@ -232,6 +233,43 @@ async function buildApp() {
         soroban: sorobanCheck.status === "fulfilled" ? "ok" : "error",
       },
     });
+  });
+
+  // Individual per-service health checks (#483) — the combined /health above
+  // can't tell an operator which dependency is down. Each of these is
+  // independent so one outage doesn't block checking the others, and none
+  // require authentication (matching /health).
+  app.get("/health/redis", async (_request, reply) => {
+    const result = await checkServiceHealth("redis", () => redis.ping());
+    return reply.status(result.status === "ok" ? 200 : 503).send(result);
+  });
+
+  app.get("/health/database", async (_request, reply) => {
+    const result = await checkServiceHealth("database", () => db.execute(sql`SELECT 1`));
+    return reply.status(result.status === "ok" ? 200 : 503).send(result);
+  });
+
+  app.get("/health/stellar", async (_request, reply) => {
+    const [horizon, soroban] = await Promise.all([
+      checkServiceHealth("stellar.horizon", () => stellarClient.getHorizonServer().root()),
+      checkServiceHealth("stellar.soroban", () => stellarClient.checkSorobanHealth()),
+    ]);
+    const status = horizon.status === "ok" && soroban.status === "ok" ? "ok" : "down";
+    return reply.status(status === "ok" ? 200 : 503).send({
+      status,
+      latencyMs: Math.max(horizon.latencyMs, soroban.latencyMs),
+      checks: { horizon, soroban },
+    });
+  });
+
+  app.get("/health/ai", async (_request, reply) => {
+    const result = await checkServiceHealth("ai", async () => {
+      const response = await fetch(`${config.AI_SERVICE_URL}/health`);
+      if (!response.ok) {
+        throw new Error(`AI service health check returned ${response.status}`);
+      }
+    });
+    return reply.status(result.status === "ok" ? 200 : 503).send(result);
   });
 
   app.get("/metrics", { preHandler: authGuard }, async (_request, reply) => {

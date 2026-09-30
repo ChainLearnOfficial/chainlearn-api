@@ -110,18 +110,23 @@ export class WebhookController {
   async getAttempts(
     request: FastifyRequest<{
       Params: { id: string };
-      Querystring: { page?: number; limit?: number };
+      Querystring: { page?: number; limit?: number; cursor?: string };
     }>,
     reply: FastifyReply
   ): Promise<void> {
     const { id } = request.params;
     const page = request.query.page ?? 1;
     const limit = request.query.limit ?? 20;
-    const { attempts, total } = await webhookService.getWebhookAttempts(id, page, limit);
+    const { attempts, total, nextCursor } = await webhookService.getWebhookAttempts(
+      id,
+      page,
+      limit,
+      request.query.cursor,
+    );
     reply.send({
       success: true,
       data: attempts,
-      pagination: { page, limit, total },
+      pagination: { page, limit, total, nextCursor },
     });
   }
 

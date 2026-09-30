@@ -31,6 +31,7 @@ import {
   type CandidateCourse,
   type ScoredCourse,
 } from "./recommendations.js";
+import { updateProfileSchema } from "./user.types.js";
 import type {
   ActivityQuery,
   AvatarUpload,
@@ -86,9 +87,22 @@ export class UserService {
     userId: string,
     data: UpdateProfileBody,
   ): Promise<UserProfile> {
+    // Re-validate at the service boundary so direct/internal callers receive
+    // the same constraints and sanitization as HTTP callers.
+    const parsed = updateProfileSchema.safeParse(data);
+    if (!parsed.success) {
+      const errors: Record<string, string[]> = {};
+      for (const issue of parsed.error.issues) {
+        const field = issue.path[0];
+        const key = typeof field === "string" ? field : "profile";
+        (errors[key] ??= []).push(issue.message);
+      }
+      throw new ValidationError(errors);
+    }
+
     const [updated] = await db
       .update(users)
-      .set({ ...data, updatedAt: new Date() })
+      .set({ ...parsed.data, updatedAt: new Date() })
       .where(eq(users.id, userId))
       .returning();
 

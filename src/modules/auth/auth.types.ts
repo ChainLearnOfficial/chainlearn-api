@@ -40,12 +40,17 @@ export const logoutSchema = z
   })
   .optional();
 
+export const sessionIdParamsSchema = z.object({
+  sessionId: z.string().uuid("Invalid session ID"),
+});
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 export type ChallengeBody = z.infer<typeof challengeSchema>;
 export type VerifyBody = z.infer<typeof verifySchema>;
 export type RefreshBody = z.infer<typeof refreshSchema>;
 export type LogoutBody = z.infer<typeof logoutSchema>;
+export type SessionIdParams = z.infer<typeof sessionIdParamsSchema>;
 
 export interface ChallengeResponse {
   challenge: string;

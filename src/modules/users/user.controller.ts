@@ -3,7 +3,10 @@ import { userService } from "./user.service.js";
 import type { AuthenticatedRequest } from "../../middleware/auth.js";
 import { config } from "../../config/index.js";
 import { ValidationError } from "../../utils/errors.js";
-import type { ActivityQuery, UpdateProfileBody } from "./user.types.js";
+import type {
+  ActivityQuery,
+  UpdateProfileBody,
+} from "./user.types.js";
 
 export class UserController {
   /**
@@ -50,6 +53,23 @@ export class UserController {
   }
 
   /**
+   * GET /api/v1/users/me/courses/:courseId/progress
+   * Module-level progress for one course (#412).
+   */
+  async getCourseProgress(
+    request: FastifyRequest<{ Params: { courseId: string } }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { authUser } = request as AuthenticatedRequest;
+    const progress = await userService.getCourseProgress(
+      authUser.id,
+      request.params.courseId,
+    );
+
+    reply.send({ success: true, data: progress });
+  }
+
+  /**
    * GET /api/users/me/activity
    * Return the authenticated user's recent activity timeline.
    */
@@ -84,6 +104,20 @@ export class UserController {
       success: true,
       data: recommendations,
     });
+  }
+
+  /**
+   * GET /api/v1/users/me/recommendations
+   * Personalized course recommendations with confidence scores (#375).
+   */
+  async getRecommendations(
+    request: FastifyRequest,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { authUser } = request as AuthenticatedRequest;
+    const recommendations = await userService.getRecommendations(authUser.id);
+
+    reply.send({ success: true, data: recommendations });
   }
 
   /**
@@ -159,6 +193,20 @@ export class UserController {
     });
 
     reply.send({ success: true, data: profile });
+  }
+
+  /**
+   * GET /api/v1/users/me/learning-stats
+   * Comprehensive learning statistics for the authenticated user (#383).
+   */
+  async getLearningStats(
+    request: FastifyRequest,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { authUser } = request as AuthenticatedRequest;
+    const stats = await userService.getLearningStats(authUser.id);
+
+    reply.send({ success: true, data: stats });
   }
 }
 

@@ -1,19 +1,35 @@
-import { eq, and, count, desc, inArray, ilike, or, isNull, sql } from "drizzle-orm";
+import { eq, and, count, desc, asc, inArray, ilike, or, isNull, ne, sql } from "drizzle-orm";
 import crypto from "node:crypto";
+import QRCode from "qrcode";
 import { db } from "../../config/database.js";
 import {
   courses,
+  courseReviews,
+  courseShares,
+  credentials,
   enrollments,
   quizzes,
   quizSubmissions,
   users,
+  courseReports,
+  notifications,
+  moduleContent,
   type CourseModuleDefinition,
+  type ModuleContentPayload,
 } from "../../database/schema.js";
 import { config } from "../../config/index.js";
-import { NotFoundError, ConflictError, ForbiddenError } from "../../utils/errors.js";
+import {
+  NotFoundError,
+  ConflictError,
+  ForbiddenError,
+  ValidationError,
+  AppError,
+} from "../../utils/errors.js";
 import { withLock } from "../../utils/lock.js";
 import { logger } from "../../utils/logger.js";
 import { getOnChainContentHash } from "../../stellar/progress-tracker.js";
+import { checkAccessibility } from "./accessibility.js";
+import { PASSING_PERCENTAGE } from "../quizzes/quiz.types.js";
 import { auditLog } from "../../audit/index.js";
 import { dispatchWebhook } from "../../services/webhook-dispatcher.js";
 import { waitlistService } from "./waitlist.service.js";
@@ -31,22 +47,59 @@ import type {
   CourseDetail,
   CourseStats,
   AdminCourse,
+  AdminCourseWithAccessibility,
   CreateCourseBody,
   CourseModule,
   CourseModuleMetadata,
   UpdateCourseBody,
   CourseModuleWithProgress,
+  CourseLeaderboardEntry,
+  CourseShareLink,
+  ResolvedShareLink,
   CreateModuleBody,
   UpdateModuleBody,
   ListReviewsQuery,
   CreateReviewBody,
   CourseReview,
   CourseReviewsResult,
+  CoursePrerequisiteEntry,
+  CoursePrerequisitesResult,
+  ImportCourseBody,
+  ImportCourseResult,
   ListEnrolledUsersQuery,
   EnrolledUsersResult,
+  BatchEnrollEntry,
+  ReportCourseBody,
+  CourseReportResult,
+  CourseAnalytics,
+  CourseEngagement,
+  DraftCourseBody,
+  ModuleEngagement,
+  EnrollmentTrendPoint,
+  ModuleDifficulty,
+  EnrollmentTrendsQuery,
+  EnrollmentTrendsResult,
+  EnrollmentTrendDataPoint,
+  CourseSyllabus,
+  SyllabusModule,
+  PublishCheckResult,
+  PublishCheckIssue,
+  PublishCheckRequirement,
+  PublishCheckSeverity,
+  EnrollmentStatus,
+  EnrollmentModuleProgress,
+  CourseProgress,
+  CourseProgressModule,
+  QuizAttempt,
+  QuizAttemptsResult,
+  CreateContentBody,
+  UpdateContentBody,
+  ModuleContentItem,
 } from "./course.types.js";
 
 const POPULAR_COURSES_TTL_SECONDS = 300;
+const LEADERBOARD_TTL_SECONDS = 300;
+const LEADERBOARD_SIZE = 20;
 
 export class CourseService {
   async getStats(): Promise<CourseStats> {
@@ -313,6 +366,73 @@ export class CourseService {
   }
 
   /**
+   * The prerequisite courses configured for `courseId`, each annotated with
+   * whether `userId` has completed it (#354). Purely advisory — never
+   * enforced at enroll() time, just surfaced here so a client can warn the
+   * user before they start a course they may not be ready for.
+   */
+  async getCoursePrerequisites(
+    courseId: string,
+    userId: string | null,
+  ): Promise<CoursePrerequisitesResult> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+
+    if (!course || !course.isActive) {
+      throw new NotFoundError("Course");
+    }
+
+    const prerequisiteIds = course.prerequisites ?? [];
+    if (prerequisiteIds.length === 0) {
+      return { prerequisites: [], met: true };
+    }
+
+    const prereqCourses = await db
+      .select({
+        id: courses.id,
+        title: courses.title,
+        difficulty: courses.difficulty,
+      })
+      .from(courses)
+      .where(inArray(courses.id, prerequisiteIds));
+
+    let completedIds = new Set<string>();
+    if (userId) {
+      const completedRows = await db
+        .select({ courseId: enrollments.courseId })
+        .from(enrollments)
+        .where(
+          and(
+            eq(enrollments.userId, userId),
+            inArray(enrollments.courseId, prerequisiteIds),
+            sql`${enrollments.completedAt} IS NOT NULL`,
+          ),
+        );
+      completedIds = new Set(completedRows.map((r) => r.courseId));
+    }
+
+    // Preserve the configured order rather than the DB's arbitrary IN()
+    // ordering, and keep prerequisite IDs that reference a
+    // deleted/deactivated course out of the response entirely.
+    const byId = new Map(prereqCourses.map((c) => [c.id, c]));
+    const prerequisites: CoursePrerequisiteEntry[] = prerequisiteIds
+      .map((id) => byId.get(id))
+      .filter((c): c is (typeof prereqCourses)[number] => !!c)
+      .map((c) => ({
+        id: c.id,
+        title: c.title,
+        difficulty: c.difficulty,
+        completed: completedIds.has(c.id),
+      }));
+
+    return {
+      prerequisites,
+      met: prerequisites.every((p) => p.completed),
+    };
+  }
+
+  /**
    * List a course's modules in their original order, annotated with
    * whether the requesting user has completed each one (#286). Restricted
    * to users enrolled in the course. "Completed" means the user has a
@@ -545,6 +665,139 @@ export class CourseService {
     );
 
     return { contentHashMismatch };
+  }
+
+  /**
+   * Drop the caller's enrollment in a course (#310) — the companion action
+   * to enroll() that this codebase didn't previously have, needed to give
+   * "a spot opens up" any concrete meaning. The row is hard-deleted
+   * (matching the "drop a course" language already used in enroll()'s cap
+   * error) rather than soft-cancelled, since nothing in this codebase reads
+   * a cancelled-but-not-deleted enrollment.
+   */
+  async dropEnrollment(userId: string, courseId: string): Promise<void> {
+    await withLock(`enroll:${userId}:${courseId}`, async () => {
+      const [deleted] = await db
+        .delete(enrollments)
+        .where(
+          and(eq(enrollments.userId, userId), eq(enrollments.courseId, courseId)),
+        )
+        .returning();
+
+      if (!deleted) {
+        throw new NotFoundError("Enrollment");
+      }
+
+      const invalidations = await Promise.allSettled([
+        cacheDel(cacheKey("courses", "detail", courseId)),
+        cacheDel(cacheKey("courses", "stats")),
+        cacheDel(cacheKey("user", "progress", userId)),
+        cacheDel(cacheKey("user", "enrollments", userId)),
+        cacheInvalidatePattern(cacheKeyPattern("user", "activity", userId)),
+      ]);
+      const failed = invalidations.filter((r) => r.status === "rejected");
+      if (failed.length > 0) {
+        logger.warn(
+          { userId, courseId, failedCount: failed.length },
+          "Post-drop cache invalidation had failures — affected views may serve stale data until their TTL expires",
+        );
+      }
+    });
+
+    await auditLog("course.enrollment_dropped", { userId, courseId });
+    logger.info({ userId, courseId }, "Enrollment dropped");
+
+    // Runs after the enroll lock releases — notifying a waitlisted user
+    // should never extend how long the enrollment lock for this drop is
+    // held.
+    await this.notifyNextWaitlisted(courseId);
+  }
+
+  /**
+   * Enroll the user in several courses at once (#346). Each course is
+   * attempted independently and its outcome reported separately: an archived
+   * course, an existing enrollment, or a hit on the MAX_ENROLLMENTS cap
+   * fails only that entry rather than aborting the whole request, which is
+   * what a "save these N courses" client needs.
+   *
+   * Sequential rather than concurrent on purpose — enroll() takes a
+   * per-(user, course) lock and counts the user's *current* active
+   * enrollments against MAX_ENROLLMENTS, so overlapping calls would race the
+   * cap check and let a user exceed it.
+   *
+   * A duplicate courseId in the request is collapsed to its first
+   * occurrence: retrying it would only ever produce an "Already enrolled"
+   * failure, which is noise rather than information.
+   */
+  async batchEnroll(
+    userId: string,
+    courseIds: string[],
+  ): Promise<BatchEnrollEntry[]> {
+    const results: BatchEnrollEntry[] = [];
+    const seen = new Set<string>();
+
+    for (const courseId of courseIds) {
+      if (seen.has(courseId)) continue;
+      seen.add(courseId);
+
+      try {
+        const { contentHashMismatch } = await this.enroll(userId, courseId);
+        results.push({
+          courseId,
+          success: true,
+          message: contentHashMismatch
+            ? "Enrolled, but the course content hash does not match the on-chain version"
+            : "Enrolled successfully",
+        });
+      } catch (err) {
+        results.push({
+          courseId,
+          success: false,
+          message:
+            err instanceof AppError
+              ? err.message
+              : "Failed to enroll in this course",
+        });
+      }
+    }
+
+    return results;
+  }
+
+  /**
+   * Identify the user at the head of a course's waitlist so they can be
+   * told a spot opened up (#310) — called after dropEnrollment(). Uses the
+   * existing waitlistService (added for #320/#323) rather than reading the
+   * table directly; that service already owns join/leave/position
+   * bookkeeping. The identified user stays on the waitlist (not removed)
+   * until they actually enroll, at which point enroll()'s existing call to
+   * waitlistService.removeFromWaitlist takes them off.
+   *
+   * There's currently no user-facing notifications table to write to (it
+   * was dropped from schema.ts by an unrelated upstream change) — this
+   * records the event via the audit log instead, so the signal isn't lost
+   * and can be wired into a real notification channel once one exists
+   * again. Best-effort: a failure here never fails the caller's drop.
+   */
+  private async notifyNextWaitlisted(courseId: string): Promise<void> {
+    try {
+      const next = await waitlistService.getNextOnWaitlist(courseId);
+      if (!next) return;
+
+      await auditLog("course.waitlist.notified", {
+        userId: next.userId,
+        courseId,
+      });
+      logger.info(
+        { userId: next.userId, courseId },
+        "Identified next waitlisted user for an open spot",
+      );
+    } catch (err) {
+      logger.warn(
+        { err, courseId },
+        "Failed to identify next waitlisted user — the enrollment drop itself still succeeded",
+      );
+    }
   }
 
   /**
@@ -1289,13 +1542,60 @@ export class CourseService {
       courseModules: this.normalizeCourseModules(row.courseModules),
       contentHash: row.contentHash,
       isActive: row.isActive,
+      isDraft: row.isDraft,
       modules: (row.modules ?? []) as CourseModuleDefinition[],
-      accessibilityScore: null,
+      accessibilityScore: row.accessibilityScore,
+      prerequisites: row.prerequisites ?? [],
       createdAt: row.createdAt,
     };
   }
 
+  /**
+   * The free-text fields accessibility rules are run over (#326). The
+   * course's own description plus every module description — module titles
+   * are short labels that can't contain markup, so including them would only
+   * add noise.
+   */
+  private courseContentFields(row: {
+    description: string | null;
+    courseModules?: unknown;
+    modules?: unknown;
+  }): Record<string, string | null> {
+    const fields: Record<string, string | null> = {
+      description: row.description,
+    };
+
+    const modules = [
+      ...this.normalizeCourseModules(
+        (row.courseModules as never) ?? null,
+      ),
+      ...(((row.modules ?? []) as CourseModuleDefinition[]) || []),
+    ];
+    modules.forEach((module, i) => {
+      if (module.description) {
+        fields[`module:${i}:${module.id}`] = module.description;
+      }
+    });
+
+    return fields;
+  }
+
   async createCourse(data: CreateCourseBody): Promise<AdminCourse> {
+    // Score the authored content before the insert so the stored
+    // accessibility_score reflects what was actually submitted (#326).
+    const accessibility = checkAccessibility({
+      description: data.description,
+      ...(data.courseModules ?? []).reduce<Record<string, string | null>>(
+        (acc, module, i) => {
+          if (module.description) {
+            acc[`module:${i}:${module.id}`] = module.description;
+          }
+          return acc;
+        },
+        {},
+      ),
+    });
+
     const [course] = await db
       .insert(courses)
       .values({
@@ -1305,6 +1605,8 @@ export class CourseService {
         tags: data.tags,
         courseModules: data.courseModules,
         contentHash: data.contentHash,
+        accessibilityScore: accessibility.score,
+        prerequisites: data.prerequisites ?? [],
       })
       .returning();
 
@@ -1315,13 +1617,71 @@ export class CourseService {
     return this.toAdminCourse(course);
   }
 
+  /**
+   * Bulk course creation from an uploaded JSON file (#366). Creates the
+   * course exactly as createCourse() does, then creates each entry in
+   * `modules` as a real course module (via createModule(), so each gets a
+   * generated ID and the same validation/locking/cache-invalidation/audit
+   * behavior a manually-created module would).
+   */
+  async importCourse(data: ImportCourseBody): Promise<ImportCourseResult> {
+    const course = await this.createCourse(data);
+
+    for (const module of data.modules) {
+      await this.createModule(course.id, module);
+    }
+
+    await auditLog("course.imported", {
+      courseId: course.id,
+      moduleCount: data.modules.length,
+    });
+    logger.info(
+      { courseId: course.id, moduleCount: data.modules.length },
+      "Course imported from JSON",
+    );
+
+    return { courseId: course.id, modulesCreated: data.modules.length };
+  }
+
   async updateCourse(
     courseId: string,
     data: UpdateCourseBody,
-  ): Promise<AdminCourse> {
+  ): Promise<AdminCourseWithAccessibility> {
+    const [existing] = await db
+      .select()
+      .from(courses)
+      .where(eq(courses.id, courseId));
+
+    if (!existing) {
+      throw new NotFoundError("Course");
+    }
+
+    // A course can't be its own prerequisite.
+    const sanitized = data.prerequisites
+      ? { ...data, prerequisites: data.prerequisites.filter((id) => id !== courseId) }
+      : data;
+
+    // Publishing (isActive = true) ends the draft state (#376).
+    const values =
+      sanitized.isActive === true ? { ...sanitized, isDraft: false } : sanitized;
+
+    // Score accessibility over the *merged* content (fields the caller is
+    // updating plus everything they're leaving alone) so the stored score
+    // always describes the course as it now stands (#326). Computed before
+    // the write so the score and the content land in the same statement.
+    const merged = {
+      description: values.description ?? existing.description,
+      courseModules: values.courseModules ?? existing.courseModules,
+      // `modules` isn't part of UpdateCourseBody — module definitions are
+      // only ever changed through create/update/deleteModule, which score
+      // accessibility on their own.
+      modules: existing.modules,
+    };
+    const accessibility = checkAccessibility(this.courseContentFields(merged));
+
     const [course] = await db
       .update(courses)
-      .set(data)
+      .set({ ...values, accessibilityScore: accessibility.score })
       .where(eq(courses.id, courseId))
       .returning();
 
@@ -1332,6 +1692,37 @@ export class CourseService {
     await this.invalidateCourseCaches(courseId);
     await auditLog("course.updated", { courseId });
     logger.info({ courseId }, "Course updated");
+
+    return { ...this.toAdminCourse(course), accessibility };
+  }
+
+  /**
+   * Saves course content as a draft (#376): applies the supplied fields and
+   * marks the course `isDraft = true, isActive = false`, so it is hidden from
+   * users while it is worked on. It can be saved any number of times, and is
+   * published by setting `isActive = true` (which clears the draft flag).
+   */
+  async saveDraft(
+    courseId: string,
+    data: DraftCourseBody,
+  ): Promise<AdminCourse> {
+    const sanitized = data.prerequisites
+      ? { ...data, prerequisites: data.prerequisites.filter((id) => id !== courseId) }
+      : data;
+
+    const [course] = await db
+      .update(courses)
+      .set({ ...sanitized, isDraft: true, isActive: false })
+      .where(eq(courses.id, courseId))
+      .returning();
+
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    await this.invalidateCourseCaches(courseId);
+    await auditLog("course.draft_saved", { courseId });
+    logger.info({ courseId }, "Course saved as draft");
 
     return this.toAdminCourse(course);
   }
@@ -1351,6 +1742,259 @@ export class CourseService {
     await this.invalidateCourseCaches(courseId);
     await auditLog("course.deleted", { courseId });
     logger.info({ courseId }, "Course soft-deleted");
+  }
+
+  /**
+   * Archive a course (#358): hides it from public listings while preserving
+   * its data and its enrolled users' access. Distinct from `deleteCourse`
+   * because it records *when* the course was archived, so an archived course
+   * can be told apart from one that was merely never published (both just
+   * have isActive = false).
+   *
+   * Re-archiving an already-archived course is a no-op on archivedAt rather
+   * than resetting it, so the timestamp keeps meaning "first archived".
+   */
+  async archiveCourse(courseId: string): Promise<AdminCourse> {
+    const [course] = await db
+      .update(courses)
+      .set({
+        isActive: false,
+        archivedAt: sql`COALESCE(${courses.archivedAt}, NOW())`,
+      })
+      .where(eq(courses.id, courseId))
+      .returning();
+
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    await this.invalidateCourseCaches(courseId);
+    await auditLog("course.archived", { courseId });
+    logger.info({ courseId }, "Course archived");
+
+    return this.toAdminCourse(course);
+  }
+
+  /**
+   * Evaluate whether a course has everything it needs to go live (#384).
+   *
+   * Purely a read — it never writes to the course. Used both by the
+   * publish-check endpoint and by publishCourse(), so the issues an admin is
+   * shown beforehand are exactly the ones that will block the publish.
+   *
+   * Blocking: title, description, difficulty, at least one module, and at
+   * least one non-empty quiz per module. Quizzes are matched against the
+   * admin-defined `modules` structure (#304) rather than the other way
+   * around, because a learner walks the module list — a quiz hanging off a
+   * moduleId that isn't in it is unreachable content, not a passed check.
+   *
+   * Advisory: a module with no description. There's no separate content
+   * table in this schema, so a module's description *is* its content; a
+   * module without one still publishes today, so this is surfaced as a
+   * warning rather than a hard stop.
+   */
+  private async evaluatePublishReadiness(
+    courseId: string,
+  ): Promise<PublishCheckResult> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    const requirements: PublishCheckRequirement[] = [];
+    const issues: PublishCheckIssue[] = [];
+
+    const addRequirement = (
+      key: string,
+      label: string,
+      satisfied: boolean,
+      severity: PublishCheckSeverity,
+      onFail: () => PublishCheckIssue,
+    ) => {
+      requirements.push({ key, label, satisfied, severity });
+      if (!satisfied) issues.push(onFail());
+    };
+
+    addRequirement(
+      "title",
+      "Course has a title",
+      !!course.title?.trim(),
+      "blocking",
+      () => ({
+        field: "title",
+        severity: "blocking",
+        message: "Course is missing a title.",
+      }),
+    );
+
+    addRequirement(
+      "description",
+      "Course has a description",
+      !!course.description?.trim(),
+      "blocking",
+      () => ({
+        field: "description",
+        severity: "blocking",
+        message: "Course is missing a description.",
+      }),
+    );
+
+    addRequirement(
+      "difficulty",
+      "Course has a difficulty level",
+      !!course.difficulty?.trim(),
+      "blocking",
+      () => ({
+        field: "difficulty",
+        severity: "blocking",
+        message: "Course is missing a difficulty level.",
+      }),
+    );
+
+    const modules = (course.modules ?? []) as CourseModuleDefinition[];
+
+    addRequirement(
+      "modules",
+      "Course has at least one module",
+      modules.length > 0,
+      "blocking",
+      () => ({
+        field: "modules",
+        severity: "blocking",
+        message:
+          "Course has no modules — add at least one before publishing.",
+      }),
+    );
+
+    if (modules.length > 0) {
+      // One query for every quiz on the course, grouped by module. Doing it
+      // per module would issue len(modules) round trips for a check that's
+      // on an admin's publish path.
+      const quizRows = await db
+        .select({
+          moduleId: quizzes.moduleId,
+          questionCount: sql<number>`jsonb_array_length(${quizzes.questions})`,
+        })
+        .from(quizzes)
+        .where(eq(quizzes.courseId, courseId))
+        .groupBy(quizzes.moduleId);
+
+      const questionsByModule = new Map<string, number>();
+      for (const row of quizRows) {
+        questionsByModule.set(
+          row.moduleId,
+          (questionsByModule.get(row.moduleId) ?? 0) + (row.questionCount ?? 0),
+        );
+      }
+
+      for (const module of modules) {
+        const moduleLabel = `Module "${module.title}"`;
+
+        addRequirement(
+          `module:${module.id}:content`,
+          `${moduleLabel} has content`,
+          !!module.description?.trim(),
+          "advisory",
+          () => ({
+            field: "moduleContent",
+            severity: "advisory",
+            message: `${moduleLabel} has no description. Learners will see an empty module — this does not block publishing.`,
+            moduleId: module.id,
+            moduleTitle: module.title,
+          }),
+        );
+
+        const questionCount = questionsByModule.get(module.id) ?? 0;
+        addRequirement(
+          `module:${module.id}:quizzes`,
+          `${moduleLabel} has a quiz`,
+          questionCount > 0,
+          "blocking",
+          () => ({
+            field: "quizzes",
+            severity: "blocking",
+            message: `${moduleLabel} has no quiz. Create one, or the course cannot be published.`,
+            moduleId: module.id,
+            moduleTitle: module.title,
+          }),
+        );
+      }
+    }
+
+    // A course with no modules has a "0 of 1" style denominator, not a
+    // divide-by-zero — the three field checks above still stand on their own.
+    const satisfied = requirements.filter((r) => r.satisfied).length;
+    const readinessScore =
+      requirements.length === 0
+        ? 0
+        : Math.round((satisfied / requirements.length) * 100);
+
+    return {
+      courseId,
+      ready: !issues.some((issue) => issue.severity === "blocking"),
+      readinessScore,
+      requirements,
+      issues,
+      checkedAt: new Date(),
+    };
+  }
+
+  /**
+   * Run the publish-readiness check on its own, without publishing
+   * anything (#384). Non-destructive by construction — it only reads.
+   */
+  async getPublishCheck(courseId: string): Promise<PublishCheckResult> {
+    return this.evaluatePublishReadiness(courseId);
+  }
+
+  /**
+   * Publish a course (isActive = true) after validating it has the content
+   * required to go live. Shares evaluatePublishReadiness() with the
+   * publish-check endpoint, so the two can never disagree: any blocking
+   * issue reported by publish-check is exactly what makes this throw.
+   * Publishing also clears the draft flag (#376).
+   */
+  async publishCourse(courseId: string): Promise<AdminCourseWithAccessibility> {
+    const check = await this.evaluatePublishReadiness(courseId);
+
+    if (!check.ready) {
+      throw new ValidationError({
+        requirements: check.issues
+          .filter((issue) => issue.severity === "blocking")
+          .map((issue) => issue.message),
+      });
+    }
+
+    const [existing] = await db
+      .select()
+      .from(courses)
+      .where(eq(courses.id, courseId));
+
+    if (!existing) {
+      throw new NotFoundError("Course");
+    }
+
+    const [published] = await db
+      .update(courses)
+      .set({ isActive: true, isDraft: false, archivedAt: null })
+      .where(eq(courses.id, courseId))
+      .returning();
+
+    if (!published) {
+      throw new NotFoundError("Course");
+    }
+
+    await this.invalidateCourseCaches(courseId);
+    await auditLog("course.published", { courseId });
+    logger.info({ courseId }, "Course published");
+
+    const accessibility = checkAccessibility(
+      this.courseContentFields(published),
+    );
+
+    return { ...this.toAdminCourse(published), accessibility };
   }
 
   private normalizeCourseModules(
@@ -1505,6 +2149,1464 @@ export class CourseService {
     await auditLog("course.module.deleted", { courseId, moduleId });
     logger.info({ courseId, moduleId }, "Course module deleted");
   }
+
+  /**
+   * Detailed analytics for a course creator: enrollment trends, completion
+   * rate, average quiz score, average time-to-complete, and which modules
+   * learners struggle with most (lowest average quiz score). Cached for 1
+   * hour — this aggregates across every enrollment/submission for the
+   * course, too expensive to recompute on every dashboard load.
+   */
+  async getCourseAnalytics(courseId: string): Promise<CourseAnalytics> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    const namespace = "courses";
+    const cacheKeyString = cacheKey(namespace, "analytics", courseId);
+    const cached = await cacheGet<CourseAnalytics>(namespace, cacheKeyString);
+    if (cached) return cached;
+
+    const [dailyRows, weeklyRows, [totals], moduleRows] = await Promise.all([
+      db
+        .select({
+          date: sql<string>`date_trunc('day', ${enrollments.enrolledAt})::date`,
+          count: count(),
+        })
+        .from(enrollments)
+        .where(
+          and(
+            eq(enrollments.courseId, courseId),
+            sql`${enrollments.enrolledAt} >= now() - interval '30 days'`,
+          ),
+        )
+        .groupBy(sql`date_trunc('day', ${enrollments.enrolledAt})`)
+        .orderBy(sql`date_trunc('day', ${enrollments.enrolledAt})`),
+
+      db
+        .select({
+          date: sql<string>`date_trunc('week', ${enrollments.enrolledAt})::date`,
+          count: count(),
+        })
+        .from(enrollments)
+        .where(
+          and(
+            eq(enrollments.courseId, courseId),
+            sql`${enrollments.enrolledAt} >= now() - interval '12 weeks'`,
+          ),
+        )
+        .groupBy(sql`date_trunc('week', ${enrollments.enrolledAt})`)
+        .orderBy(sql`date_trunc('week', ${enrollments.enrolledAt})`),
+
+      db
+        .select({
+          totalEnrollments: count(),
+          completed: sql<number>`COUNT(*) FILTER (WHERE ${enrollments.completedAt} IS NOT NULL)`.mapWith(Number),
+          avgCompletionHours: sql<string | null>`AVG(EXTRACT(EPOCH FROM (${enrollments.completedAt} - ${enrollments.enrolledAt})) / 3600.0) FILTER (WHERE ${enrollments.completedAt} IS NOT NULL)`,
+          avgQuizScorePercent: sql<string | null>`(
+            SELECT AVG(${quizSubmissions.score}::numeric / NULLIF(jsonb_array_length(${quizzes.questions}), 0) * 100)
+            FROM ${quizSubmissions}
+            INNER JOIN ${quizzes} ON ${quizzes.id} = ${quizSubmissions.quizId}
+            WHERE ${quizzes.courseId} = ${courseId} AND ${quizSubmissions.superseded} = false
+          )`,
+        })
+        .from(enrollments)
+        .where(eq(enrollments.courseId, courseId)),
+
+      db
+        .select({
+          moduleId: quizzes.moduleId,
+          averageScorePercent: sql<string | null>`AVG(${quizSubmissions.score}::numeric / NULLIF(jsonb_array_length(${quizzes.questions}), 0) * 100)`,
+          submissionCount: count(),
+        })
+        .from(quizSubmissions)
+        .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+        .where(
+          and(eq(quizzes.courseId, courseId), eq(quizSubmissions.superseded, false)),
+        )
+        .groupBy(quizzes.moduleId),
+    ]);
+
+    const moduleDefinitions = (course.modules ?? []) as CourseModuleDefinition[];
+    const moduleTitleById = new Map(moduleDefinitions.map((m) => [m.id, m.title]));
+
+    const moduleDifficulty: ModuleDifficulty[] = moduleRows
+      .map((row) => {
+        const averageScore =
+          row.averageScorePercent !== null ? Math.round(Number(row.averageScorePercent)) : null;
+        return {
+          moduleId: row.moduleId,
+          title: moduleTitleById.get(row.moduleId) ?? null,
+          averageScore,
+          submissionCount: row.submissionCount,
+          difficult: averageScore !== null && averageScore < PASSING_PERCENTAGE,
+        };
+      })
+      .sort((a, b) => (a.averageScore ?? 0) - (b.averageScore ?? 0));
+
+    const toTrend = (rows: { date: string; count: number }[]): EnrollmentTrendPoint[] =>
+      rows.map((row) => ({ date: row.date, count: row.count }));
+
+    const totalEnrollments = totals?.totalEnrollments ?? 0;
+    const completed = totals?.completed ?? 0;
+
+    const analytics: CourseAnalytics = {
+      courseId,
+      totalEnrollments,
+      completionRate:
+        totalEnrollments > 0 ? Math.round((completed / totalEnrollments) * 100) : 0,
+      averageTimeToCompleteHours:
+        totals?.avgCompletionHours !== null && totals?.avgCompletionHours !== undefined
+          ? Math.round(Number(totals.avgCompletionHours) * 10) / 10
+          : null,
+      averageQuizScore:
+        totals?.avgQuizScorePercent !== null && totals?.avgQuizScorePercent !== undefined
+          ? Math.round(Number(totals.avgQuizScorePercent))
+          : null,
+      enrollmentTrends: {
+        daily: toTrend(dailyRows),
+        weekly: toTrend(weeklyRows),
+      },
+      moduleDifficulty,
+      generatedAt: new Date(),
+    };
+
+    await cacheSet(cacheKeyString, analytics, 3600);
+
+    return analytics;
+  }
+
+  /**
+   * Engagement metrics for a course (#377): completion rate, average time to
+   * complete, per-module drop-off / average score / quiz retake rate, the
+   * module with the largest drop-off, and weekly enrollment/completion trends.
+   * Cached for 1 hour.
+   *
+   * A learner "reaches" a module once they have a quiz submission for it.
+   * Drop-off for a module is the share of the previous stage's learners who
+   * never reached it (the first module is measured against enrollments).
+   * A retake is a superseded submission (see quiz retry).
+   */
+  async getCourseEngagement(courseId: string): Promise<CourseEngagement> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    const namespace = "courses";
+    const cacheKeyString = cacheKey(namespace, "engagement", courseId);
+    const cached = await cacheGet<CourseEngagement>(namespace, cacheKeyString);
+    if (cached) return cached;
+
+    const [[totals], moduleRows, [retakes], enrollTrend, completeTrend] = await Promise.all([
+      db
+        .select({
+          totalEnrollments: count(),
+          completed: sql<number>`COUNT(*) FILTER (WHERE ${enrollments.completedAt} IS NOT NULL)`.mapWith(Number),
+          avgCompletionHours: sql<string | null>`AVG(EXTRACT(EPOCH FROM (${enrollments.completedAt} - ${enrollments.enrolledAt})) / 3600.0) FILTER (WHERE ${enrollments.completedAt} IS NOT NULL)`,
+        })
+        .from(enrollments)
+        .where(eq(enrollments.courseId, courseId)),
+
+      db
+        .select({
+          moduleId: quizzes.moduleId,
+          learners: sql<number>`COUNT(DISTINCT ${quizSubmissions.userId})`.mapWith(Number),
+          retakers: sql<number>`COUNT(DISTINCT ${quizSubmissions.userId}) FILTER (WHERE ${quizSubmissions.superseded} = true)`.mapWith(Number),
+          avgScorePercent: sql<string | null>`AVG(${quizSubmissions.score}::numeric / NULLIF(jsonb_array_length(${quizzes.questions}), 0) * 100) FILTER (WHERE ${quizSubmissions.superseded} = false)`,
+        })
+        .from(quizSubmissions)
+        .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+        .where(eq(quizzes.courseId, courseId))
+        .groupBy(quizzes.moduleId),
+
+      db
+        .select({
+          learners: sql<number>`COUNT(DISTINCT ${quizSubmissions.userId})`.mapWith(Number),
+          retakers: sql<number>`COUNT(DISTINCT ${quizSubmissions.userId}) FILTER (WHERE ${quizSubmissions.superseded} = true)`.mapWith(Number),
+        })
+        .from(quizSubmissions)
+        .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+        .where(eq(quizzes.courseId, courseId)),
+
+      db
+        .select({
+          week: sql<string>`date_trunc('week', ${enrollments.enrolledAt})::date`,
+          count: count(),
+        })
+        .from(enrollments)
+        .where(
+          and(
+            eq(enrollments.courseId, courseId),
+            sql`${enrollments.enrolledAt} >= now() - interval '12 weeks'`,
+          ),
+        )
+        .groupBy(sql`date_trunc('week', ${enrollments.enrolledAt})`),
+
+      db
+        .select({
+          week: sql<string>`date_trunc('week', ${enrollments.completedAt})::date`,
+          count: count(),
+        })
+        .from(enrollments)
+        .where(
+          and(
+            eq(enrollments.courseId, courseId),
+            sql`${enrollments.completedAt} >= now() - interval '12 weeks'`,
+          ),
+        )
+        .groupBy(sql`date_trunc('week', ${enrollments.completedAt})`),
+    ]);
+
+    const pct = (part: number, whole: number): number =>
+      whole > 0 ? Math.round((part / whole) * 100) : 0;
+
+    const totalEnrollments = totals?.totalEnrollments ?? 0;
+    const completed = totals?.completed ?? 0;
+
+    // Order modules by their authored definition, then any others.
+    const moduleDefinitions = (course.modules ?? []) as CourseModuleDefinition[];
+    const orderById = new Map(moduleDefinitions.map((m, i) => [m.id, i]));
+    const titleById = new Map(moduleDefinitions.map((m) => [m.id, m.title]));
+    const orderedRows = [...moduleRows].sort(
+      (a, b) =>
+        (orderById.get(a.moduleId) ?? Number.MAX_SAFE_INTEGER) -
+        (orderById.get(b.moduleId) ?? Number.MAX_SAFE_INTEGER),
+    );
+
+    let previous = totalEnrollments;
+    const modules: ModuleEngagement[] = orderedRows.map((row) => {
+      const dropOffRate = previous > 0 ? Math.max(0, pct(previous - row.learners, previous)) : 0;
+      previous = row.learners;
+      return {
+        moduleId: row.moduleId,
+        title: titleById.get(row.moduleId) ?? null,
+        learnersReached: row.learners,
+        dropOffRate,
+        averageScore:
+          row.avgScorePercent !== null && row.avgScorePercent !== undefined
+            ? Math.round(Number(row.avgScorePercent))
+            : null,
+        quizRetakeRate: pct(row.retakers, row.learners),
+      };
+    });
+
+    const worst = modules.reduce<ModuleEngagement | null>(
+      (best, m) => (m.dropOffRate > (best?.dropOffRate ?? 0) ? m : best),
+      null,
+    );
+
+    // Weekly buckets for the last 12 weeks, merged from both series.
+    const weeks = new Map<string, { enrollments: number; completions: number }>();
+    for (const row of enrollTrend) {
+      weeks.set(row.week, { enrollments: row.count, completions: 0 });
+    }
+    for (const row of completeTrend) {
+      const entry = weeks.get(row.week) ?? { enrollments: 0, completions: 0 };
+      entry.completions = row.count;
+      weeks.set(row.week, entry);
+    }
+    const trends = [...weeks.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([week, value]) => ({ week, ...value }));
+
+    const engagement: CourseEngagement = {
+      courseId,
+      totalEnrollments,
+      completionRate: pct(completed, totalEnrollments),
+      averageTimeToCompleteHours:
+        totals?.avgCompletionHours !== null && totals?.avgCompletionHours !== undefined
+          ? Math.round(Number(totals.avgCompletionHours) * 10) / 10
+          : null,
+      quizRetakeRate: pct(retakes?.retakers ?? 0, retakes?.learners ?? 0),
+      modules,
+      biggestDropOff:
+        worst && worst.dropOffRate > 0
+          ? { moduleId: worst.moduleId, title: worst.title, dropOffRate: worst.dropOffRate }
+          : null,
+      trends,
+      generatedAt: new Date(),
+    };
+
+    await cacheSet(cacheKeyString, engagement, 3600);
+
+    return engagement;
+  }
+
+  /**
+   * Full course syllabus: all modules in order, each with description,
+   * estimated duration, and learning objectives derived from the module
+   * content metadata (#373). Cached for 5 minutes.
+   *
+   * Module data comes from two sources, in priority order:
+   * 1. `courses.courseModules` jsonb — rich metadata (id, title,
+   *    description, estimatedDurationMinutes) set during course authoring
+   * 2. Fallback: derive module IDs from the quizzes table (moduleId
+   *    column), same approach getCourseDetail uses. These have no
+   *    description or duration, so those fields are null.
+   *
+   * Learning objectives are derived from each module's quiz questions if
+   * available — the question text often contains the learning target.
+   * When no quizzes exist for a module, objectives is an empty array.
+   */
+  async getSyllabus(courseId: string): Promise<CourseSyllabus> {
+    const namespace = "courses";
+    const ck = cacheKey(namespace, "syllabus", courseId);
+
+    const cached = await cacheGet<CourseSyllabus>(namespace, ck);
+    if (cached) return cached;
+
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course || !course.isActive) {
+      throw new NotFoundError("Course");
+    }
+
+    // Build ordered module list from courseModules jsonb, or fall back to
+    // quiz-derived module IDs when the rich metadata isn't present.
+    const moduleMetadata = this.normalizeCourseModules(course.courseModules);
+    let syllabusModules: SyllabusModule[];
+
+    if (moduleMetadata.length > 0) {
+      syllabusModules = moduleMetadata.map((m, i) => ({
+        order: i + 1,
+        id: m.id,
+        title: m.title,
+        description: m.description ?? null,
+        estimatedDurationMinutes: m.estimatedDurationMinutes ?? null,
+        learningObjectives: [],
+      }));
+    } else {
+      const moduleRows = await db
+        .select({ moduleId: quizzes.moduleId })
+        .from(quizzes)
+        .where(eq(quizzes.courseId, courseId))
+        .groupBy(quizzes.moduleId)
+        .orderBy(quizzes.moduleId);
+
+      syllabusModules = moduleRows.map((row, i) => ({
+        order: i + 1,
+        id: row.moduleId,
+        title: row.moduleId,
+        description: null,
+        estimatedDurationMinutes: null,
+        learningObjectives: [],
+      }));
+    }
+
+    // Derive learning objectives from quiz questions for each module.
+    // Quiz question prompts represent the concrete skills a module teaches,
+    // making them a reasonable proxy for learning objectives.
+    if (syllabusModules.length > 0) {
+      const moduleIds = syllabusModules.map((m) => m.id);
+      const quizRows = await db
+        .select({
+          moduleId: quizzes.moduleId,
+          questions: quizzes.questions,
+        })
+        .from(quizzes)
+        .where(
+          and(eq(quizzes.courseId, courseId), inArray(quizzes.moduleId, moduleIds)),
+        );
+
+      // Collect question prompts per module (first N questions per module
+      // to keep the objectives list focused).
+      const QUESTIONS_PER_MODULE = 5;
+      const objectivesByModule = new Map<string, string[]>();
+
+      for (const quiz of quizRows) {
+        const existing = objectivesByModule.get(quiz.moduleId) ?? [];
+        const questionArr = Array.isArray(quiz.questions) ? quiz.questions : [];
+
+        for (const q of questionArr) {
+          if (existing.length >= QUESTIONS_PER_MODULE) break;
+          const prompt =
+            typeof q === "object" && q !== null && "prompt" in q
+              ? String((q as Record<string, unknown>).prompt)
+              : typeof q === "string"
+                ? q
+                : null;
+          if (prompt && !existing.includes(prompt)) {
+            existing.push(prompt);
+          }
+        }
+        objectivesByModule.set(quiz.moduleId, existing);
+      }
+
+      // Merge objectives back into the syllabus modules
+      for (const sm of syllabusModules) {
+        sm.learningObjectives = objectivesByModule.get(sm.id) ?? [];
+      }
+    }
+
+    const totalEstimatedDurationMinutes = syllabusModules.reduce(
+      (sum, m) =>
+        m.estimatedDurationMinutes !== null
+          ? sum + m.estimatedDurationMinutes
+          : sum,
+      0,
+    );
+
+    const syllabus: CourseSyllabus = {
+      courseId: course.id,
+      title: course.title,
+      difficulty: course.difficulty,
+      modules: syllabusModules,
+      totalEstimatedDurationMinutes:
+        totalEstimatedDurationMinutes > 0 ? totalEstimatedDurationMinutes : null,
+      generatedAt: new Date(),
+    };
+
+    await cacheSet(ck, syllabus, 300);
+
+    return syllabus;
+  }
+
+  /**
+   * Report a course for inappropriate content, errors, or other issues.
+   * One report per user per course — a repeat report from the same user
+   * for the same course is rejected rather than silently upserted, so the
+   * report count admins see stays a genuine distinct-reporter count.
+   */
+  async reportCourse(
+    userId: string,
+    courseId: string,
+    body: ReportCourseBody,
+  ): Promise<CourseReportResult> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    const existing = await db.query.courseReports.findFirst({
+      where: and(
+        eq(courseReports.courseId, courseId),
+        eq(courseReports.userId, userId),
+      ),
+    });
+    if (existing) {
+      throw new ConflictError("You have already reported this course");
+    }
+
+    const [report] = await db
+      .insert(courseReports)
+      .values({
+        courseId,
+        userId,
+        reason: body.reason,
+        description: body.description,
+      })
+      .returning();
+
+    await this.notifyAdminsOfReport(course.title, courseId, report.id, body.reason);
+
+    await auditLog("course.reported", {
+      courseId,
+      userId,
+      reportId: report.id,
+      reason: body.reason,
+    });
+    logger.info({ courseId, userId, reportId: report.id }, "Course reported");
+
+    return {
+      id: report.id,
+      courseId: report.courseId,
+      reason: report.reason,
+      status: report.status,
+      createdAt: report.createdAt,
+    };
+  }
+
+  /**
+   * Notifies every admin (in-app, via the notifications table) that a new
+   * course report came in. Best-effort — a notification-insert failure
+   * must not fail the report submission itself.
+   */
+  private async notifyAdminsOfReport(
+    courseTitle: string,
+    courseId: string,
+    reportId: string,
+    reason: string,
+  ): Promise<void> {
+    try {
+      const admins = await db.query.users.findMany({
+        where: eq(users.isAdmin, true),
+      });
+      if (admins.length === 0) return;
+
+      await db.insert(notifications).values(
+        admins.map((admin) => ({
+          userId: admin.id,
+          type: "course_report",
+          title: "New course report",
+          message: `"${courseTitle}" was reported for ${reason} (report ${reportId}).`,
+        })),
+      );
+    } catch (err) {
+      logger.warn({ err, courseId, reportId }, "Failed to notify admins of course report");
+    }
+  }
+
+  // ─── Enrollment Trends (#391) ───────────────────────────────────────────
+
+  /**
+   * Enrollment trends for a course over time (#391). Admin endpoint that
+   * returns a time series of enrollment counts at the chosen granularity
+   * (daily/weekly/monthly) within the chosen range (7d/30d/90d). Cached
+   * for 1 hour — matching getCourseAnalytics's TTL since the query shape
+   * is similar (aggregating across all enrollments for a course).
+   */
+  async getEnrollmentTrends(
+    courseId: string,
+    query: EnrollmentTrendsQuery,
+  ): Promise<EnrollmentTrendsResult> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    const namespace = "courses";
+    const ck = cacheKey(
+      namespace,
+      "enrollment-trends",
+      courseId,
+      query.range,
+      query.granularity,
+    );
+    const cached = await cacheGet<EnrollmentTrendsResult>(namespace, ck);
+    if (cached) return cached;
+
+    const intervalMap: Record<string, string> = {
+      "7d": "7 days",
+      "30d": "30 days",
+      "90d": "90 days",
+    };
+    const truncMap: Record<string, string> = {
+      daily: "day",
+      weekly: "week",
+      monthly: "month",
+    };
+
+    const interval = intervalMap[query.range];
+    const trunc = truncMap[query.granularity];
+
+    const [trendRows] = await Promise.all([
+      db
+        .select({
+          date: sql<string>`date_trunc('${sql.raw(trunc)}', ${enrollments.enrolledAt})::date`,
+          count: count(),
+        })
+        .from(enrollments)
+        .where(
+          and(
+            eq(enrollments.courseId, courseId),
+            sql`${enrollments.enrolledAt} >= now() - interval '${sql.raw(interval)}'`,
+          ),
+        )
+        .groupBy(sql`date_trunc('${sql.raw(trunc)}', ${enrollments.enrolledAt})`)
+        .orderBy(sql`date_trunc('${sql.raw(trunc)}', ${enrollments.enrolledAt})`),
+      db
+        .select({ value: count() })
+        .from(enrollments)
+        .where(eq(enrollments.courseId, courseId)),
+    ]);
+
+    const trends: EnrollmentTrendDataPoint[] = trendRows.map((row) => ({
+      date: row.date,
+      count: row.count,
+    }));
+
+    const result: EnrollmentTrendsResult = {
+      courseId,
+      range: query.range,
+      granularity: query.granularity,
+      trends,
+      totalEnrollments: trendRows.reduce((sum, r) => sum + r.count, 0),
+      generatedAt: new Date(),
+    };
+
+    await cacheSet(ck, result, 3600);
+    return result;
+  }
+
+  // ─── Enrollment Status (#381) ───────────────────────────────────────────
+
+  /**
+   * Detailed enrollment status for the current user in a specific course
+   * (#381). Returns isEnrolled, enrolledAt, completedAt, module-by-module
+   * progress, quizCount, and averageScore. Cached 30s per (userId, courseId).
+   * Returns 404 for a non-existent or inactive course.
+   */
+  async getEnrollmentStatus(
+    userId: string,
+    courseId: string,
+  ): Promise<EnrollmentStatus> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course || !course.isActive) {
+      throw new NotFoundError("Course");
+    }
+
+    const namespace = "user";
+    const ck = cacheKey(namespace, "enrollment-status", userId, courseId);
+    const cached = await cacheGet<EnrollmentStatus>(namespace, ck);
+    if (cached) return cached;
+
+    const enrollment = await db.query.enrollments.findFirst({
+      where: and(
+        eq(enrollments.userId, userId),
+        eq(enrollments.courseId, courseId),
+      ),
+    });
+
+    // Build the module list from the course's authored modules definition,
+    // falling back to quiz-derived moduleId groups when no definitions exist.
+    const moduleDefinitions = (course.modules ?? []) as CourseModuleDefinition[];
+
+    let moduleIds: string[];
+    if (moduleDefinitions.length > 0) {
+      moduleIds = moduleDefinitions.map((m) => m.id);
+    } else {
+      const moduleRows = await db
+        .select({ moduleId: quizzes.moduleId })
+        .from(quizzes)
+        .where(eq(quizzes.courseId, courseId))
+        .groupBy(quizzes.moduleId)
+        .orderBy(quizzes.moduleId);
+      moduleIds = moduleRows.map((r) => r.moduleId);
+    }
+
+    const moduleTitleById = new Map(
+      moduleDefinitions.map((m) => [m.id, m.title] as const),
+    );
+
+    // Modules completed by the user (has a non-superseded submission).
+    const completedModuleIds = new Set(
+      moduleIds.length > 0
+        ? (
+            await db
+              .select({ moduleId: quizzes.moduleId })
+              .from(quizSubmissions)
+              .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+              .where(
+                and(
+                  eq(quizzes.courseId, courseId),
+                  eq(quizSubmissions.userId, userId),
+                  eq(quizSubmissions.superseded, false),
+                ),
+              )
+              .groupBy(quizzes.moduleId)
+          ).map((r) => r.moduleId)
+        : [],
+    );
+
+    const moduleProgress: EnrollmentModuleProgress[] = moduleIds.map(
+      (moduleId) => ({
+        moduleId,
+        title: moduleTitleById.get(moduleId) ?? null,
+        completed: completedModuleIds.has(moduleId),
+      }),
+    );
+
+    // Quiz count and average score for this user in this course.
+    const [quizAgg] = await db
+      .select({
+        quizCount: count(),
+        averageScore: sql<number | null>`AVG(${quizSubmissions.score})`,
+      })
+      .from(quizSubmissions)
+      .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+      .where(
+        and(
+          eq(quizzes.courseId, courseId),
+          eq(quizSubmissions.userId, userId),
+          eq(quizSubmissions.superseded, false),
+        ),
+      );
+
+    const result: EnrollmentStatus = {
+      courseId,
+      isEnrolled: !!enrollment,
+      enrolledAt: enrollment?.enrolledAt ?? null,
+      completedAt: enrollment?.completedAt ?? null,
+      moduleProgress,
+      quizCount: quizAgg?.quizCount ?? 0,
+      averageScore:
+        quizAgg?.averageScore != null
+          ? Number(Number(quizAgg.averageScore).toFixed(2))
+          : null,
+    };
+
+    await cacheSet(ck, result, 30);
+    return result;
+  }
+
+  // ─── Course Progress (#385) ─────────────────────────────────────────────
+
+  /**
+   * The user's detailed progress in a specific course (#385): module-by-
+   * module completion, quizzes taken, average score, and estimated
+   * completion percentage. Cached 30s per (userId, courseId).
+   */
+  async getCourseProgress(
+    userId: string,
+    courseId: string,
+  ): Promise<CourseProgress> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course || !course.isActive) {
+      throw new NotFoundError("Course");
+    }
+
+    const namespace = "user";
+    const ck = cacheKey(namespace, "course-progress", userId, courseId);
+    const cached = await cacheGet<CourseProgress>(namespace, ck);
+    if (cached) return cached;
+
+    const moduleDefinitions = (course.modules ?? []) as CourseModuleDefinition[];
+
+    let moduleIds: string[];
+    if (moduleDefinitions.length > 0) {
+      moduleIds = moduleDefinitions.map((m) => m.id);
+    } else {
+      const moduleRows = await db
+        .select({ moduleId: quizzes.moduleId })
+        .from(quizzes)
+        .where(eq(quizzes.courseId, courseId))
+        .groupBy(quizzes.moduleId)
+        .orderBy(quizzes.moduleId);
+      moduleIds = moduleRows.map((r) => r.moduleId);
+    }
+
+    const moduleTitleById = new Map(
+      moduleDefinitions.map((m) => [m.id, m.title] as const),
+    );
+
+    // Completed modules for this user.
+    const completedRows = moduleIds.length
+      ? await db
+          .select({ moduleId: quizzes.moduleId })
+          .from(quizSubmissions)
+          .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+          .where(
+            and(
+              eq(quizzes.courseId, courseId),
+              eq(quizSubmissions.userId, userId),
+              eq(quizSubmissions.superseded, false),
+            ),
+          )
+          .groupBy(quizzes.moduleId)
+      : [];
+    const completedModuleIds = new Set(completedRows.map((r) => r.moduleId));
+
+    const modules: CourseProgressModule[] = moduleIds.map((moduleId, i) => ({
+      moduleId,
+      title: moduleTitleById.get(moduleId) ?? null,
+      order: i + 1,
+      completed: completedModuleIds.has(moduleId),
+    }));
+
+    // Quiz count + average score.
+    const [quizAgg] = await db
+      .select({
+        quizCount: count(),
+        averageScore: sql<number | null>`AVG(${quizSubmissions.score})`,
+      })
+      .from(quizSubmissions)
+      .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+      .where(
+        and(
+          eq(quizzes.courseId, courseId),
+          eq(quizSubmissions.userId, userId),
+          eq(quizSubmissions.superseded, false),
+        ),
+      );
+
+    const totalModules = moduleIds.length;
+    const completedCount = completedModuleIds.size;
+    const completionPercentage =
+      totalModules > 0
+        ? Math.round((completedCount / totalModules) * 100)
+        : 0;
+
+    const result: CourseProgress = {
+      courseId,
+      modules,
+      quizzesTaken: quizAgg?.quizCount ?? 0,
+      averageScore:
+        quizAgg?.averageScore != null
+          ? Number(Number(quizAgg.averageScore).toFixed(2))
+          : null,
+      completedModules: completedCount,
+      totalModules,
+      completionPercentage,
+    };
+
+    await cacheSet(ck, result, 30);
+    return result;
+  }
+
+  // ─── Quiz Attempts (#393) ───────────────────────────────────────────────
+
+  /**
+   * All quiz attempts for a specific course module by the authenticated
+   * user (#393), ordered oldest-first. Returns attempt number, score,
+   * percentage, pass status, and date. Cached 30s per
+   * (userId, courseId, moduleId).
+   */
+  async getQuizAttempts(
+    userId: string,
+    courseId: string,
+    moduleId: string,
+  ): Promise<QuizAttemptsResult> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course || !course.isActive) {
+      throw new NotFoundError("Course");
+    }
+
+    const namespace = "user";
+    const ck = cacheKey(
+      namespace,
+      "quiz-attempts",
+      userId,
+      courseId,
+      moduleId,
+    );
+    const cached = await cacheGet<QuizAttemptsResult>(namespace, ck);
+    if (cached) return cached;
+
+    const rows = await db
+      .select({
+        submissionId: quizSubmissions.id,
+        score: quizSubmissions.score,
+        questions: quizzes.questions,
+        submittedAt: quizSubmissions.submittedAt,
+        superseded: quizSubmissions.superseded,
+      })
+      .from(quizSubmissions)
+      .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+      .where(
+        and(
+          eq(quizzes.courseId, courseId),
+          eq(quizzes.moduleId, moduleId),
+          eq(quizSubmissions.userId, userId),
+        ),
+      )
+      .orderBy(quizSubmissions.submittedAt);
+
+    const attempts: QuizAttempt[] = rows.map((row, i) => {
+      const totalQuestions = Array.isArray(row.questions)
+        ? row.questions.length
+        : 0;
+      const percentage =
+        totalQuestions > 0 && row.score != null
+          ? Math.round((row.score / totalQuestions) * 100)
+          : null;
+      return {
+        attemptNumber: i + 1,
+        submissionId: row.submissionId,
+        score: row.score,
+        percentage,
+        passed:
+          percentage != null ? percentage >= PASSING_PERCENTAGE : false,
+        superseded: row.superseded,
+        date: row.submittedAt,
+      };
+    });
+
+    const result: QuizAttemptsResult = {
+      courseId,
+      moduleId,
+      attempts,
+      totalAttempts: attempts.length,
+    };
+
+    await cacheSet(ck, result, 30);
+    return result;
+  }
+
+  // ─── Admin: Reorder Modules (#374) ──────────────────────────────────────
+
+  /**
+   * Reorder course modules atomically (#374). Accepts an ordered array of
+   * module IDs, validates all IDs belong to the course, and updates the
+   * `order` field on each module definition in courses.modules (jsonb) in
+   * a single transaction. Changes are logged to the audit log.
+   */
+  async reorderModules(
+    courseId: string,
+    moduleIds: string[],
+  ): Promise<CourseModuleDefinition[]> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    const existingModules = (course.modules ?? []) as CourseModuleDefinition[];
+
+    // Validate that the provided IDs exactly match the course's modules —
+    // all IDs must be present, no extras, no missing.
+    const existingIds = new Set(existingModules.map((m) => m.id));
+    const providedIds = new Set(moduleIds);
+
+    if (existingIds.size !== providedIds.size) {
+      throw new ForbiddenError(
+        "Module IDs do not match the course's modules",
+      );
+    }
+
+    for (const id of moduleIds) {
+      if (!existingIds.has(id)) {
+        throw new ForbiddenError(
+          `Module ${id} does not belong to this course`,
+        );
+      }
+    }
+
+    return withLock(`course-modules:${courseId}`, async () => {
+      // Re-fetch inside the lock to avoid a lost update.
+      const [locked] = await db
+        .select()
+        .from(courses)
+        .where(eq(courses.id, courseId));
+
+      if (!locked) {
+        throw new NotFoundError("Course");
+      }
+
+      const currentModules = (locked.modules ?? []) as CourseModuleDefinition[];
+      const moduleById = new Map(currentModules.map((m) => [m.id, m]));
+
+      const reordered: CourseModuleDefinition[] = moduleIds.map((id, i) => {
+        const existing = moduleById.get(id);
+        if (!existing) {
+          throw new ForbiddenError(
+            `Module ${id} does not belong to this course`,
+          );
+        }
+        return { ...existing, order: i };
+      });
+
+      await db
+        .update(courses)
+        .set({ modules: reordered })
+        .where(eq(courses.id, courseId));
+
+      await this.invalidateCourseCaches(courseId);
+      await auditLog("course.module.reordered", {
+        courseId,
+        moduleIds,
+      });
+      logger.info({ courseId, moduleIds }, "Course modules reordered");
+
+      return reordered;
+    });
+  }
+
+  // ─── Admin: Clone Course (#378) ─────────────────────────────────────────
+
+  /**
+   * Deep-copies a course including metadata, modules, module content, and quizzes (#378).
+   * Creates a new course row with isDraft=true, isActive=false, generating new unique UUIDs
+   * for the course, modules, module content, and quizzes. The original course is unchanged.
+   * Cloned course action is logged to the audit log.
+   */
+  async cloneCourse(
+    courseId: string,
+    customTitle?: string,
+  ): Promise<AdminCourse> {
+    const [original] = await db
+      .select()
+      .from(courses)
+      .where(eq(courses.id, courseId));
+
+    if (!original) {
+      throw new NotFoundError("Course");
+    }
+
+    const title = customTitle || `${original.title} (Clone)`;
+    const newCourseId = crypto.randomUUID();
+
+    // Map old moduleId -> new moduleId
+    const moduleIdMap = new Map<string, string>();
+
+    const originalModules = (original.modules ?? []) as CourseModuleDefinition[];
+    const clonedModules: CourseModuleDefinition[] = originalModules.map((m) => {
+      const newModId = crypto.randomUUID();
+      moduleIdMap.set(m.id, newModId);
+      return {
+        id: newModId,
+        title: m.title,
+        description: m.description,
+        order: m.order,
+      };
+    });
+
+    const originalCourseModules = (original.courseModules ?? []) as Array<{
+      id: string;
+      title: string;
+      description?: string;
+      estimatedDurationMinutes?: number;
+    }>;
+    const clonedCourseModules = originalCourseModules.map((cm) => ({
+      ...cm,
+      id: moduleIdMap.get(cm.id) ?? crypto.randomUUID(),
+    }));
+
+    // 1. Insert new course row
+    const [newCourse] = await db
+      .insert(courses)
+      .values({
+        id: newCourseId,
+        title,
+        description: original.description,
+        difficulty: original.difficulty,
+        tags: original.tags,
+        courseModules: clonedCourseModules,
+        modules: clonedModules,
+        contentHash: null,
+        accessibilityScore: original.accessibilityScore,
+        prerequisites: original.prerequisites ?? [],
+        isActive: false,
+        isDraft: true,
+      })
+      .returning();
+
+    // 2. Clone module content items if any
+    const existingContentRows = await db
+      .select()
+      .from(moduleContent)
+      .where(eq(moduleContent.courseId, courseId));
+
+    if (existingContentRows.length > 0) {
+      const contentToInsert = existingContentRows.map((c) => ({
+        id: crypto.randomUUID(),
+        courseId: newCourseId,
+        moduleId: moduleIdMap.get(c.moduleId) ?? c.moduleId,
+        title: c.title,
+        type: c.type,
+        content: c.content,
+        orderIndex: c.orderIndex,
+      }));
+      await db.insert(moduleContent).values(contentToInsert);
+    }
+
+    // 3. Clone quizzes
+    const existingQuizzes = await db
+      .select()
+      .from(quizzes)
+      .where(eq(quizzes.courseId, courseId));
+
+    if (existingQuizzes.length > 0) {
+      const quizzesToInsert = existingQuizzes.map((q) => ({
+        id: crypto.randomUUID(),
+        courseId: newCourseId,
+        moduleId: moduleIdMap.get(q.moduleId) ?? q.moduleId,
+        questions: q.questions,
+        generatedFor: null,
+      }));
+      await db.insert(quizzes).values(quizzesToInsert);
+    }
+
+    await this.invalidateCourseCaches(newCourseId);
+    await auditLog("course.cloned", {
+      courseId: newCourseId,
+      sourceCourseId: courseId,
+    });
+    logger.info(
+      { newCourseId, sourceCourseId: courseId },
+      "Course cloned successfully",
+    );
+
+    return this.toAdminCourse(newCourse);
+  }
+
+  /**
+   * Alias for cloneCourse (#378 / duplicate route compatibility).
+   */
+  async duplicateCourse(courseId: string): Promise<AdminCourse> {
+    return this.cloneCourse(courseId);
+  }
+
+  // ─── Admin: Module Content CRUD & Reorder (#382) ─────────────────────────
+
+  private toModuleContentItem(row: typeof moduleContent.$inferSelect): ModuleContentItem {
+    return {
+      id: row.id,
+      courseId: row.courseId,
+      moduleId: row.moduleId,
+      title: row.title,
+      type: row.type as "text" | "video" | "quiz" | "exercise",
+      content: (row.content ?? {}) as Record<string, unknown>,
+      orderIndex: row.orderIndex,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    };
+  }
+
+  /**
+   * List all content items for a specific module ordered by orderIndex (#382).
+   */
+  async listModuleContent(
+    courseId: string,
+    moduleId: string,
+  ): Promise<ModuleContentItem[]> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    const rows = await db
+      .select()
+      .from(moduleContent)
+      .where(
+        and(
+          eq(moduleContent.courseId, courseId),
+          eq(moduleContent.moduleId, moduleId),
+        ),
+      )
+      .orderBy(asc(moduleContent.orderIndex), asc(moduleContent.createdAt));
+
+    return rows.map((r) => this.toModuleContentItem(r));
+  }
+
+  /**
+   * Create a new content item within a module (#382).
+   */
+  async createModuleContent(
+    courseId: string,
+    moduleId: string,
+    data: CreateContentBody,
+  ): Promise<ModuleContentItem> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    return withLock(`module-content:${courseId}:${moduleId}`, async () => {
+      let orderIndex = data.orderIndex;
+      if (orderIndex === undefined || orderIndex === null) {
+        const [maxRow] = await db
+          .select({
+            maxOrder: sql<number | null>`MAX(${moduleContent.orderIndex})`,
+          })
+          .from(moduleContent)
+          .where(
+            and(
+              eq(moduleContent.courseId, courseId),
+              eq(moduleContent.moduleId, moduleId),
+            ),
+          );
+        orderIndex = maxRow?.maxOrder != null ? maxRow.maxOrder + 1 : 0;
+      }
+
+      const [created] = await db
+        .insert(moduleContent)
+        .values({
+          courseId,
+          moduleId,
+          title: data.title,
+          type: data.type,
+          content: data.content as ModuleContentPayload,
+          orderIndex,
+        })
+        .returning();
+
+      await this.invalidateCourseCaches(courseId);
+      await auditLog("course.module.content.created", {
+        courseId,
+        moduleId,
+        contentId: created.id,
+      });
+      logger.info(
+        { courseId, moduleId, contentId: created.id, type: data.type },
+        "Module content item created",
+      );
+
+      return this.toModuleContentItem(created);
+    });
+  }
+
+  /**
+   * Update an existing content item (#382).
+   */
+  async updateModuleContent(
+    courseId: string,
+    moduleId: string,
+    contentId: string,
+    data: UpdateContentBody,
+  ): Promise<ModuleContentItem> {
+    const [existing] = await db
+      .select()
+      .from(moduleContent)
+      .where(
+        and(
+          eq(moduleContent.id, contentId),
+          eq(moduleContent.courseId, courseId),
+          eq(moduleContent.moduleId, moduleId),
+        ),
+      );
+
+    if (!existing) {
+      throw new NotFoundError("Module content");
+    }
+
+    const updateValues: Partial<typeof moduleContent.$inferInsert> = {
+      updatedAt: new Date(),
+    };
+    if (data.title !== undefined) updateValues.title = data.title;
+    if (data.type !== undefined) updateValues.type = data.type;
+    if (data.content !== undefined) updateValues.content = data.content as ModuleContentPayload;
+    if (data.orderIndex !== undefined) updateValues.orderIndex = data.orderIndex;
+
+    const [updated] = await db
+      .update(moduleContent)
+      .set(updateValues)
+      .where(eq(moduleContent.id, contentId))
+      .returning();
+
+    await this.invalidateCourseCaches(courseId);
+    await auditLog("course.module.content.updated", {
+      courseId,
+      moduleId,
+      contentId,
+    });
+    logger.info(
+      { courseId, moduleId, contentId },
+      "Module content item updated",
+    );
+
+    return this.toModuleContentItem(updated);
+  }
+
+  /**
+   * Delete a content item (#382).
+   */
+  async deleteModuleContent(
+    courseId: string,
+    moduleId: string,
+    contentId: string,
+  ): Promise<void> {
+    const [existing] = await db
+      .select()
+      .from(moduleContent)
+      .where(
+        and(
+          eq(moduleContent.id, contentId),
+          eq(moduleContent.courseId, courseId),
+          eq(moduleContent.moduleId, moduleId),
+        ),
+      );
+
+    if (!existing) {
+      throw new NotFoundError("Module content");
+    }
+
+    await db.delete(moduleContent).where(eq(moduleContent.id, contentId));
+
+    await this.invalidateCourseCaches(courseId);
+    await auditLog("course.module.content.deleted", {
+      courseId,
+      moduleId,
+      contentId,
+    });
+    logger.info(
+      { courseId, moduleId, contentId },
+      "Module content item deleted",
+    );
+  }
+
+  /**
+   * Reorder content items within a module atomically (#382).
+   */
+  async reorderModuleContent(
+    courseId: string,
+    moduleId: string,
+    contentIds: string[],
+  ): Promise<ModuleContentItem[]> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    return withLock(`module-content:${courseId}:${moduleId}`, async () => {
+      const existingRows = await db
+        .select()
+        .from(moduleContent)
+        .where(
+          and(
+            eq(moduleContent.courseId, courseId),
+            eq(moduleContent.moduleId, moduleId),
+          ),
+        );
+
+      const existingIds = new Set(existingRows.map((r) => r.id));
+      const providedIds = new Set(contentIds);
+
+      if (existingIds.size !== providedIds.size) {
+        throw new ForbiddenError(
+          "Content IDs do not match the module's content items",
+        );
+      }
+
+      for (const id of contentIds) {
+        if (!existingIds.has(id)) {
+          throw new ForbiddenError(
+            `Content ${id} does not belong to this module`,
+          );
+        }
+      }
+
+      for (let i = 0; i < contentIds.length; i++) {
+        await db
+          .update(moduleContent)
+          .set({ orderIndex: i, updatedAt: new Date() })
+          .where(eq(moduleContent.id, contentIds[i]));
+      }
+
+      await this.invalidateCourseCaches(courseId);
+      await auditLog("course.module.content.reordered", {
+        courseId,
+        moduleId,
+        contentIds,
+      });
+      logger.info(
+        { courseId, moduleId, contentIds },
+        "Module content reordered",
+      );
+
+      const updatedRows = await db
+        .select()
+        .from(moduleContent)
+        .where(
+          and(
+            eq(moduleContent.courseId, courseId),
+            eq(moduleContent.moduleId, moduleId),
+          ),
+        )
+        .orderBy(asc(moduleContent.orderIndex));
+
+      return updatedRows.map((r) => this.toModuleContentItem(r));
+    });
+  }
 }
 
 export const courseService = new CourseService();
+
+
+// src/modules/courses/course.service.ts
+
+import { Injectable, NotFoundException } from '@nestjs/common';
+// Import database client / repositories referencing src/database/schema.ts
+
+interface ValidationIssue {
+  field: string;
+  message: string;
+}
+
+interface PublishCheckResult {
+  isReady: boolean;
+  readinessScore: number; // 0 - 100%
+  issues: ValidationIssue[];
+}
+
+@Injectable()
+export class CourseService {
+  // constructor(private db: DatabaseService) {}
+
+  async validatePublishReadiness(courseId: string): Promise<PublishCheckResult> {
+    // 1. Fetch course along with modules, content, and quizzes
+    // const course = await this.db.course.findUnique({
+    //   where: { id: courseId },
+    //   include: { modules: { include: { content: true, quizzes: true } } },
+    // });
+    // if (!course) throw new NotFoundException('Course not found');
+
+    const issues: ValidationIssue[] = [];
+    let checksTotal = 0;
+    let checksPassed = 0;
+
+    // Check 1: Title
+    checksTotal++;
+    const hasTitle = true; // Replace with course.title && course.title.trim().length > 0
+    if (hasTitle) {
+      checksPassed++;
+    } else {
+      issues.push({ field: 'title', message: 'Course title is missing or empty.' });
+    }
+
+    // Check 2: Description
+    checksTotal++;
+    const hasDescription = true; // Replace with course.description
+    if (hasDescription) {
+      checksPassed++;
+    } else {
+      issues.push({ field: 'description', message: 'Course description is required.' });
+    }
+
+    // Check 3: Difficulty level
+    checksTotal++;
+    const hasDifficulty = true; // Replace with course.difficulty
+    if (hasDifficulty) {
+      checksPassed++;
+    } else {
+      issues.push({ field: 'difficulty', message: 'Course difficulty rating must be specified.' });
+    }
+
+    // Check 4: At least one module
+    checksTotal++;
+    const hasModules = true; // Replace with course.modules && course.modules.length > 0
+    if (hasModules) {
+      checksPassed++;
+    } else {
+      issues.push({ field: 'modules', message: 'Course must contain at least one module.' });
+    }
+
+    // Check 5 & 6: Content and Quizzes per module (example loop validation)
+    // if (course.modules) {
+    //   course.modules.forEach((module, index) => {
+    //     checksTotal += 2;
+    //     if (module.content && module.content.length > 0) {
+    //       checksPassed++;
+    //     } else {
+    //       issues.push({ field: `modules[${index}].content`, message: `Module "${module.title || index}" has no learning content.` });
+    //     }
+    //     if (module.quizzes && module.quizzes.length > 0) {
+    //       checksPassed++;
+    //     } else {
+    //       issues.push({ field: `modules[${index}].quizzes`, message: `Module "${module.title || index}" is missing assessment quizzes.` });
+    //     }
+    //   });
+    // }
+
+    const readinessScore = Math.round((checksPassed / checksTotal) * 100);
+
+    return {
+      isReady: issues.length === 0,
+      readinessScore,
+      issues,
+    };
+  }
+}

@@ -2,9 +2,15 @@ import type { FastifyInstance, FastifySchema } from "fastify";
 import { userController } from "./user.controller.js";
 import { authGuard } from "../../middleware/auth.js";
 import { validate } from "../../middleware/validation.js";
-import { activityQuerySchema, updateProfileSchema } from "./user.types.js";
+import {
+  activityQuerySchema,
+  updateProfileSchema,
+  userCourseProgressParamsSchema,
+} from "./user.types.js";
 import { config } from "../../config/index.js";
 import { notificationController } from "../notifications/notification.controller.js";
+import { credentialController } from "../credentials/credential.controller.js";
+import { badgeController } from "../badges/badge.controller.js";
 import {
   listNotificationsQuerySchema,
   notificationIdParamsSchema,
@@ -94,6 +100,64 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
     (request, reply) => userController.getProgress(request, reply)
   );
 
+  app.get<{ Params: { courseId: string } }>(
+    "/me/courses/:courseId/progress",
+    {
+      preHandler: [validate({ params: userCourseProgressParamsSchema })],
+      schema: {
+        description:
+          "Course-specific progress: title, module-by-module status, quiz scores, average score, completion percentage, and time spent (cached 30s, #412)",
+        tags: ["users"],
+        security: [{ bearerAuth: [] }],
+        params: {
+          type: "object",
+          required: ["courseId"],
+          properties: { courseId: { type: "string", format: "uuid" } },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => userController.getCourseProgress(request, reply)
+  );
+
+  app.get(
+    "/me/badges",
+    {
+      schema: {
+        description:
+          "Get authenticated user's earned badges and progress toward unearned badges (#379)",
+        tags: ["users", "badges"],
+        security: [{ bearerAuth: [] }],
+      } as FastifySchema,
+    },
+    (request, reply) => badgeController.getUserBadges(request, reply)
+  );
+
+  app.get(
+    "/me/certificates",
+    {
+      schema: {
+        description:
+          "Earned certificates with credential ID, course title, score, issuance date, verification URL and download URL, newest first (cached 5 min)",
+        tags: ["users"],
+        security: [{ bearerAuth: [] }],
+      } as FastifySchema,
+    },
+    (request, reply) => credentialController.certificates(request, reply)
+  );
+
+  app.get(
+    "/me/recommendations",
+    {
+      schema: {
+        description:
+          "Personalized course recommendations based on completed and enrolled courses, quiz scores, learning goal, pace and what similar learners took. Each includes a confidence score and reasons (cached per user for 1 hour)",
+        tags: ["users"],
+        security: [{ bearerAuth: [] }],
+      } as FastifySchema,
+    },
+    (request, reply) => userController.getRecommendations(request, reply)
+  );
+
   app.get(
     "/me/learning-path",
     {
@@ -104,6 +168,19 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => userController.getLearningPath(request, reply)
+  );
+
+  app.get(
+    "/me/learning-stats",
+    {
+      schema: {
+        description:
+          "Comprehensive learning statistics: courses completed, quizzes taken, average score, credits, credentials, streak, study time, velocity (cached 5 min, #383)",
+        tags: ["users"],
+        security: [{ bearerAuth: [] }],
+      } as FastifySchema,
+    },
+    (request, reply) => userController.getLearningStats(request, reply)
   );
 
   app.get<{ Querystring: import("../notifications/notification.types.js").ListNotificationsQuery }>(

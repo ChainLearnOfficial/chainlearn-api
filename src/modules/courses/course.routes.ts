@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifySchema } from "fastify";
 import { courseController } from "./course.controller.js";
+import { authGuard, adminGuard, optionalAuth } from "../../middleware/auth.js";
 import { waitlistController } from "./waitlist.controller.js";
-import { authGuard, optionalAuth } from "../../middleware/auth.js";
 import { validate } from "../../middleware/validation.js";
 import {
   listCoursesSchema,
@@ -12,6 +12,10 @@ import {
   shareCodeParamsSchema,
   listReviewsQuerySchema,
   createReviewSchema,
+  reportCourseSchema,
+  listEnrolledUsersQuerySchema,
+  reorderModulesSchema,
+  moduleParamsSchema,
 } from "./course.types.js";
 import { joinWaitlistSchema, leaveWaitlistSchema } from "./waitlist.types.js";
 
@@ -105,6 +109,20 @@ export async function courseRoutes(app: FastifyInstance): Promise<void> {
   );
 
   app.get<{ Params: { id: string } }>(
+    "/:id/prerequisites",
+    {
+      preHandler: [optionalAuth, validate({ params: courseIdParamsSchema })],
+      schema: {
+        description:
+          "List a course's configured prerequisite courses, with the caller's completion status per prerequisite (#354)",
+        tags: ["courses"],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      } as FastifySchema,
+    },
+    (request, reply) => courseController.prerequisites(request, reply)
+  );
+
+  app.get<{ Params: { id: string } }>(
     "/:id/leaderboard",
     {
       preHandler: [validate({ params: courseIdParamsSchema })],
@@ -132,6 +150,19 @@ export async function courseRoutes(app: FastifyInstance): Promise<void> {
   );
 
   app.get<{ Params: { id: string } }>(
+    "/:id/syllabus",
+    {
+      preHandler: [validate({ params: courseIdParamsSchema })],
+      schema: {
+        description: "Get the full course syllabus with module descriptions, estimated duration, and learning objectives (#373)",
+        tags: ["courses"],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      } as FastifySchema,
+    },
+    (request, reply) => courseController.syllabus(request, reply)
+  );
+
+  app.get<{ Params: { id: string } }>(
     "/:id/modules",
     {
       preHandler: [authGuard, validate({ params: courseIdParamsSchema })],
@@ -143,6 +174,74 @@ export async function courseRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => courseController.modules(request, reply)
+  );
+
+  app.get<{ Params: { id: string } }>(
+    "/:id/enrollment-status",
+    {
+      preHandler: [authGuard, validate({ params: courseIdParamsSchema })],
+      schema: {
+        description:
+          "Detailed enrollment status for the authenticated user in a specific course (#381)",
+        tags: ["courses"],
+        security: [{ bearerAuth: [] }],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      } as FastifySchema,
+    },
+    (request, reply) => courseController.enrollmentStatus(request, reply)
+  );
+
+  app.get<{ Params: { id: string } }>(
+    "/:id/progress",
+    {
+      preHandler: [authGuard, validate({ params: courseIdParamsSchema })],
+      schema: {
+        description:
+          "The authenticated user's detailed progress in a specific course (#385)",
+        tags: ["courses"],
+        security: [{ bearerAuth: [] }],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      } as FastifySchema,
+    },
+    (request, reply) => courseController.progress(request, reply)
+  );
+
+  app.get<{ Params: { id: string } }>(
+    "/:id/completion-certificate",
+    {
+      preHandler: [authGuard, validate({ params: courseIdParamsSchema })],
+      schema: {
+        description:
+          "Download a PDF certificate of completion for a course the caller has finished — a traditional certificate, separate from the on-chain NFT credential. Returns 404 unless every module of the course has a non-superseded quiz submission from the caller. The rendered PDF is cached, so repeated downloads are cheap (#387)",
+        tags: ["courses", "credentials"],
+        security: [{ bearerAuth: [] }],
+        produces: ["application/pdf"],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      } as FastifySchema,
+    },
+    (request, reply) => courseController.completionCertificate(request, reply)
+  );
+
+  app.get<{ Params: { id: string; moduleId: string } }>(
+    "/:id/modules/:moduleId/quiz-attempts",
+    {
+      preHandler: [authGuard, validate({ params: moduleParamsSchema })],
+      schema: {
+        description:
+          "All quiz attempts for a specific course module by the authenticated user, ordered oldest-first (#393)",
+        tags: ["courses"],
+        security: [{ bearerAuth: [] }],
+        params: {
+          type: "object",
+          required: ["id", "moduleId"],
+          properties: {
+            id: { type: "string", format: "uuid" },
+            moduleId: { type: "string", minLength: 1, maxLength: 100 },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => courseController.quizAttempts(request, reply)
   );
 
   app.post<{ Params: { id: string }; Querystring: import("./course.types.js").EnrollCourseQuery }>(
@@ -192,18 +291,47 @@ export async function courseRoutes(app: FastifyInstance): Promise<void> {
     (request, reply) => courseController.batchEnroll(request, reply)
   );
 
-  app.get<{ Params: { id: string } }>(
-    "/:id/prerequisites",
+  app.get<{ Params: { id: string }; Querystring: import("./course.types.js").ListEnrolledUsersQuery }>(
+    "/:id/enrolled-users",
     {
-      preHandler: [optionalAuth, validate({ params: courseIdParamsSchema })],
+      preHandler: [
+        authGuard,
+        adminGuard,
+        validate({
+          params: courseIdParamsSchema,
+          querystring: listEnrolledUsersQuerySchema,
+        }),
+      ],
       schema: {
         description:
-          "Get a course's prerequisite courses, with the caller's completion status per prerequisite (#369)",
+          "List users enrolled in a course with their progress, paginated (admin only, #355)",
+        tags: ["admin", "courses"],
+        security: [{ bearerAuth: [] }],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+        querystring: {
+          type: "object",
+          properties: {
+            page: { type: "integer", minimum: 1, default: 1 },
+            limit: { type: "integer", minimum: 1, maximum: 50, default: 20 },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => courseController.enrolledUsers(request, reply)
+  );
+
+  app.delete<{ Params: { id: string } }>(
+    "/:id/enroll",
+    {
+      preHandler: [authGuard, validate({ params: courseIdParamsSchema })],
+      schema: {
+        description: "Drop the caller's enrollment in a course (#310)",
         tags: ["courses"],
+        security: [{ bearerAuth: [] }],
         params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
       } as FastifySchema,
     },
-    (request, reply) => courseController.prerequisites(request, reply)
+    (request, reply) => courseController.dropEnrollment(request, reply)
   );
 
   app.get<{ Params: { id: string }; Querystring: import("./course.types.js").ListReviewsQuery }>(
@@ -267,6 +395,32 @@ export async function courseRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => courseController.share(request, reply)
+  );
+
+  app.post<{ Params: { id: string }; Body: import("./course.types.js").ReportCourseBody }>(
+    "/:id/report",
+    {
+      preHandler: [
+        authGuard,
+        validate({ params: courseIdParamsSchema, body: reportCourseSchema }),
+      ],
+      schema: {
+        description:
+          "Report a course for inappropriate content, outdated material, errors, or other issues (one report per user per course)",
+        tags: ["courses"],
+        security: [{ bearerAuth: [] }],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+        body: {
+          type: "object",
+          required: ["reason"],
+          properties: {
+            reason: { type: "string", enum: ["inappropriate", "outdated", "error", "other"] },
+            description: { type: "string", maxLength: 2000 },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => courseController.report(request, reply)
   );
 
   // ─── Waitlist Endpoints ──────────────────────────────────────────────────

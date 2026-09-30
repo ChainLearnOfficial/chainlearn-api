@@ -4,6 +4,12 @@
  * Covers the service layer: ordering by configured prerequisite list,
  * completion status for an authenticated vs anonymous caller, and the
  * not-found/empty-list edge cases.
+ *
+ * Note on the anonymous case: the route is `optionalAuth`, and for a caller
+ * with no user there is nothing to look up, so every entry comes back
+ * `completed: false` and the aggregate `met` flag is false. The endpoint
+ * cannot distinguish "not enrolled" from "not signed in" — a signed-out
+ * visitor sees the prerequisite list but no personal status.
  */
 import { test, describe, expect, beforeEach, afterEach } from "vitest";
 import { courseService } from "../modules/courses/course.service.js";
@@ -75,28 +81,38 @@ describe("GET /api/v1/courses/:id/prerequisites (#369)", () => {
   test("throws NotFoundError for a non-existent course", async () => {
     if (!infraAvailable) return;
     await expect(
-      courseService.getPrerequisites("00000000-0000-0000-0000-000000000000", userId),
+      courseService.getCoursePrerequisites(
+        "00000000-0000-0000-0000-000000000000",
+        userId,
+      ),
     ).rejects.toThrow(NotFoundError);
   });
 
-  test("returns an empty array when the course has no prerequisites", async () => {
+  test("returns an empty list when the course has no prerequisites", async () => {
     if (!infraAvailable) return;
-    const result = await courseService.getPrerequisites(prereqOneId, userId);
-    expect(result).toEqual([]);
+    const result = await courseService.getCoursePrerequisites(prereqOneId, userId);
+    expect(result.prerequisites).toEqual([]);
+    // No requirements to satisfy — nothing outstanding, so the gate is met.
+    expect(result.met).toBe(true);
   });
 
   test("returns prerequisites in configured order with completed:false when not enrolled", async () => {
     if (!infraAvailable) return;
-    const result = await courseService.getPrerequisites(courseId, userId);
+    const result = await courseService.getCoursePrerequisites(courseId, userId);
 
-    expect(result.map((p) => p.id)).toEqual([prereqTwoId, prereqOneId]);
-    expect(result.every((p) => p.completed === false)).toBe(true);
+    expect(result.prerequisites.map((p) => p.id)).toEqual([
+      prereqTwoId,
+      prereqOneId,
+    ]);
+    expect(result.prerequisites.every((p) => p.completed === false)).toBe(true);
+    expect(result.met).toBe(false);
   });
 
-  test("returns completed:null for every entry for an anonymous caller", async () => {
+  test("reports every entry as incomplete for an anonymous caller", async () => {
     if (!infraAvailable) return;
-    const result = await courseService.getPrerequisites(courseId, null);
-    expect(result.every((p) => p.completed === null)).toBe(true);
+    const result = await courseService.getCoursePrerequisites(courseId, null);
+    expect(result.prerequisites.every((p) => p.completed === false)).toBe(true);
+    expect(result.met).toBe(false);
   });
 
   test("marks a prerequisite completed once the user has a completed enrollment for it", async () => {
@@ -106,10 +122,11 @@ describe("GET /api/v1/courses/:id/prerequisites (#369)", () => {
       .values({ userId, courseId: prereqOneId, completedAt: new Date() })
       .onConflictDoNothing();
 
-    const result = await courseService.getPrerequisites(courseId, userId);
+    const result = await courseService.getCoursePrerequisites(courseId, userId);
 
-    expect(result.find((p) => p.id === prereqOneId)?.completed).toBe(true);
-    expect(result.find((p) => p.id === prereqTwoId)?.completed).toBe(false);
+    expect(result.prerequisites.find((p) => p.id === prereqOneId)?.completed).toBe(true);
+    expect(result.prerequisites.find((p) => p.id === prereqTwoId)?.completed).toBe(false);
+    expect(result.met).toBe(false);
   });
 
   test("an enrollment that isn't completed yet does not count as completed", async () => {
@@ -119,8 +136,23 @@ describe("GET /api/v1/courses/:id/prerequisites (#369)", () => {
       .values({ userId, courseId: prereqOneId })
       .onConflictDoNothing();
 
-    const result = await courseService.getPrerequisites(courseId, userId);
+    const result = await courseService.getCoursePrerequisites(courseId, userId);
 
-    expect(result.find((p) => p.id === prereqOneId)?.completed).toBe(false);
+    expect(result.prerequisites.find((p) => p.id === prereqOneId)?.completed).toBe(false);
+  });
+
+  test("met becomes true only once every prerequisite is completed", async () => {
+    if (!infraAvailable) return;
+    await db
+      .insert(enrollments)
+      .values([
+        { userId, courseId: prereqOneId, completedAt: new Date() },
+        { userId, courseId: prereqTwoId, completedAt: new Date() },
+      ])
+      .onConflictDoNothing();
+
+    const result = await courseService.getCoursePrerequisites(courseId, userId);
+
+    expect(result.met).toBe(true);
   });
 });

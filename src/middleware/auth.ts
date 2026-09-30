@@ -5,6 +5,7 @@ import { users } from "../database/schema.js";
 import { eq } from "drizzle-orm";
 import { logger } from "../utils/logger.js";
 import { redis } from "../config/redis.js";
+import { sessionService } from "../modules/auth/session.service.js";
 
 const JWT_DENYLIST_PREFIX = "jwt:revoked:";
 
@@ -87,6 +88,11 @@ export async function authGuard(
       id: user.id,
       stellarAddress: user.stellarAddress,
     };
+
+    if (decoded.jti) {
+      const deviceInfo = request.headers["user-agent"] ?? null;
+      await sessionService.track(user.id, decoded.jti, deviceInfo, request.ip ?? null);
+    }
   } catch (err) {
     if (err instanceof UnauthorizedError) throw err;
     throw new UnauthorizedError("Invalid or expired token");

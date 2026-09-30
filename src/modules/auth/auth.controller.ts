@@ -7,12 +7,15 @@ import {
   revokeRefreshToken,
 } from "./refresh-token.service.js";
 import { revokeToken } from "../../middleware/auth.js";
+import type { AuthenticatedRequest } from "../../middleware/auth.js";
+import { sessionService } from "./session.service.js";
 import { logger } from "../../utils/logger.js";
 import type {
   ChallengeBody,
   VerifyBody,
   RefreshBody,
   LogoutBody,
+  SessionIdParams,
 } from "./auth.types.js";
 
 const JWT_TTL_SECONDS = 24 * 60 * 60; // must match the expiresIn below
@@ -144,6 +147,36 @@ export class AuthController {
     }
 
     reply.send({ success: true, data: { message: "Logged out successfully" } });
+  }
+
+  /**
+   * GET /api/v1/auth/sessions
+   * List the caller's active sessions with device info and last activity.
+   */
+  async listSessions(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+    const { authUser } = request as AuthenticatedRequest;
+    const decoded = request.user as { jti?: string };
+
+    const sessions = await sessionService.listSessions(authUser.id, decoded?.jti);
+
+    reply.send({ success: true, data: sessions });
+  }
+
+  /**
+   * DELETE /api/v1/auth/sessions/:sessionId
+   * Revoke one of the caller's sessions. Its token is blacklisted
+   * immediately, on top of the session row being marked revoked.
+   */
+  async revokeSession(
+    request: FastifyRequest<{ Params: SessionIdParams }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { authUser } = request as AuthenticatedRequest;
+    const { sessionId } = request.params;
+
+    await sessionService.revokeSession(authUser.id, sessionId);
+
+    reply.send({ success: true, message: "Session revoked" });
   }
 }
 

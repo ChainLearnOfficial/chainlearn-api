@@ -27,6 +27,10 @@ export const updateProfileSchema = z.object({
   language: z.string().max(10).optional(),
 });
 
+export const userCourseProgressParamsSchema = z.object({
+  courseId: z.string().uuid("Invalid course ID"),
+});
+
 export const activityQuerySchema = z.object({
   cursor: z.string().datetime().optional(),
   limit: z.coerce.number().int().min(1).max(50).default(20),
@@ -118,4 +122,55 @@ export interface UserDataExport {
     txHash: string | null;
     claimedAt: Date;
   }[];
+}
+
+// ─── Learning Stats (#383) ──────────────────────────────────────────────────
+
+/** One module in GET /api/v1/users/me/courses/:courseId/progress (#412). */
+export interface UserCourseModuleStatus {
+  moduleId: string;
+  title: string | null;
+  /** completed once the learner has a non-superseded submission for the module. */
+  status: "completed" | "not_started";
+}
+
+/** One quiz score included in course progress (#412). */
+export interface UserCourseQuizScore {
+  quizId: string;
+  moduleId: string;
+  score: number | null;
+  totalQuestions: number;
+  percentage: number | null;
+  submittedAt: Date;
+}
+
+/** Detailed progress for one course (#412). */
+export interface UserCourseProgress {
+  courseId: string;
+  courseTitle: string;
+  modules: UserCourseModuleStatus[];
+  modulesCompleted: number;
+  quizzesTaken: number;
+  quizScores: UserCourseQuizScore[];
+  /** Mean percentage across quiz scores, or null when none have been taken. */
+  averageScore: number | null;
+  completionPercentage: number;
+  /** Minutes. Uses module duration estimates when the course defines them,
+   *  otherwise five minutes per quiz taken. */
+  timeSpentMinutes: number;
+}
+
+/** Comprehensive learning statistics for the authenticated user (#383). */
+export interface LearningStats {
+  coursesCompleted: number;
+  quizzesTaken: number;
+  averageScore: number | null;
+  creditsEarned: number;
+  credentialsEarned: number;
+  /** Current consecutive-day learning streak (1 = active today). */
+  learningStreak: number;
+  /** Estimated total study time in minutes, derived from quiz submissions. */
+  estimatedTotalStudyTimeMinutes: number;
+  /** Quizzes taken in the last 7 days — a simple learning-velocity metric. */
+  learningVelocity: number;
 }

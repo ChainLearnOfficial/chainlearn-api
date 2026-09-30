@@ -1,12 +1,21 @@
 import crypto from "node:crypto";
-import { eq, and } from "drizzle-orm";
+import { eq, and, desc, sql, isNull } from "drizzle-orm";
 import { db } from "../../config/database.js";
-import { quizzes, quizSubmissions, enrollments } from "../../database/schema.js";
+import {
+  quizzes,
+  quizSubmissions,
+  quizFeedback,
+  enrollments,
+  courses,
+  moduleContent,
+  type CourseModuleDefinition,
+} from "../../database/schema.js";
 import {
   NotFoundError,
   ForbiddenError,
   ConflictError,
   RateLimitError,
+  ValidationError,
 } from "../../utils/errors.js";
 import { withLock } from "../../utils/lock.js";
 import { createQuizProof } from "../../stellar/signatures.js";
@@ -22,8 +31,6 @@ import {
   cacheSet,
   cacheDel,
   cacheKey,
-  cacheGet,
-  cacheSet,
   cacheKeyPattern,
   cacheInvalidatePattern,
 } from "../../cache/index.js";
@@ -32,20 +39,35 @@ import {
   MAX_RETRIES_PER_MODULE_PER_DAY,
   MAX_QUIZ_GENERATIONS_PER_MODULE_PER_HOUR,
   type GenerateQuizBody,
+  type GenerateQuizBatchBody,
   type SubmitQuizBody,
   type QuizWithQuestions,
+  type QuizBatchGenerateEntry,
   type QuizSubmissionResult,
   type QuizQuestion,
   type QuizStats,
+  type SubmitQuizFeedbackBody,
+  type QuizFeedbackEntry,
+  type QuizFeedbackSummaryEntry,
+  type AuthoredQuestion,
+  type AdminQuiz,
+  type AdminQuizDeleteResult,
+  type AdminQuizUpdateBody,
+  type QuizMetadata,
 } from "./quiz.types.js";
 
 const QUIZ_STATS_TTL_SECONDS = 300;
 
 type GeneratedQuestion = QuizQuestion & { correctIndex: number };
 type StoredQuestion = GeneratedQuestion & {
-  originalQuestionIndex: number;
-  originalCorrectIndex: number;
-  originalOptions: string[];
+  /** Pre-shuffle bookkeeping, written by shuffleQuestions so an AI-generated
+   *  quiz can be traced back to the order and options the model produced.
+   *  Absent on hand-authored questions (#388) — there is no pre-shuffle
+   *  state to record, and faking identity mappings would misattribute the
+   *  content to the model. Nothing in src/ reads these fields. */
+  originalQuestionIndex?: number;
+  originalCorrectIndex?: number;
+  originalOptions?: string[];
 };
 
 export class QuizService {
@@ -78,7 +100,8 @@ export class QuizService {
       where: and(
         eq(quizzes.courseId, data.courseId),
         eq(quizzes.moduleId, data.moduleId),
-        eq(quizzes.generatedFor, userId)
+        eq(quizzes.generatedFor, userId),
+        isNull(quizzes.archivedAt),
       ),
     });
 
@@ -129,6 +152,47 @@ export class QuizService {
   }
 
   /**
+   * Generate quizzes for several modules of the same course in one request
+   * (#308). Each module goes through the same generateQuiz path — enrollment
+   * check, per-module rate limit, existing-quiz short-circuit, AI generation
+   * with placeholder fallback — sequentially rather than in parallel so a
+   * batch request can't fan out into a burst of concurrent AI service calls.
+   * One module failing (e.g. its own per-module generation rate limit) is
+   * reported in that module's entry rather than aborting the rest of the
+   * batch.
+   */
+  async generateQuizBatch(
+    userId: string,
+    data: GenerateQuizBatchBody
+  ): Promise<QuizBatchGenerateEntry[]> {
+    const results: QuizBatchGenerateEntry[] = [];
+
+    for (const moduleId of data.moduleIds) {
+      try {
+        const quiz = await this.generateQuiz(userId, {
+          courseId: data.courseId,
+          moduleId,
+          difficulty: data.difficulty,
+          numQuestions: data.numQuestions,
+        });
+        results.push({ moduleId, success: true, quiz });
+      } catch (err) {
+        logger.warn(
+          { err, courseId: data.courseId, moduleId },
+          "Batch quiz generation failed for module"
+        );
+        results.push({
+          moduleId,
+          success: false,
+          error: err instanceof Error ? err.message : "Quiz generation failed",
+        });
+      }
+    }
+
+    return results;
+  }
+
+  /**
    * Submit answers for a quiz and calculate the score.
    * Uses distributed locking + database transaction with row-level lock
    * to prevent duplicate submissions from concurrent requests.
@@ -147,6 +211,10 @@ export class QuizService {
 
         if (!quiz) {
           throw new NotFoundError("Quiz");
+        }
+
+        if (quiz.archivedAt) {
+          throw new ForbiddenError("This quiz has been archived");
         }
 
         const enrollment = await tx.query.enrollments.findFirst({
@@ -688,6 +756,667 @@ export class QuizService {
     await cacheSet(cacheKeyString, stats, QUIZ_STATS_TTL_SECONDS);
 
     return stats;
+  }
+
+  /**
+   * Submit feedback on a specific quiz question (#331): "this question is
+   * unclear", "wrong answer marked as correct", or something else.
+   *
+   * One submission per (quiz, question, user) — a second attempt is
+   * rejected with a ConflictError rather than overwriting the first, so a
+   * question's feedback count reflects distinct reporters.
+   */
+  async submitFeedback(
+    userId: string,
+    quizId: string,
+    data: SubmitQuizFeedbackBody,
+  ): Promise<QuizFeedbackEntry> {
+    const quiz = await db.query.quizzes.findFirst({
+      where: eq(quizzes.id, quizId),
+    });
+    if (!quiz) {
+      throw new NotFoundError("Quiz");
+    }
+
+    const questions = (quiz.questions ?? []) as StoredQuestion[];
+    if (!questions.some((q) => q.id === data.questionId)) {
+      throw new NotFoundError("Question");
+    }
+
+    const existing = await db.query.quizFeedback.findFirst({
+      where: and(
+        eq(quizFeedback.quizId, quizId),
+        eq(quizFeedback.questionId, data.questionId),
+        eq(quizFeedback.userId, userId),
+      ),
+    });
+    if (existing) {
+      throw new ConflictError("Feedback already submitted for this question");
+    }
+
+    try {
+      const [row] = await db
+        .insert(quizFeedback)
+        .values({
+          quizId,
+          questionId: data.questionId,
+          userId,
+          type: data.type,
+          comment: data.comment ?? null,
+        })
+        .returning();
+
+      await auditLog("quiz.feedback.submitted", {
+        userId,
+        courseId: quiz.courseId,
+      });
+
+      return row as QuizFeedbackEntry;
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      // 23505 = unique_violation — a concurrent submission for the same
+      // (quiz, question, user) beat this one to the pre-check above.
+      if (code === "23505") {
+        throw new ConflictError("Feedback already submitted for this question");
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Per-question feedback counts for a quiz, for admins reviewing which
+   * questions need work (#331).
+   */
+  async getFeedbackSummary(
+    quizId: string,
+    questionId?: string,
+  ): Promise<QuizFeedbackSummaryEntry[]> {
+    const quiz = await db.query.quizzes.findFirst({
+      where: eq(quizzes.id, quizId),
+    });
+    if (!quiz) {
+      throw new NotFoundError("Quiz");
+    }
+
+    const conditions = [eq(quizFeedback.quizId, quizId)];
+    if (questionId) {
+      conditions.push(eq(quizFeedback.questionId, questionId));
+    }
+
+    const rows = await db
+      .select({
+        questionId: quizFeedback.questionId,
+        type: quizFeedback.type,
+      })
+      .from(quizFeedback)
+      .where(and(...conditions));
+
+    const byQuestion = new Map<string, QuizFeedbackSummaryEntry>();
+    for (const row of rows) {
+      let entry = byQuestion.get(row.questionId);
+      if (!entry) {
+        entry = {
+          questionId: row.questionId,
+          total: 0,
+          counts: { unclear: 0, wrong: 0, other: 0 },
+        };
+        byQuestion.set(row.questionId, entry);
+      }
+      entry.total++;
+      entry.counts[row.type as QuizFeedbackEntry["type"]]++;
+    }
+
+    return Array.from(byQuestion.values());
+  }
+
+  // ─── Admin: Manual Quiz Authoring (#388) ─────────────────────────────────
+
+  /**
+   * Verify the course exists and that `moduleId` is a module a learner can
+   * actually reach.
+   *
+   * The check is conditional on the course having module definitions at
+   * all. A course authored only through the legacy `courseModules` field has
+   * no `modules` array to match against, and rejecting every moduleId there
+   * would make the endpoint unusable for those courses. When definitions do
+   * exist, the match is enforced: a quiz whose moduleId isn't one of them is
+   * content no learner can open, and it would also silently fail
+   * CourseService's publish check, which counts quizzes by module.
+   */
+  private async assertModuleBelongsToCourse(
+    courseId: string,
+    moduleId: string,
+  ): Promise<void> {
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course) {
+      throw new NotFoundError("Course");
+    }
+
+    const modules = (course.modules ?? []) as CourseModuleDefinition[];
+    if (modules.length === 0) return;
+
+    if (!modules.some((module) => module.id === moduleId)) {
+      throw new ValidationError({
+        moduleId: [
+          `Module "${moduleId}" is not one of this course's modules. Create the module first, or use one of: ${modules
+            .map((module) => module.id)
+            .join(", ")}`,
+        ],
+      });
+    }
+  }
+
+  /**
+   * Invalidate everything a course's set of quizzes feeds into.
+   *
+   * Course-wide keys are dropped exactly. The one view deliberately left
+   * alone is `user:modules:<userId>:<courseId>` (the per-user module list
+   * with completion status): it's keyed by user first, so clearing it would
+   * mean fanning a SCAN or a per-enrollee write over the whole roster for
+   * every authoring change. Its own 60s TTL bounds the staleness — the same
+   * tradeoff QuizService.submitQuiz already makes for a submission.
+   */
+  private async invalidateQuizCaches(courseId: string): Promise<void> {
+    const invalidations = await Promise.allSettled([
+      // Both the course-scoped and the all-courses aggregate.
+      cacheInvalidatePattern(cacheKeyPattern("quizzes", "stats")),
+      // Enrollment status derives its module list from quizzes.
+      cacheInvalidatePattern(cacheKeyPattern("user", "enrollment-status")),
+      cacheDel(cacheKey("courses", "detail", courseId)),
+    ]);
+    const failed = invalidations.filter((r) => r.status === "rejected");
+    if (failed.length > 0) {
+      logger.warn(
+        { courseId, failedCount: failed.length },
+        "Post-quiz-write cache invalidation had failures — affected views may serve stale data until their TTL expires",
+      );
+    }
+  }
+
+  /**
+   * Every quiz on a course module, newest first, for the admin authoring UI
+   * (#388). Includes `correctIndex` and the submission count, neither of
+   * which learner-facing endpoints expose.
+   */
+  async listModuleQuizzes(
+    courseId: string,
+    moduleId: string,
+  ): Promise<AdminQuiz[]> {
+    await this.assertModuleBelongsToCourse(courseId, moduleId);
+
+    const rows = await db
+      .select({
+        id: quizzes.id,
+        courseId: quizzes.courseId,
+        moduleId: quizzes.moduleId,
+        questions: quizzes.questions,
+        generatedFor: quizzes.generatedFor,
+        archivedAt: quizzes.archivedAt,
+        metadata: quizzes.metadata,
+        createdAt: quizzes.createdAt,
+        submissionCount: sql<number>`(
+          SELECT count(*)::int FROM ${quizSubmissions}
+          WHERE ${quizSubmissions.quizId} = ${quizzes.id}
+        )`,
+      })
+      .from(quizzes)
+      .where(and(eq(quizzes.courseId, courseId), eq(quizzes.moduleId, moduleId)))
+      .orderBy(desc(quizzes.createdAt));
+
+    return rows.map((row) => this.toAdminQuiz(row));
+  }
+
+  private toAdminQuiz(row: {
+    id: string;
+    courseId: string;
+    moduleId: string;
+    questions: unknown;
+    generatedFor: string | null;
+    archivedAt?: Date | null;
+    metadata?: QuizMetadata | null;
+    createdAt: Date;
+    submissionCount: number;
+  }): AdminQuiz {
+    const questions = (Array.isArray(row.questions) ? row.questions : []) as StoredQuestion[];
+    return {
+      id: row.id,
+      courseId: row.courseId,
+      moduleId: row.moduleId,
+      questions: questions.map((question) => ({
+        id: question.id,
+        text: question.text,
+        options: question.options ?? [],
+        correctIndex: question.correctIndex,
+        ...(question.correctFeedback && {
+          correctFeedback: question.correctFeedback,
+        }),
+        ...(question.incorrectFeedback && {
+          incorrectFeedback: question.incorrectFeedback,
+        }),
+      })),
+      questionCount: questions.length,
+      generatedFor: row.generatedFor,
+      submissionCount: row.submissionCount,
+      archivedAt: row.archivedAt ?? null,
+      metadata: row.metadata ?? {},
+      createdAt: row.createdAt,
+    };
+  }
+
+  /**
+   * Create a hand-authored quiz for a course module (#388).
+   *
+   * `generatedFor` is deliberately left null. AI quizzes are per-learner
+   * (`generateQuiz` looks for an existing quiz matching course + module +
+   * user), so a quiz with a user attached belongs to that one learner. An
+   * admin-authored quiz has no such owner and is course-wide content.
+   *
+   * Questions are stored in the author's order without shuffling. Shuffling
+   * exists to stop a learner pattern-matching an AI-generated set; for
+   * hand-written content the order is usually meaningful (a walkthrough, a
+   * difficulty ramp) and an admin editing a specific question expects to
+   * find it where they put it.
+   */
+  async createModuleQuiz(
+    courseId: string,
+    moduleId: string,
+    questions: AuthoredQuestion[],
+  ): Promise<AdminQuiz> {
+    await this.assertModuleBelongsToCourse(courseId, moduleId);
+
+    const [quiz] = await db
+      .insert(quizzes)
+      .values({ courseId, moduleId, questions })
+      .returning();
+
+    await this.invalidateQuizCaches(courseId);
+    await auditLog("course.quiz.created", {
+      courseId,
+      moduleId,
+      quizId: quiz.id,
+      questionCount: questions.length,
+    });
+    logger.info(
+      { courseId, moduleId, quizId: quiz.id, questionCount: questions.length },
+      "Quiz created by admin",
+    );
+
+    return this.toAdminQuiz({
+      id: quiz.id,
+      courseId: quiz.courseId,
+      moduleId: quiz.moduleId,
+      questions: quiz.questions,
+      generatedFor: quiz.generatedFor,
+      archivedAt: quiz.archivedAt,
+      metadata: quiz.metadata ?? {},
+      createdAt: quiz.createdAt,
+      submissionCount: 0,
+    });
+  }
+
+  /**
+   * Replace a quiz's questions with a hand-authored set (#388).
+   *
+   * The `questions` body is a full replacement, not a patch — sending
+   * `questions` replaces the array wholesale. Partial edits are what the
+   * alternative would be for, and this keeps the stored document consistent
+   * with what's validated.
+   *
+   * This rewrites a quiz learners may already have answered. Existing
+   * submissions keep their recorded score (it's a stored integer, not
+   * recomputed), but a submission made against the old questions can no
+   * longer be explained by the questions now on the quiz. The audit log
+   * records the before/after question counts for exactly that reason.
+   */
+  async updateModuleQuiz(
+    courseId: string,
+    moduleId: string,
+    quizId: string,
+    questions: AuthoredQuestion[],
+  ): Promise<AdminQuiz> {
+    await this.assertModuleBelongsToCourse(courseId, moduleId);
+    const existing = await this.assertQuizInModule(courseId, moduleId, quizId);
+
+    const [updated] = await db
+      .update(quizzes)
+      .set({ questions })
+      .where(eq(quizzes.id, existing.id))
+      .returning();
+
+    await this.invalidateQuizCaches(courseId);
+    await auditLog("course.quiz.updated", {
+      courseId,
+      moduleId,
+      quizId: existing.id,
+      questionCount: questions.length,
+    });
+    logger.info(
+      {
+        courseId,
+        moduleId,
+        quizId: existing.id,
+        previousQuestionCount: (existing.questions as unknown[]).length,
+        questionCount: questions.length,
+      },
+      "Quiz updated by admin",
+    );
+
+    const submissionCount = await this.countSubmissions(existing.id);
+    return this.toAdminQuiz({
+      id: updated.id,
+      courseId: updated.courseId,
+      moduleId: updated.moduleId,
+      questions: updated.questions,
+      generatedFor: updated.generatedFor,
+      archivedAt: updated.archivedAt,
+      metadata: (updated.metadata ?? {}) as QuizMetadata,
+      createdAt: updated.createdAt,
+      submissionCount,
+    });
+  }
+
+  /**
+   * Update an existing quiz in one transaction (#413): replace its questions,
+   * merge metadata, and/or archive it. New questions are validated before
+   * this runs. Archiving hides the quiz from learners without deleting
+   * submissions.
+   */
+  async updateModuleQuizDetails(
+    courseId: string,
+    moduleId: string,
+    quizId: string,
+    body: AdminQuizUpdateBody,
+  ): Promise<AdminQuiz> {
+    await this.assertModuleBelongsToCourse(courseId, moduleId);
+
+    const updated = await db.transaction(async (tx) => {
+      const [existing] = await tx
+        .select()
+        .from(quizzes)
+        .where(eq(quizzes.id, quizId))
+        .for("update");
+
+      if (
+        !existing ||
+        existing.courseId !== courseId ||
+        existing.moduleId !== moduleId
+      ) {
+        throw new NotFoundError("Quiz");
+      }
+
+      const currentMetadata = (existing.metadata ?? {}) as QuizMetadata;
+      const metadata = body.metadata
+        ? { ...currentMetadata, ...body.metadata }
+        : currentMetadata;
+
+      let archivedAt = existing.archivedAt;
+      if (body.archived === true) {
+        archivedAt = existing.archivedAt ?? new Date();
+      } else if (body.archived === false) {
+        archivedAt = null;
+      }
+
+      const [row] = await tx
+        .update(quizzes)
+        .set({
+          ...(body.questions ? { questions: body.questions } : {}),
+          ...(body.metadata ? { metadata } : {}),
+          ...(body.archived !== undefined ? { archivedAt } : {}),
+        })
+        .where(eq(quizzes.id, existing.id))
+        .returning();
+
+      return row;
+    });
+
+    const changes: string[] = [];
+    if (body.questions) changes.push("questions");
+    if (body.metadata) changes.push("metadata");
+    if (body.archived !== undefined) changes.push("archived");
+
+    await this.invalidateQuizCaches(courseId);
+    await auditLog("course.quiz.updated", {
+      courseId,
+      moduleId,
+      quizId: updated.id,
+      questionCount: Array.isArray(updated.questions)
+        ? updated.questions.length
+        : 0,
+      changes,
+    });
+    logger.info(
+      { courseId, moduleId, quizId: updated.id, changes },
+      "Quiz updated by admin",
+    );
+
+    const submissionCount = await this.countSubmissions(updated.id);
+    return this.toAdminQuiz({
+      id: updated.id,
+      courseId: updated.courseId,
+      moduleId: updated.moduleId,
+      questions: updated.questions,
+      generatedFor: updated.generatedFor,
+      archivedAt: updated.archivedAt,
+      metadata: (updated.metadata ?? {}) as QuizMetadata,
+      createdAt: updated.createdAt,
+      submissionCount,
+    });
+  }
+
+  /**
+   * Append one validated question to a quiz (#411). The questions JSONB
+   * array is rewritten inside a row lock so two adds cannot drop each
+   * other. Archived quizzes are rejected — unarchive first.
+   */
+  async addModuleQuizQuestion(
+    courseId: string,
+    moduleId: string,
+    quizId: string,
+    question: AuthoredQuestion,
+  ): Promise<AdminQuiz> {
+    await this.assertModuleBelongsToCourse(courseId, moduleId);
+
+    const updated = await db.transaction(async (tx) => {
+      const [existing] = await tx
+        .select()
+        .from(quizzes)
+        .where(eq(quizzes.id, quizId))
+        .for("update");
+
+      if (
+        !existing ||
+        existing.courseId !== courseId ||
+        existing.moduleId !== moduleId
+      ) {
+        throw new NotFoundError("Quiz");
+      }
+
+      if (existing.archivedAt) {
+        throw new ValidationError({
+          quizId: [
+            "Archived quizzes cannot accept new questions. Unarchive the quiz first.",
+          ],
+        });
+      }
+
+      const questions = (
+        Array.isArray(existing.questions) ? existing.questions : []
+      ) as StoredQuestion[];
+
+      if (questions.some((existingQuestion) => existingQuestion.id === question.id)) {
+        throw new ConflictError(
+          `Question id "${question.id}" already exists on this quiz`,
+        );
+      }
+
+      if (questions.length >= 50) {
+        throw new ValidationError({
+          questions: ["A quiz can have at most 50 questions"],
+        });
+      }
+
+      const [row] = await tx
+        .update(quizzes)
+        .set({ questions: [...questions, question] })
+        .where(eq(quizzes.id, existing.id))
+        .returning();
+
+      return row;
+    });
+
+    await this.invalidateQuizCaches(courseId);
+    await auditLog("course.quiz.question.added", {
+      courseId,
+      moduleId,
+      quizId: updated.id,
+      questionCount: Array.isArray(updated.questions)
+        ? updated.questions.length
+        : 0,
+    });
+    logger.info(
+      { courseId, moduleId, quizId: updated.id, questionId: question.id },
+      "Question added to quiz by admin",
+    );
+
+    const submissionCount = await this.countSubmissions(updated.id);
+    return this.toAdminQuiz({
+      id: updated.id,
+      courseId: updated.courseId,
+      moduleId: updated.moduleId,
+      questions: updated.questions,
+      generatedFor: updated.generatedFor,
+      archivedAt: updated.archivedAt,
+      metadata: (updated.metadata ?? {}) as QuizMetadata,
+      createdAt: updated.createdAt,
+      submissionCount,
+    });
+  }
+
+  /**
+   * Delete a quiz, every submission against it, and any module content
+   * item that points at it (#414, #388).
+   *
+   * Submissions are removed in the same transaction as the quiz row so a
+   * failure cannot leave an orphaned submission or a quiz whose history
+   * was already wiped. Reward history is read from quiz_submissions, so
+   * the counts of what went with the quiz are returned and audit-logged.
+   */
+  async deleteModuleQuiz(
+    courseId: string,
+    moduleId: string,
+    quizId: string,
+  ): Promise<AdminQuizDeleteResult> {
+    await this.assertModuleBelongsToCourse(courseId, moduleId);
+
+    const deleted = await db.transaction(async (tx) => {
+      const [existing] = await tx
+        .select()
+        .from(quizzes)
+        .where(eq(quizzes.id, quizId))
+        .for("update");
+
+      if (
+        !existing ||
+        existing.courseId !== courseId ||
+        existing.moduleId !== moduleId
+      ) {
+        throw new NotFoundError("Quiz");
+      }
+
+      const removedSubmissions = await tx
+        .delete(quizSubmissions)
+        .where(eq(quizSubmissions.quizId, existing.id))
+        .returning({ rewardClaimed: quizSubmissions.rewardClaimed });
+
+      // Module content of type "quiz" can reference this row by id. Drop
+      // those items in the same transaction so the quiz is gone from the
+      // module, not only from the quizzes table.
+      await tx
+        .delete(moduleContent)
+        .where(
+          and(
+            eq(moduleContent.courseId, courseId),
+            eq(moduleContent.moduleId, moduleId),
+            sql`${moduleContent.content}->>'quizId' = ${existing.id}`,
+          ),
+        );
+
+      await tx.delete(quizzes).where(eq(quizzes.id, existing.id));
+
+      return {
+        quiz: existing,
+        submissionsDeleted: removedSubmissions.length,
+        claimedRewardsDeleted: removedSubmissions.filter(
+          (row) => row.rewardClaimed,
+        ).length,
+      };
+    });
+
+    await this.invalidateQuizCaches(courseId);
+    await auditLog("course.quiz.deleted", {
+      courseId,
+      moduleId,
+      quizId: deleted.quiz.id,
+      questionCount: Array.isArray(deleted.quiz.questions)
+        ? deleted.quiz.questions.length
+        : 0,
+      submissionsDeleted: deleted.submissionsDeleted,
+      claimedRewardsDeleted: deleted.claimedRewardsDeleted,
+    });
+    logger.info(
+      {
+        courseId,
+        moduleId,
+        quizId: deleted.quiz.id,
+        submissionsDeleted: deleted.submissionsDeleted,
+      },
+      "Quiz deleted by admin",
+    );
+
+    return {
+      quizId: deleted.quiz.id,
+      courseId,
+      moduleId,
+      submissionsDeleted: deleted.submissionsDeleted,
+      claimedRewardsDeleted: deleted.claimedRewardsDeleted,
+      deletedAt: new Date(),
+    };
+  }
+
+  private async countSubmissions(quizId: string): Promise<number> {
+    const [row] = await db
+      .select({ value: sql<number>`count(*)::int` })
+      .from(quizSubmissions)
+      .where(eq(quizSubmissions.quizId, quizId));
+    return row?.value ?? 0;
+  }
+
+  /**
+   * Load a quiz and assert it belongs to the course + module in the URL.
+   * Scoping by all three means a quiz id from another course reports 404
+   * here rather than being editable through the wrong course's admin URL.
+   */
+  private async assertQuizInModule(
+    courseId: string,
+    moduleId: string,
+    quizId: string,
+  ): Promise<typeof quizzes.$inferSelect> {
+    const [quiz] = await db
+      .select()
+      .from(quizzes)
+      .where(eq(quizzes.id, quizId));
+
+    if (
+      !quiz ||
+      quiz.courseId !== courseId ||
+      quiz.moduleId !== moduleId
+    ) {
+      throw new NotFoundError("Quiz");
+    }
+
+    return quiz;
   }
 
   private createPlaceholderQuestions(

@@ -17,6 +17,34 @@ const READ_TIMEOUT_MS = 10_000;
 const WRITE_TIMEOUT_MS = 30_000;
 
 /**
+ * Read the ledger sequence number out of a Horizon transaction's `ledger`
+ * field.
+ *
+ * Horizon returns this as a plain number, but @stellar/stellar-sdk v13
+ * declares `TransactionRecord["ledger"]` as `CallFunction<LedgerRecord>`
+ * (a lazy-loader function) rather than the number it actually sends, so the
+ * declared type is unusable for arithmetic. Normalize through `unknown`
+ * rather than casting to `number`: that would silence the compiler while
+ * leaving a `() => Promise<...>` at runtime, and `latestLedger - NaN` is
+ * exactly the kind of silent corruption this function exists to prevent.
+ *
+ * Returns null for anything that isn't a usable sequence number, so callers
+ * degrade to "confirmations unknown" instead of reporting a wrong count.
+ */
+function toLedgerSequence(ledger: unknown): number | null {
+  if (typeof ledger === "number" && Number.isFinite(ledger)) return ledger;
+  if (
+    typeof ledger === "object" &&
+    ledger !== null &&
+    "sequence" in ledger &&
+    typeof (ledger as { sequence: unknown }).sequence === "number"
+  ) {
+    return (ledger as { sequence: number }).sequence;
+  }
+  return null;
+}
+
+/**
  * Core Stellar client wrapping Horizon + Soroban RPC interactions.
  * All external calls are protected by circuit breaker, retry, and timeout.
  */
@@ -162,6 +190,62 @@ export class StellarClient {
       logger.error({ err, txHash }, "getTransaction failed");
       throw new StellarError(`Could not fetch transaction ${txHash}`);
     }
+  }
+
+  /**
+   * Look up a submitted transaction on Horizon and report its on-chain
+   * verification status. Used by GET /api/v1/rewards/transactions so users
+   * can verify their reward transactions rather than trusting the stored
+   * tx hash alone.
+   *
+   * Ledger lookup (for confirmation count) is best-effort — if it fails the
+   * transaction's own confirmed/failed status is still returned with
+   * confirmations left null, rather than failing the whole verification.
+   */
+  async getHorizonTransaction(txHash: string): Promise<{
+    status: "confirmed" | "pending" | "failed";
+    ledger: number | null;
+    confirmations: number | null;
+  }> {
+    logger.debug({ requestId: getRequestId(), txHash }, "Verifying Stellar transaction on Horizon");
+    let tx: StellarSdk.Horizon.ServerApi.TransactionRecord;
+    try {
+      tx = await circuitBreakerExecute(
+        () =>
+          stellarRetry.execute(() =>
+            withTimeout(this.horizon.transactions().transaction(txHash).call(), READ_TIMEOUT_MS)
+          ),
+        "read"
+      );
+    } catch (err: any) {
+      const status = err?.response?.status ?? err?.status;
+      if (status === 404) {
+        return { status: "pending", ledger: null, confirmations: null };
+      }
+      logger.warn({ err, txHash }, "Horizon transaction lookup failed — reporting pending");
+      return { status: "pending", ledger: null, confirmations: null };
+    }
+
+    if (!tx.successful) {
+      return { status: "failed", ledger: toLedgerSequence(tx.ledger), confirmations: null };
+    }
+
+    let confirmations: number | null = null;
+    try {
+      const latestLedgers = await withTimeout(
+        this.horizon.ledgers().order("desc").limit(1).call(),
+        READ_TIMEOUT_MS
+      );
+      const latestSequence = toLedgerSequence(latestLedgers.records[0]?.sequence);
+      const txLedger = toLedgerSequence(tx.ledger);
+      if (latestSequence !== null && txLedger !== null) {
+        confirmations = Math.max(latestSequence - txLedger + 1, 0);
+      }
+    } catch (err) {
+      logger.warn({ err, txHash }, "Failed to fetch latest ledger for confirmation count");
+    }
+
+    return { status: "confirmed", ledger: toLedgerSequence(tx.ledger), confirmations };
   }
 
   /** Check Soroban RPC health by calling getLatestLedger. */

@@ -1,7 +1,13 @@
+import { GrantCreditsDto } from './dto/grant-credits.dto';
+import { AdminAuthGuard } from '../../common/guards/admin-auth.guard';
 import type { FastifyRequest, FastifyReply } from "fastify";
 import { rewardService } from "./reward.service.js";
 import type { AuthenticatedRequest } from "../../middleware/auth.js";
-import type { ClaimRewardBody, GetHistoryQuery } from "./reward.types.js";
+import type {
+  ClaimRewardBody,
+  GetHistoryQuery,
+  GetTransactionsQuery,
+} from "./reward.types.js";
 import {
   checkIdempotency,
   storeIdempotentResponse,
@@ -104,6 +110,40 @@ export class RewardController {
     });
   }
 
+  /**
+   * GET /api/v1/rewards/transactions
+   * List the authenticated user's reward-related blockchain transactions,
+   * each with its on-chain verification status against Stellar Horizon.
+   */
+  async transactions(
+    request: FastifyRequest<{ Querystring: GetTransactionsQuery }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { authUser } = request as AuthenticatedRequest;
+    const { page, limit } = request.query;
+    const { transactions, total } = await rewardService.getTransactions(
+      authUser.id,
+      page,
+      limit
+    );
+
+    reply.send({
+      success: true,
+      data: transactions,
+      pagination: { page, limit, total },
+    });
+  }
+
+
+  @Post(':id/credits/grant')
+  async grantCredits(
+    @Param('id') userId: string,
+    @Body() dto: GrantCreditsDto,
+    @Req() req: any,
+  ) {
+    const adminId = req.user?.id; // Assumes admin user is attached to request by guard
+    return this.rewardService.grantCreditsToUser(userId, dto, adminId);
+  }
   /**
    * GET /api/rewards/leaderboard
    * Get the top earners by total credits. No authentication required.

@@ -3,9 +3,17 @@ import { quizService } from "./quiz.service.js";
 import type { AuthenticatedRequest } from "../../middleware/auth.js";
 import type {
   GenerateQuizBody,
+  GenerateQuizBatchBody,
   SubmitQuizBody,
   QuizIdParams,
   QuizStatsQuery,
+  SubmitQuizFeedbackBody,
+  QuizFeedbackSummaryQuery,
+  AdminQuizModuleParams,
+  AdminQuizParams,
+  AdminQuizUpdateBody,
+  AuthoredQuizBody,
+  AuthoredQuestion,
 } from "./quiz.types.js";
 
 export class QuizController {
@@ -22,6 +30,21 @@ export class QuizController {
     const quiz = await quizService.generateQuiz(authUser.id, data);
 
     reply.status(201).send({ success: true, data: quiz });
+  }
+
+  /**
+   * POST /api/v1/quizzes/generate-batch
+   * Generate quizzes for multiple modules of a course in one request (#308).
+   */
+  async generateBatch(
+    request: FastifyRequest<{ Body: GenerateQuizBatchBody }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { authUser } = request as AuthenticatedRequest;
+    const data = request.body;
+    const results = await quizService.generateQuizBatch(authUser.id, data);
+
+    reply.status(201).send({ success: true, data: results });
   }
 
   /**
@@ -68,6 +91,155 @@ export class QuizController {
     const stats = await quizService.getQuizStats(courseId);
 
     reply.send({ success: true, data: stats });
+  }
+
+  /**
+   * POST /api/v1/quizzes/:id/feedback
+   * Submit feedback on a specific quiz question.
+   */
+  async submitFeedback(
+    request: FastifyRequest<{ Params: QuizIdParams; Body: SubmitQuizFeedbackBody }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { authUser } = request as AuthenticatedRequest;
+    const { id } = request.params;
+    const data = request.body;
+    const feedback = await quizService.submitFeedback(authUser.id, id, data);
+
+    reply.status(201).send({ success: true, data: feedback });
+  }
+
+  /**
+   * GET /api/v1/quizzes/:id/feedback/summary
+   * Per-question feedback counts for a quiz (admin only).
+   */
+  async feedbackSummary(
+    request: FastifyRequest<{ Params: QuizIdParams; Querystring: QuizFeedbackSummaryQuery }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id } = request.params;
+    const { questionId } = request.query;
+    const summary = await quizService.getFeedbackSummary(id, questionId);
+
+    reply.send({ success: true, data: summary });
+  }
+
+  // ─── Admin: Manual Quiz Authoring (#388) ─────────────────────────────────
+
+  /**
+   * GET /api/v1/admin/courses/:id/modules/:moduleId/quizzes
+   * Every quiz on a course module, with correct answers and submission
+   * counts (admin only).
+   */
+  async listModuleQuizzes(
+    request: FastifyRequest<{ Params: AdminQuizModuleParams }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id, moduleId } = request.params;
+    const result = await quizService.listModuleQuizzes(id, moduleId);
+
+    reply.send({ success: true, data: result });
+  }
+
+  /**
+   * POST /api/v1/admin/courses/:id/modules/:moduleId/quizzes
+   * Create a hand-authored quiz for a course module (admin only).
+   */
+  async createModuleQuiz(
+    request: FastifyRequest<{
+      Params: AdminQuizModuleParams;
+      Body: AuthoredQuizBody;
+    }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id, moduleId } = request.params;
+    const quiz = await quizService.createModuleQuiz(
+      id,
+      moduleId,
+      request.body.questions,
+    );
+
+    reply.status(201).send({ success: true, data: quiz });
+  }
+
+  /**
+   * PUT /api/v1/admin/courses/:id/modules/:moduleId/quizzes/:quizId
+   * Replace a quiz's questions (admin only).
+   */
+  async updateModuleQuiz(
+    request: FastifyRequest<{
+      Params: AdminQuizParams;
+      Body: AuthoredQuizBody;
+    }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id, moduleId, quizId } = request.params;
+    const quiz = await quizService.updateModuleQuiz(
+      id,
+      moduleId,
+      quizId,
+      request.body.questions,
+    );
+
+    reply.send({ success: true, data: quiz });
+  }
+
+  /**
+   * POST /api/v1/admin/courses/:id/modules/:moduleId/quizzes/:quizId
+   * Replace questions, merge metadata, and/or archive a quiz (admin only, #413).
+   */
+  async updateModuleQuizDetails(
+    request: FastifyRequest<{
+      Params: AdminQuizParams;
+      Body: AdminQuizUpdateBody;
+    }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id, moduleId, quizId } = request.params;
+    const quiz = await quizService.updateModuleQuizDetails(
+      id,
+      moduleId,
+      quizId,
+      request.body,
+    );
+
+    reply.send({ success: true, data: quiz });
+  }
+
+  /**
+   * POST /api/v1/admin/courses/:id/modules/:moduleId/quizzes/:quizId/questions
+   * Append one question to an existing quiz (admin only, #411).
+   */
+  async addModuleQuizQuestion(
+    request: FastifyRequest<{
+      Params: AdminQuizParams;
+      Body: AuthoredQuestion;
+    }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id, moduleId, quizId } = request.params;
+    const quiz = await quizService.addModuleQuizQuestion(
+      id,
+      moduleId,
+      quizId,
+      request.body,
+    );
+
+    reply.status(201).send({ success: true, data: quiz });
+  }
+
+  /**
+   * DELETE /api/v1/admin/courses/:id/modules/:moduleId/quizzes/:quizId
+   * Delete a quiz and its submissions (admin only).
+   */
+  async deleteModuleQuiz(
+    request: FastifyRequest<{ Params: AdminQuizParams }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { id, moduleId, quizId } = request.params;
+    const result = await quizService.deleteModuleQuiz(id, moduleId, quizId);
+
+    reply.send({ success: true, data: result });
   }
 }
 

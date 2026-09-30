@@ -1,4 +1,3 @@
-import type { FastifyInstance } from "fastify";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { buildApp } from "../../src/server.js";
 

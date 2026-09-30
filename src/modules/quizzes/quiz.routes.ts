@@ -1,13 +1,18 @@
 import type { FastifyInstance, FastifySchema } from "fastify";
 import { quizController } from "./quiz.controller.js";
-import { authGuard } from "../../middleware/auth.js";
+import { authGuard, adminGuard } from "../../middleware/auth.js";
 import { validate } from "../../middleware/validation.js";
+import { quizBatchGenerationRateLimit } from "../../middleware/rate-limit.js";
 import { config } from "../../config/index.js";
 import {
   generateQuizSchema,
+  generateQuizBatchSchema,
   submitQuizSchema,
   quizIdParamsSchema,
   quizStatsQuerySchema,
+  submitQuizFeedbackSchema,
+  quizFeedbackSummaryQuerySchema,
+  MAX_BATCH_GENERATE_MODULES,
 } from "./quiz.types.js";
 
 /**
@@ -65,6 +70,40 @@ export async function quizRoutes(app: FastifyInstance): Promise<void> {
     (request, reply) => quizController.generate(request, reply)
   );
 
+  app.post<{ Body: import("./quiz.types.js").GenerateQuizBatchBody }>(
+    "/generate-batch",
+    {
+      // Modules are generated sequentially (#308), so the worst case is
+      // roughly MAX_BATCH_GENERATE_MODULES times a single generation.
+      config: {
+        timeoutMs: config.QUIZ_GENERATION_TIMEOUT_MS * MAX_BATCH_GENERATE_MODULES,
+        rateLimit: quizBatchGenerationRateLimit,
+      },
+      preHandler: [validate({ body: generateQuizBatchSchema })],
+      schema: {
+        description: "Generate quizzes for multiple modules of a course in one request",
+        tags: ["quizzes"],
+        security: [{ bearerAuth: [] }],
+        body: {
+          type: "object",
+          required: ["courseId", "moduleIds"],
+          properties: {
+            courseId: { type: "string", format: "uuid" },
+            moduleIds: {
+              type: "array",
+              items: { type: "string", minLength: 1 },
+              minItems: 1,
+              maxItems: MAX_BATCH_GENERATE_MODULES,
+            },
+            difficulty: { type: "string", enum: ["beginner", "intermediate", "advanced"] },
+            numQuestions: { type: "integer", minimum: 1, maximum: 20 },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => quizController.generateBatch(request, reply)
+  );
+
   app.post<{ Params: { id: string }, Body: import("./quiz.types.js").SubmitQuizBody }>(
     "/:id/submit",
     {
@@ -111,5 +150,51 @@ export async function quizRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => quizController.retry(request, reply)
+  );
+
+  app.post<{ Params: { id: string }, Body: import("./quiz.types.js").SubmitQuizFeedbackBody }>(
+    "/:id/feedback",
+    {
+      preHandler: [
+        validate({ params: quizIdParamsSchema, body: submitQuizFeedbackSchema }),
+      ],
+      schema: {
+        description: "Submit feedback on a specific quiz question (#331)",
+        tags: ["quizzes"],
+        security: [{ bearerAuth: [] }],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+        body: {
+          type: "object",
+          required: ["questionId", "type"],
+          properties: {
+            questionId: { type: "string", minLength: 1, maxLength: 100 },
+            type: { type: "string", enum: ["unclear", "wrong", "other"] },
+            comment: { type: "string", maxLength: 2000 },
+          },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => quizController.submitFeedback(request, reply)
+  );
+
+  app.get<{ Params: { id: string }, Querystring: import("./quiz.types.js").QuizFeedbackSummaryQuery }>(
+    "/:id/feedback/summary",
+    {
+      preHandler: [
+        adminGuard,
+        validate({ params: quizIdParamsSchema, querystring: quizFeedbackSummaryQuerySchema }),
+      ],
+      schema: {
+        description: "Per-question feedback counts for a quiz (admin only) (#331)",
+        tags: ["quizzes", "admin"],
+        security: [{ bearerAuth: [] }],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+        querystring: {
+          type: "object",
+          properties: { questionId: { type: "string", minLength: 1, maxLength: 100 } },
+        },
+      } as FastifySchema,
+    },
+    (request, reply) => quizController.feedbackSummary(request, reply)
   );
 }

@@ -16,11 +16,17 @@ export const getLeaderboardSchema = z.object({
   limit: z.coerce.number().int().min(1).max(50).default(50),
 });
 
+export const getTransactionsSchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(50).default(20),
+});
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 export type ClaimRewardBody = z.infer<typeof claimRewardSchema>;
 export type GetHistoryQuery = z.infer<typeof getHistorySchema>;
 export type GetLeaderboardQuery = z.infer<typeof getLeaderboardSchema>;
+export type GetTransactionsQuery = z.infer<typeof getTransactionsSchema>;
 
 export interface RewardClaimResult {
   submissionId: string;
@@ -48,4 +54,38 @@ export interface LeaderboardEntry {
 export interface LeaderboardResponse {
   entries: LeaderboardEntry[];
   generatedAt: Date;
+}
+
+/** One row of GET /api/v1/rewards/transactions — a reward-related on-chain
+ * transaction with its verification status against Stellar Horizon.
+ * "pending" covers both "not yet indexed" and "Horizon lookup failed" —
+ * callers should treat it as "not yet confirmed", not "known bad". */
+export interface RewardTransaction {
+  id: string;
+  courseTitle: string;
+  amount: number;
+  txHash: string;
+  status: "confirmed" | "pending" | "failed";
+  blockHeight: number | null;
+  confirmationCount: number | null;
+  submittedAt: Date;
+}
+
+/** One row of GET /api/v1/rewards/pending (#327) — a reward claim that
+ * hasn't landed yet, either sitting in the retry queue or waiting on
+ * indexer confirmation. */
+export interface PendingRewardItem {
+  submissionId: string;
+  courseTitle: string;
+  amount: number;
+  /** `queued` = waiting in the retry processor's queue.
+   * `awaiting_confirmation` = the Stellar tx was submitted but the sequence
+   * error left it unconfirmed, so credits land once it indexes. */
+  status: "queued" | "awaiting_confirmation";
+  /** 1-based place in the retry queue, or null when not queued. */
+  queuePosition: number | null;
+  /** Rough seconds until the retry processor reaches this claim. Null when
+   * not queued. */
+  estimatedProcessingSeconds: number | null;
+  submittedAt: Date;
 }

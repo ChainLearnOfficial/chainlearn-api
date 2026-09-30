@@ -4,6 +4,7 @@ import { authGuard } from "../../middleware/auth.js";
 import { validate } from "../../middleware/validation.js";
 import {
   batchMintCredentialSchema,
+  certificateIdParamsSchema,
   mintCredentialSchema,
 } from "./credential.types.js";
 import { batchMintRateLimit } from "../../middleware/rate-limit.js";
@@ -75,5 +76,19 @@ export async function credentialRoutes(app: FastifyInstance): Promise<void> {
       } as FastifySchema,
     },
     (request, reply) => credentialController.list(request, reply)
+  );
+
+  app.get<{ Params: { id: string } }>(
+    "/:id/certificate",
+    {
+      preHandler: [validate({ params: certificateIdParamsSchema })],
+      schema: {
+        description: "Download one of your certificates as a JSON document",
+        tags: ["credentials"],
+        security: [{ bearerAuth: [] }],
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      } as FastifySchema,
+    },
+    (request, reply) => credentialController.downloadCertificate(request, reply)
   );
 }

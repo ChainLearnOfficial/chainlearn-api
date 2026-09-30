@@ -20,6 +20,10 @@ export const batchMintCredentialSchema = z.object({
     .max(20, "Too many submissions"),
 });
 
+export const certificateIdParamsSchema = z.object({
+  id: z.string().uuid("Invalid credential ID"),
+});
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 export type MintCredentialBody = z.infer<typeof mintCredentialSchema>;
@@ -44,6 +48,20 @@ export interface CredentialListItem {
   mintedAt: Date;
 }
 
+/** A earned certificate with its verification and download links (#371). */
+export interface CertificateItem {
+  credentialId: string;
+  courseId: string;
+  courseTitle: string;
+  score: number;
+  issuedAt: Date;
+  nftAssetCode: string | null;
+  nftIssuer: string | null;
+  /** Public explorer link to the on-chain mint transaction, or null when none. */
+  verificationUrl: string | null;
+  downloadUrl: string;
+}
+
 export interface BatchMintResultItem {
   courseId: string;
   submissionId: string;
@@ -53,4 +71,25 @@ export interface BatchMintResultItem {
     code: string;
     message: string;
   };
+}
+
+/** Result of GET /api/v1/courses/:id/completion-certificate (#387).
+ *  `pdf` is the rendered document; the remaining fields describe it and are
+ *  used for the response's Content-Disposition filename and metadata. */
+export interface CompletionCertificate {
+  pdf: Buffer;
+  /** Stable per (user, course), printed on the document. */
+  certificateId: string;
+  userName: string;
+  stellarAddress: string;
+  courseId: string;
+  courseTitle: string;
+  courseDifficulty: string;
+  /** ISO date (YYYY-MM-DD) the course was completed. */
+  completedOn: string;
+  /** e.g. "4 of 4". */
+  modulesCompleted: string;
+  onChainVerificationUrl: string | null;
+  /** True when the PDF was served from cache rather than re-rendered. */
+  cached: boolean;
 }

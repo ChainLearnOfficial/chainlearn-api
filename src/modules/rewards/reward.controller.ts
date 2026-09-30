@@ -64,7 +64,7 @@ export class RewardController {
         statusCode,
         {
           success: false,
-          error: "Failed to process reward claim",
+          error: { code: "REQUEST_FAILED", message: "Failed to process reward claim" },
         }
       );
 

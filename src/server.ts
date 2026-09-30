@@ -2,7 +2,6 @@ import { initTracing, shutdownTracing } from "./tracing.js";
 
 import { createReadStream } from "node:fs";
 import { access } from "node:fs/promises";
-import path from "node:path";
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
@@ -48,6 +47,7 @@ import {
 import { processRewardClaim } from "./modules/rewards/reward.service.js";
 import { warmCourseCache } from "./cache/warmer.js";
 import { runWithRequestContext } from "./utils/request-context.js";
+import { resolveSafeStaticPath } from "./utils/safe-static-path.js";
 import { checkServiceHealth } from "./utils/service-health.js";
 
 // Versioned route modules
@@ -283,7 +283,17 @@ async function buildApp() {
     "/uploads/avatars/:filename",
     async (request, reply) => {
       const { filename } = request.params;
-      if (!/^[A-Za-z0-9_-]+\\.(jpg|png|webp)$/.test(filename)) {
+      // #486: previously `\\.` in this regex literal matched a literal
+      // backslash character, not an escaped dot, so this route 404'd on
+      // every legitimate filename. Fixed to `\.`, and path resolution is
+      // now handled by resolveSafeStaticPath (basename + within-directory
+      // check) rather than a bare path.join of the raw param.
+      const filePath = resolveSafeStaticPath(
+        filename,
+        config.AVATAR_UPLOAD_DIR,
+        /^[A-Za-z0-9_-]+\.(jpg|png|webp)$/,
+      );
+      if (!filePath) {
         return reply.status(404).send({
           statusCode: 404,
           error: "NOT_FOUND",
@@ -291,7 +301,6 @@ async function buildApp() {
         });
       }
 
-      const filePath = path.join(path.resolve(config.AVATAR_UPLOAD_DIR), filename);
       try {
         await access(filePath);
       } catch {

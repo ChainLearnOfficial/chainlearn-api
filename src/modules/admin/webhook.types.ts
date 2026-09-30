@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { validateWebhookUrl } from "../../utils/ssrf-guard.js";
 
 // ─── Webhook Event Types ────────────────────────────────────────────────────
 
@@ -28,13 +29,29 @@ export interface WebhookSignature {
 
 // ─── Request Schemas ────────────────────────────────────────────────────────
 
+// Rejects loopback/private/link-local/cloud-metadata hosts so a webhook
+// can't be used to make the server request its own internal network (#487).
+// See src/utils/ssrf-guard.ts for exactly what's blocked and why.
+const webhookUrlSchema = z
+  .string()
+  .url("Invalid URL")
+  .superRefine((url, ctx) => {
+    const result = validateWebhookUrl(url);
+    if (!result.valid) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Webhook URL rejected: ${result.reason}`,
+      });
+    }
+  });
+
 export const createWebhookSchema = z.object({
-  url: z.string().url("Invalid URL"),
+  url: webhookUrlSchema,
   events: z.array(z.string()).min(1, "At least one event is required"),
 });
 
 export const updateWebhookSchema = z.object({
-  url: z.string().url("Invalid URL").optional(),
+  url: webhookUrlSchema.optional(),
   events: z.array(z.string()).min(1).optional(),
   active: z.boolean().optional(),
 });

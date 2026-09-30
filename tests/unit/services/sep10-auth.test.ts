@@ -12,6 +12,13 @@ vi.mock("../../../src/config/redis.js", () => ({
   redis: {
     setex: vi.fn(),
     getdel: vi.fn(),
+    // Account-level lockout (#488) checks/records against these on every
+    // createChallenge/verifyChallenge call; ttl() returning -2 (key absent)
+    // keeps these tests exercising an address that is never locked out.
+    ttl: vi.fn().mockResolvedValue(-2),
+    incr: vi.fn().mockResolvedValue(1),
+    expire: vi.fn(),
+    del: vi.fn(),
   },
 }));
 

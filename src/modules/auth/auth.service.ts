@@ -94,7 +94,8 @@ export class AuthService {
     let storedChallenge: { challengeEnvelope: string };
     try {
       storedChallenge = JSON.parse(challengeData);
-    } catch {
+    } catch (err) {
+      logger.debug({ err, stellarAddress }, "Stored challenge is not valid JSON");
       throw new UnauthorizedError("Corrupt stored challenge");
     }
 
@@ -109,7 +110,8 @@ export class AuthService {
         storedChallenge.challengeEnvelope,
         getNetworkPassphrase()
       ) as StellarSdk.Transaction;
-    } catch {
+    } catch (err) {
+      logger.debug({ err, stellarAddress }, "Stored challenge envelope failed to decode from XDR");
       throw new UnauthorizedError("Corrupt stored challenge");
     }
     const issuedNonceOp = issuedTransaction.operations.find(
@@ -127,7 +129,8 @@ export class AuthService {
         signedChallenge,
         getNetworkPassphrase()
       ) as StellarSdk.Transaction;
-    } catch {
+    } catch (err) {
+      logger.debug({ err, stellarAddress }, "Signed challenge envelope failed to decode from XDR");
       throw new UnauthorizedError("Invalid transaction envelope");
     }
 

@@ -2,6 +2,7 @@ import type { FastifyRateLimitOptions, RateLimitOptions } from "@fastify/rate-li
 import type { FastifyRequest } from "fastify";
 import { config } from "../config/index.js";
 import type { AuthenticatedRequest } from "./auth.js";
+import { auditLog } from "../audit/index.js";
 
 const errorResponseBuilder = (
   _request: FastifyRequest,
@@ -22,6 +23,15 @@ export function rateLimitOptions(): FastifyRateLimitOptions {
       return authReq.authUser?.id ?? request.ip;
     },
     errorResponseBuilder,
+    onExceeded: (request: FastifyRequest) => {
+      const authReq = request as AuthenticatedRequest;
+      auditLog("rate_limit.exceeded", {
+        ip: request.ip,
+        userId: authReq.authUser?.id,
+        url: request.url,
+        method: request.method,
+      }).catch(() => {});
+    },
   };
 }
 

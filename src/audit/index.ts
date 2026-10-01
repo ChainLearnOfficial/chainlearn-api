@@ -59,7 +59,9 @@ export type AuditEvent =
   | "webhook.created"
   | "webhook.updated"
   | "webhook.deleted"
-  | "webhook.secret_rotated";
+  | "webhook.secret_rotated"
+  | "rate_limit.exceeded"
+  | "cache.invalidated";
 
 export interface AuditFields {
   userId?: string;

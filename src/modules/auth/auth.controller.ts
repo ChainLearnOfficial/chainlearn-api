@@ -10,6 +10,7 @@ import { revokeToken } from "../../middleware/auth.js";
 import type { AuthenticatedRequest } from "../../middleware/auth.js";
 import { sessionService } from "./session.service.js";
 import { logger } from "../../utils/logger.js";
+import { auditLog } from "../../audit/index.js";
 import type {
   ChallengeBody,
   VerifyBody,
@@ -49,11 +50,20 @@ export class AuthController {
   ): Promise<void> {
     const { stellarAddress, challengeId, signedChallenge } = request.body;
 
-    const authResult = await authService.verifyChallenge(
-      stellarAddress,
-      challengeId,
-      signedChallenge
-    );
+    let authResult;
+    try {
+      authResult = await authService.verifyChallenge(
+        stellarAddress,
+        challengeId,
+        signedChallenge
+      );
+    } catch (err) {
+      auditLog("auth.login_failed", {
+        ip: request.ip,
+        stellarAddress,
+      }).catch(() => {});
+      throw err;
+    }
 
     // Generate JWT — jti enables per-token revocation via the Redis denylist.
     const token = request.server.jwt.sign(
@@ -71,6 +81,11 @@ export class AuthController {
       authResult.user.id,
       authResult.user.stellarAddress
     );
+
+    auditLog("auth.login", {
+      userId: authResult.user.id,
+      ip: request.ip,
+    }).catch(() => {});
 
     reply.send({
       success: true,

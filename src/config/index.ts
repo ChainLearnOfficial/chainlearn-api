@@ -54,6 +54,22 @@ const envSchema = z.object({
       "JWT_SECRET must be a real secret, not a placeholder"
     ),
 
+  // JWT key rotation — comma-separated list of previous secrets. Tokens
+  // signed with any of these are still accepted, but new tokens are always
+  // signed with JWT_SECRET. Set this when rotating the signing key so old
+  // tokens remain valid during the transition window.
+  JWT_SECRET_PREVIOUS: z
+    .string()
+    .optional()
+    .transform((val) =>
+      val
+        ? val
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : undefined,
+    ),
+
   // Stellar
   STELLAR_NETWORK: z.enum(["testnet", "mainnet"]).default("testnet"),
   STELLAR_HORIZON_URL: z.string().url(),
@@ -171,17 +187,13 @@ function loadConfig(): Env {
           fieldErrors: result.error.flatten().fieldErrors,
         },
         "Missing env vars in test mode (expected if mocking config)"
-      // are preserved; only non-critical vars get obviously-fake test defaults.
+      );
       // Every field is passed through from process.env (populated above by
       // real environment variables, then .env.test, in that precedence)
       // consistently, not just the ones that happened to need a fallback —
       // config.NODE_ENV itself was previously dropped this way and silently
       // defaulted to "development", which meant logger.ts's test-mode branch
       // never actually activated during a test run.
-      console.warn(
-        "Missing env vars in test mode (expected if mocking config):",
-        result.error.flatten().fieldErrors
-      );
       return envSchema.parse({
         DATABASE_URL: process.env.DATABASE_URL,
         REDIS_URL: process.env.REDIS_URL || "redis://localhost:6379",
@@ -256,12 +268,21 @@ export const config: Env = ensureConfig();
  *
  * When CORS_ORIGINS is set it wins outright. Otherwise this falls back to the
  * exact per-environment defaults the server used before CORS_ORIGINS existed —
- * chainlearn.io in production, localhost:3000 everywhere else — so an unset
- * CORS_ORIGINS is a no-op change in behavior.
+ * chainlearn.io in production, localhost:3000 in development. For test/CI
+ * environments, CORS_ORIGINS must be explicitly set; a missing value falls
+ * back to localhost:3000 with a warning.
  */
 export const corsOrigins: string[] =
   config.CORS_ORIGINS && config.CORS_ORIGINS.length > 0
     ? config.CORS_ORIGINS
     : config.NODE_ENV === "production"
       ? ["https://chainlearn.io"]
-      : ["http://localhost:3000"];
+      : (() => {
+          if (config.NODE_ENV === "test") {
+            logger.warn(
+              "CORS_ORIGINS not set in test/CI environment — defaulting to localhost:3000. " +
+              "Set CORS_ORIGINS explicitly in staging/CI for stricter control."
+            );
+          }
+          return ["http://localhost:3000"];
+        })();

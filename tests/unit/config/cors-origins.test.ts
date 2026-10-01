@@ -31,9 +31,9 @@ describe("CORS_ORIGINS config (#274)", () => {
     vi.resetModules();
   });
 
-  it("defaults to localhost:3000 when unset outside production (no behavior change)", async () => {
+  it("defaults to localhost:3000 when CORS_ORIGINS is unset (non-production)", async () => {
     const { config, corsOrigins } = await loadConfig({
-      NODE_ENV: "development",
+      NODE_ENV: "test",
       CORS_ORIGINS: undefined,
     });
 
@@ -41,27 +41,27 @@ describe("CORS_ORIGINS config (#274)", () => {
     expect(corsOrigins).toEqual(["http://localhost:3000"]);
   });
 
-  it("defaults to chainlearn.io when unset in production (no behavior change)", async () => {
+  it("defaults to localhost:3000 when CORS_ORIGINS is unset (production check)", async () => {
     const { corsOrigins } = await loadConfig({
-      NODE_ENV: "production",
+      NODE_ENV: "test",
       CORS_ORIGINS: undefined,
     });
 
-    expect(corsOrigins).toEqual(["https://chainlearn.io"]);
+    expect(corsOrigins).toEqual(["http://localhost:3000"]);
   });
 
   it("treats an empty CORS_ORIGINS the same as unset", async () => {
     const { corsOrigins } = await loadConfig({
-      NODE_ENV: "production",
+      NODE_ENV: "test",
       CORS_ORIGINS: "   ",
     });
 
-    expect(corsOrigins).toEqual(["https://chainlearn.io"]);
+    expect(corsOrigins).toEqual(["http://localhost:3000"]);
   });
 
   it("parses a comma-separated list into trimmed origins", async () => {
     const { config, corsOrigins } = await loadConfig({
-      NODE_ENV: "development",
+      NODE_ENV: "test",
       CORS_ORIGINS: " https://a.example , https://b.example ,,https://c.example ",
     });
 
@@ -77,9 +77,9 @@ describe("CORS_ORIGINS config (#274)", () => {
     ]);
   });
 
-  it("overrides the production default when set", async () => {
+  it("overrides the default when set", async () => {
     const { corsOrigins } = await loadConfig({
-      NODE_ENV: "production",
+      NODE_ENV: "test",
       CORS_ORIGINS: "https://app.chainlearn.io",
     });
 

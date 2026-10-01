@@ -262,16 +262,6 @@ export class AdminUsersService {
       // Re-read the current balance only for the error message — this read
       // has no bearing on the deduction decision itself, which the atomic
       // UPDATE above already made.
-      const [current] = await db
-        .select({ credits: users.credits })
-        .from(users)
-        .where(eq(users.id, userId));
-
-      throw new ValidationError({
-        amount: [
-          current
-            ? `Insufficient credits. User has ${current.credits} but deduction of ${amount} was requested`
-            : `Insufficient credits for deduction of ${amount}`,
       const [user] = await db
         .select({ credits: users.credits })
         .from(users)

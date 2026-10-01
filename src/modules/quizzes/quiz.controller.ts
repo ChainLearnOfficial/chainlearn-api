@@ -244,23 +244,6 @@ export class QuizController {
   }
 
   /**
-   * POST /api/v1/admin/courses/:id/modules/:moduleId/quizzes/:quizId/archive
-   * Archive (or unarchive) a quiz via its own endpoint (admin only, #416).
-   */
-  async archiveModuleQuiz(
-    request: FastifyRequest<{
-      Params: AdminQuizParams;
-      Body: ArchiveModuleQuizBody;
-    }>,
-    reply: FastifyReply
-  ): Promise<void> {
-    const { id, moduleId, quizId } = request.params;
-    const quiz = await quizService.archiveModuleQuiz(
-      id,
-      moduleId,
-      quizId,
-      request.body.archived,
-    );
    * Archive a quiz without deleting it (admin only, #416). Thin wrapper
    * around the same archive path updateModuleQuizDetails already supports.
    */

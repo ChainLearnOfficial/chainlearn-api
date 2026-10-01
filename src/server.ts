@@ -6,6 +6,7 @@ import { config } from "./config/index.js";
 import { logger } from "./utils/logger.js";
 import { registerErrorHandler } from "./middleware/error-handler.js";
 import { rateLimitOptions } from "./middleware/rate-limit.js";
+import { listBlockedIps, clearIpBlock } from "./middleware/auth-brute-force.js";
 
 // Route modules
 import { authRoutes } from "./modules/auth/auth.routes.js";
@@ -45,6 +46,19 @@ async function buildApp() {
 
   await app.register(rateLimit, rateLimitOptions());
 
+  // ─── CSRF Protection ───────────────────────────────────────────────────
+  // Auth uses Bearer tokens (Authorization header), which are CSRF-safe.
+  // credentials: true in CORS only matters if auth moves to cookies.
+  // If cookie-based auth is added, enable @fastify/csrf-protection here:
+  //
+  //   import csrf from "@fastify/csrf-protection";
+  //   await app.register(csrf, {
+  //     sessionPlugin: "@fastify/cookie",
+  //     csrfOpts: { ignoreMethods: ["GET", "HEAD", "OPTIONS"] },
+  //   });
+  //
+  // Until then, no CSRF token generation or validation is needed.
+
   // ─── Error Handler ──────────────────────────────────────────────────────
   registerErrorHandler(app);
 
@@ -54,6 +68,20 @@ async function buildApp() {
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
   }));
+
+  // ─── Admin: Auth IP Blocks ─────────────────────────────────────────────
+  app.get("/admin/auth-blocks", async (_request, reply) => {
+    const blocks = await listBlockedIps();
+    reply.send({ blocks });
+  });
+
+  app.delete<{ Params: { ip: string } }>(
+    "/admin/auth-blocks/:ip",
+    async (request, reply) => {
+      const cleared = await clearIpBlock(request.params.ip);
+      reply.send({ cleared });
+    }
+  );
 
   // ─── API Routes ─────────────────────────────────────────────────────────
   await app.register(authRoutes, { prefix: "/api/auth" });

@@ -180,12 +180,45 @@ async function buildApp() {
   await app.register(cors, {
     origin: corsOrigins,
     credentials: true,
+    hook: "onRequest",
   });
 
+  app.addHook("onRequest", (request, _reply, done) => {
+    const origin = request.headers.origin;
+    if (origin) {
+      logger.debug(
+        { origin, allowed: corsOrigins.includes(origin) },
+        "CORS request"
+      );
+    }
+    done();
+  });
+
+  const previousSecrets = config.JWT_SECRET_PREVIOUS ?? [];
   await app.register(jwt, {
     secret: config.JWT_SECRET,
     sign: { expiresIn: "24h" },
   });
+
+  // Support key rotation: verify tokens against previous secrets when the
+  // current secret fails. New tokens are always signed with the latest secret.
+  if (previousSecrets.length > 0) {
+    const originalVerify = app.jwt.verify.bind(app.jwt);
+    app.jwt.verify = function (token: string, ...args: any[]) {
+      try {
+        return originalVerify(token, ...args);
+      } catch (err) {
+        for (const prevSecret of previousSecrets) {
+          try {
+            return originalVerify(token, { secret: prevSecret }, ...args.slice(1));
+          } catch {
+            // try next
+          }
+        }
+        throw err;
+      }
+    };
+  }
 
   await app.register(rateLimit, rateLimitOptions());
 

@@ -8,6 +8,7 @@ import { RateLimitError, UnauthorizedError } from "../../utils/errors.js";
 import { logger } from "../../utils/logger.js";
 import { eq } from "drizzle-orm";
 import type { ChallengeResponse, AuthResponse } from "./auth.types.js";
+import { safeEqual } from "../../utils/crypto.js";
 import {
   checkAuthLockout,
   clearAuthFailures,
@@ -230,7 +231,7 @@ export class AuthService {
       throw new UnauthorizedError("Invalid challenge transaction: missing manageData operation");
     }
     const submittedNonce = Buffer.from(submittedNonceOp.value).toString("base64");
-    if (submittedNonce !== issuedNonce) {
+    if (!safeEqual(submittedNonce, issuedNonce)) {
       throw new UnauthorizedError("Challenge transaction does not match the issued challenge");
     }
 

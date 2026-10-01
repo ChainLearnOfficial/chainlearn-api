@@ -6,6 +6,7 @@ import { eq } from "drizzle-orm";
 import { logger } from "../utils/logger.js";
 import { redis } from "../config/redis.js";
 import { sessionService } from "../modules/auth/session.service.js";
+import { safeEqual } from "../utils/crypto.js";
 
 const JWT_DENYLIST_PREFIX = "jwt:revoked:";
 
@@ -81,7 +82,7 @@ export async function authGuard(
 
     // Validate that the stellarAddress in the JWT matches the database record
     // This provides defense-in-depth against token forgery scenarios
-    if (decoded.stellarAddress !== user.stellarAddress) {
+    if (!safeEqual(decoded.stellarAddress, user.stellarAddress)) {
       throw new UnauthorizedError("Token stellarAddress mismatch");
     }
 

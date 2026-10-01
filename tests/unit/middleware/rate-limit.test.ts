@@ -84,7 +84,7 @@ describe("Rate Limit Middleware", () => {
 
       const key = authRateLimit.keyGenerator!(mockRequest);
 
-      expect(key).toBe("10.0.0.1");
+      expect(key).toBe("10.0.0.1:auth");
     });
   });
 });

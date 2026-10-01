@@ -97,7 +97,8 @@ export async function authGuard(
     }
   } catch (err) {
     if (err instanceof UnauthorizedError) throw err;
-    throw new UnauthorizedError("Invalid or expired token");
+    logger.error({ err }, "Auth guard infrastructure error");
+    throw err;
   }
 }
 

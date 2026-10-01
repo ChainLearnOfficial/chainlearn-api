@@ -144,3 +144,37 @@ export interface AuthUser {
 export interface AuthenticatedRequest extends FastifyRequest {
   authUser: AuthUser;
 }
+
+/**
+ * Admin guard — verifies the request carries the static ADMIN_API_KEY in the
+ * Authorization header as `Bearer <key>`. Intentionally separate from the
+ * user JWT flow so admin credentials can be rotated independently.
+ *
+ * Timing-safe comparison via `crypto.timingSafeEqual` prevents timing attacks
+ * that could be used to brute-force the key character-by-character.
+ */
+import crypto from "node:crypto";
+import { config } from "../config/index.js";
+
+export async function adminGuard(
+  request: FastifyRequest,
+  _reply: FastifyReply,
+): Promise<void> {
+  const authHeader = request.headers.authorization ?? "";
+  const token = authHeader.startsWith("Bearer ")
+    ? authHeader.slice(7)
+    : "";
+
+  // Always run the comparison even when token is empty to prevent early-exit
+  // timing differences from leaking whether the key exists.
+  const expected = Buffer.from(config.ADMIN_API_KEY, "utf8");
+  const provided = Buffer.from(token, "utf8");
+
+  const valid =
+    provided.length === expected.length &&
+    crypto.timingSafeEqual(provided, expected);
+
+  if (!valid) {
+    throw new UnauthorizedError("Invalid or missing admin API key");
+  }
+}

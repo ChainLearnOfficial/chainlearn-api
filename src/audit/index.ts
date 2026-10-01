@@ -3,7 +3,9 @@ import { db } from "../config/database.js";
 import { auditLogs } from "../database/schema.js";
 import { getRequestId } from "../utils/request-context.js";
 
-type AuditEvent =
+// ─── Types ───────────────────────────────────────────────────────────────────
+
+export type AuditEvent =
   | "quiz.submitted"
   | "quiz.retried"
   | "reward.claimed"
@@ -59,7 +61,7 @@ type AuditEvent =
   | "webhook.deleted"
   | "webhook.secret_rotated";
 
-interface AuditFields {
+export interface AuditFields {
   userId?: string;
   submissionId?: string;
   credentialId?: string;

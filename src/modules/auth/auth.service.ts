@@ -7,6 +7,7 @@ import { getNetworkPassphrase } from "../../config/stellar.js";
 import { RateLimitError, UnauthorizedError } from "../../utils/errors.js";
 import { logger } from "../../utils/logger.js";
 import { eq } from "drizzle-orm";
+import { auditLog } from "../../audit/index.js";
 import type { ChallengeResponse, AuthResponse } from "./auth.types.js";
 import {
   checkAuthLockout,
@@ -280,6 +281,8 @@ export class AuthService {
     if (isNewUser) {
       logger.info({ stellarAddress, userId: user.id }, "New user created");
     }
+
+    auditLog("auth.login", { userId: user.id, stellarAddress });
 
     return {
       token: "", // Will be set by controller

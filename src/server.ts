@@ -220,12 +220,8 @@ async function buildApp() {
       (c) => c.status === "fulfilled",
     );
 
-    const status = allHealthy ? "healthy" : "degraded";
-
-    return reply.status(allHealthy ? 200 : 503).send({
-      status,
-      timestamp: new Date().toISOString(),
-      uptime: process.uptime(),
+    return reply.status(ready ? 200 : 503).send({
+      status: ready ? "ready" : "not_ready",
       checks: {
         database: dbCheck.status === "fulfilled" ? "ok" : "error",
         redis: redisCheck.status === "fulfilled" ? "ok" : "error",
@@ -336,7 +332,9 @@ async function buildApp() {
     );
 
     return reply.status(allHealthy ? 200 : 503).send({
-      status: allHealthy ? "ready" : "not_ready",
+      status: allHealthy ? "healthy" : "degraded",
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
       checks: {
         database: dbCheck.status === "fulfilled" ? "ok" : "error",
         redis: redisCheck.status === "fulfilled" ? "ok" : "error",
@@ -344,6 +342,11 @@ async function buildApp() {
         soroban: sorobanCheck.status === "fulfilled" ? "ok" : "error",
       },
     });
+  });
+
+  app.get("/metrics", { preHandler: authGuard }, async (_request, reply) => {
+    reply.header("Content-Type", registry.contentType);
+    return reply.send(await registry.metrics());
   });
 
   // ─── API Routes ─────────────────────────────────────────────────────────
@@ -402,6 +405,7 @@ async function start() {
       clearInterval(cacheWarmInterval);
     }
     await app.close();
+    await stopAuditLogger();
     await closeDatabase();
     await closeRedis();
     await shutdownTracing();

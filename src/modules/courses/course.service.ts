@@ -209,10 +209,11 @@ export class CourseService {
         conditions.push(eq(courses.difficulty, query.difficulty));
       }
       if (search) {
+        const escaped = search.replace(/[%_]/g, "\\$&");
         conditions.push(
           or(
-            ilike(courses.title, `%${search}%`),
-            ilike(courses.description, `%${search}%`),
+            ilike(courses.title, `%${escaped}%`),
+            ilike(courses.description, `%${escaped}%`),
           )!,
         );
       }

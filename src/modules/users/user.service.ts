@@ -1,16 +1,61 @@
-import { eq, count, sql } from "drizzle-orm";
+import crypto from "node:crypto";
+import { mkdir, rm, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { eq, count, sql, desc, and, lt, isNull, inArray, ne, notInArray, type SQL } from "drizzle-orm";
+import type { AnyPgColumn } from "drizzle-orm/pg-core";
 import { db } from "../../config/database.js";
 import {
   users,
   enrollments,
   quizSubmissions,
   credentials,
+  courses,
+  quizzes,
+  type CourseModuleDefinition,
 } from "../../database/schema.js";
-import { NotFoundError } from "../../utils/errors.js";
-import type { UpdateProfileBody, UserProfile, UserProgress } from "./user.types.js";
+import { config } from "../../config/index.js";
+import { NotFoundError, ValidationError } from "../../utils/errors.js";
+import { logger } from "../../utils/logger.js";
+import { auditLog } from "../../audit/index.js";
+import {
+  cacheGet,
+  cacheSet,
+  cacheDel,
+  cacheInvalidatePattern,
+  cacheKey,
+  cacheKeyPattern,
+} from "../../cache/index.js";
+import {
+  DIFFICULTY_ORDER,
+  rankCourses,
+  type CandidateCourse,
+  type ScoredCourse,
+} from "./recommendations.js";
+import type {
+  ActivityQuery,
+  AvatarUpload,
+  UpdateProfileBody,
+  UserActivity,
+  UserActivityPage,
+  UserProfile,
+  UserProgress,
+  UserDataExport,
+  LearningStats,
+  UserCourseProgress,
+  UserCourseQuizScore,
+} from "./user.types.js";
 
 export class UserService {
   async getProfile(userId: string): Promise<UserProfile> {
+    const namespace = "user";
+    const cacheKeyString = cacheKey(namespace, "profile", userId);
+
+    const cachedProfile = await cacheGet<UserProfile>(
+      namespace,
+      cacheKeyString,
+    );
+    if (cachedProfile) return cachedProfile;
+
     const user = await db.query.users.findFirst({
       where: eq(users.id, userId),
     });
@@ -19,10 +64,11 @@ export class UserService {
       throw new NotFoundError("User");
     }
 
-    return {
+    const profile: UserProfile = {
       id: user.id,
       stellarAddress: user.stellarAddress,
       displayName: user.displayName,
+      avatarUrl: user.avatarUrl,
       background: user.background,
       learningGoal: user.learningGoal,
       pace: user.pace ?? "medium",
@@ -30,11 +76,15 @@ export class UserService {
       credits: user.credits,
       createdAt: user.createdAt,
     };
+
+    await cacheSet(cacheKeyString, profile, 300);
+
+    return profile;
   }
 
   async updateProfile(
     userId: string,
-    data: UpdateProfileBody
+    data: UpdateProfileBody,
   ): Promise<UserProfile> {
     const [updated] = await db
       .update(users)
@@ -46,10 +96,443 @@ export class UserService {
       throw new NotFoundError("User");
     }
 
+    const profile: UserProfile = {
+      id: updated.id,
+      stellarAddress: updated.stellarAddress,
+      displayName: updated.displayName,
+      avatarUrl: updated.avatarUrl,
+      background: updated.background,
+      learningGoal: updated.learningGoal,
+      pace: updated.pace ?? "medium",
+      language: updated.language ?? "en",
+      credits: updated.credits,
+      createdAt: updated.createdAt,
+    };
+
+    await cacheDel(cacheKey("user", "profile", userId));
+
+    return profile;
+  }
+
+  async getProgress(userId: string): Promise<UserProgress> {
+    const namespace = "user";
+    const cacheKeyString = cacheKey(namespace, "progress", userId);
+
+    const cachedProgress = await cacheGet<UserProgress>(
+      namespace,
+      cacheKeyString,
+    );
+    if (cachedProgress) return cachedProgress;
+
+    const user = await db.query.users.findFirst({
+      where: eq(users.id, userId),
+    });
+
+    if (!user) {
+      throw new NotFoundError("User");
+    }
+
+    const [
+      [enrolledResult],
+      [completedResult],
+      [quizScoreResult],
+      [credResult],
+      [rewardsResult],
+    ] = await Promise.all([
+      db.select({ value: count() }).from(enrollments).where(eq(enrollments.userId, userId)),
+      db.select({ value: count() }).from(enrollments).where(sql`${enrollments.userId} = ${userId} AND ${enrollments.completedAt} IS NOT NULL`),
+      db.select({ total: sql<number>`COALESCE(SUM(${quizSubmissions.score}), 0)` }).from(quizSubmissions).where(eq(quizSubmissions.userId, userId)),
+      db.select({ value: count() }).from(credentials).where(eq(credentials.userId, userId)),
+      db.select({ value: count() }).from(quizSubmissions).where(sql`${quizSubmissions.userId} = ${userId} AND ${quizSubmissions.rewardClaimed} = true`)
+    ]);
+
+    const progress: UserProgress = {
+      enrolledCourses: enrolledResult.value,
+      completedCourses: completedResult.value,
+      totalQuizScore: Number(quizScoreResult.total),
+      credentialsEarned: credResult.value,
+      rewardsClaimed: rewardsResult.value,
+    };
+
+    // #149: was 10s, which is shorter than most request intervals for this
+    // endpoint in practice — the cache was rarely hit, making the Redis
+    // round-trip pure overhead on top of the DB query it was meant to
+    // avoid. Every mutation that actually changes a user's progress
+    // (enroll, credential issuance, reward claim) already explicitly calls
+    // cacheDel on this same key, so a longer TTL doesn't risk serving
+    // stale data after those events — it only affects the fallback expiry
+    // for the rare case nothing invalidated it. Matches DEFAULT_TTL in
+    // cache/index.ts.
+    await cacheSet(cacheKeyString, progress, 60);
+
+    return progress;
+  }
+
+  /**
+   * Module-level progress for one course (#412). Cached 30 seconds.
+   * Distinct from the aggregate GET /users/me/progress payload.
+   */
+  async getCourseProgress(
+    userId: string,
+    courseId: string,
+  ): Promise<UserCourseProgress> {
+    const namespace = "user";
+    const cacheKeyString = cacheKey(
+      namespace,
+      "me-course-progress",
+      userId,
+      courseId,
+    );
+
+    const cached = await cacheGet<UserCourseProgress>(namespace, cacheKeyString);
+    if (cached) return cached;
+
+    const course = await db.query.courses.findFirst({
+      where: eq(courses.id, courseId),
+    });
+    if (!course || !course.isActive) {
+      throw new NotFoundError("Course");
+    }
+
+    const moduleDefinitions = (course.modules ?? []) as CourseModuleDefinition[];
+    const catalog = Array.isArray(course.courseModules) ? course.courseModules : [];
+    const titleById = new Map<string, string>();
+    const durationById = new Map<string, number>();
+    for (const entry of catalog) {
+      if (!entry?.id) continue;
+      if (entry.title) titleById.set(entry.id, entry.title);
+      if (
+        typeof entry.estimatedDurationMinutes === "number" &&
+        entry.estimatedDurationMinutes > 0
+      ) {
+        durationById.set(entry.id, entry.estimatedDurationMinutes);
+      }
+    }
+
+    let moduleIds: string[];
+    if (moduleDefinitions.length > 0) {
+      moduleIds = [...moduleDefinitions]
+        .sort((a, b) => a.order - b.order)
+        .map((module) => module.id);
+      for (const module of moduleDefinitions) {
+        if (module.title) titleById.set(module.id, module.title);
+      }
+    } else {
+      const moduleRows = await db
+        .select({ moduleId: quizzes.moduleId })
+        .from(quizzes)
+        .where(eq(quizzes.courseId, courseId))
+        .groupBy(quizzes.moduleId)
+        .orderBy(quizzes.moduleId);
+      moduleIds = moduleRows.map((row) => row.moduleId);
+    }
+
+    const submissionRows = await db
+      .select({
+        quizId: quizSubmissions.quizId,
+        moduleId: quizzes.moduleId,
+        score: quizSubmissions.score,
+        totalQuestions: sql<number>`COALESCE(jsonb_array_length(${quizzes.questions}), 0)`,
+        submittedAt: quizSubmissions.submittedAt,
+      })
+      .from(quizSubmissions)
+      .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+      .where(
+        and(
+          eq(quizzes.courseId, courseId),
+          eq(quizSubmissions.userId, userId),
+          eq(quizSubmissions.superseded, false),
+        ),
+      )
+      .orderBy(desc(quizSubmissions.submittedAt));
+
+    const completedModuleIds = new Set(submissionRows.map((row) => row.moduleId));
+
+    const quizScores: UserCourseQuizScore[] = submissionRows.map((row) => {
+      const totalQuestions = Number(row.totalQuestions) || 0;
+      const percentage =
+        row.score != null && totalQuestions > 0
+          ? Number(((row.score / totalQuestions) * 100).toFixed(2))
+          : null;
+      return {
+        quizId: row.quizId,
+        moduleId: row.moduleId,
+        score: row.score,
+        totalQuestions,
+        percentage,
+        submittedAt: row.submittedAt,
+      };
+    });
+
+    const scored = quizScores.filter((quiz) => quiz.percentage != null);
+    const averageScore =
+      scored.length > 0
+        ? Number(
+            (
+              scored.reduce((sum, quiz) => sum + (quiz.percentage ?? 0), 0) /
+              scored.length
+            ).toFixed(2),
+          )
+        : null;
+
+    const modulesCompleted = moduleIds.filter((id) =>
+      completedModuleIds.has(id),
+    ).length;
+    const completionPercentage =
+      moduleIds.length > 0
+        ? Math.round((modulesCompleted / moduleIds.length) * 100)
+        : 0;
+
+    const completedWithDuration = moduleIds.filter(
+      (id) => completedModuleIds.has(id) && durationById.has(id),
+    );
+    const timeSpentMinutes =
+      completedWithDuration.length > 0
+        ? completedWithDuration.reduce(
+            (sum, id) => sum + (durationById.get(id) ?? 0),
+            0,
+          )
+        : quizScores.length * 5;
+
+    const progress: UserCourseProgress = {
+      courseId,
+      courseTitle: course.title,
+      modules: moduleIds.map((moduleId) => ({
+        moduleId,
+        title: titleById.get(moduleId) ?? null,
+        status: completedModuleIds.has(moduleId) ? "completed" : "not_started",
+      })),
+      modulesCompleted,
+      quizzesTaken: quizScores.length,
+      quizScores,
+      averageScore,
+      completionPercentage,
+      timeSpentMinutes,
+    };
+
+    await cacheSet(cacheKeyString, progress, 30);
+    return progress;
+  }
+
+  async getActivity(
+    userId: string,
+    query: ActivityQuery,
+  ): Promise<UserActivityPage> {
+    const namespace = "user";
+    const cursor = query.cursor ?? "latest";
+    const cacheKeyString = cacheKey(namespace, "activity", userId, cursor, query.limit);
+
+    const cachedActivity = await cacheGet<UserActivityPage>(
+      namespace,
+      cacheKeyString,
+    );
+    if (cachedActivity) return cachedActivity;
+
+    const cursorDate = query.cursor ? new Date(query.cursor) : null;
+    const limit = query.limit + 1;
+    const beforeCursor = (
+      userIdColumn: AnyPgColumn,
+      timestampColumn:
+        | typeof enrollments.enrolledAt
+        | typeof quizSubmissions.submittedAt
+        | typeof credentials.mintedAt,
+    ): SQL =>
+      cursorDate
+        ? and(eq(userIdColumn, userId), lt(timestampColumn, cursorDate))!
+        : eq(userIdColumn, userId);
+
+    const [enrollmentRows, submissionRows, credentialRows, rewardRows] =
+      await Promise.all([
+        db
+          .select({
+            id: enrollments.id,
+            courseId: enrollments.courseId,
+            courseTitle: courses.title,
+            timestamp: enrollments.enrolledAt,
+          })
+          .from(enrollments)
+          .innerJoin(courses, eq(courses.id, enrollments.courseId))
+          .where(beforeCursor(enrollments.userId, enrollments.enrolledAt))
+          .orderBy(desc(enrollments.enrolledAt))
+          .limit(limit),
+        db
+          .select({
+            id: quizSubmissions.id,
+            quizId: quizSubmissions.quizId,
+            courseId: quizzes.courseId,
+            courseTitle: courses.title,
+            score: quizSubmissions.score,
+            timestamp: quizSubmissions.submittedAt,
+          })
+          .from(quizSubmissions)
+          .innerJoin(quizzes, eq(quizzes.id, quizSubmissions.quizId))
+          .innerJoin(courses, eq(courses.id, quizzes.courseId))
+          .where(beforeCursor(quizSubmissions.userId, quizSubmissions.submittedAt))
+          .orderBy(desc(quizSubmissions.submittedAt))
+          .limit(limit),
+        db
+          .select({
+            id: credentials.id,
+            courseId: credentials.courseId,
+            courseTitle: courses.title,
+            score: credentials.score,
+            mintTxHash: credentials.mintTxHash,
+            timestamp: credentials.mintedAt,
+          })
+          .from(credentials)
+          .innerJoin(courses, eq(courses.id, credentials.courseId))
+          .where(beforeCursor(credentials.userId, credentials.mintedAt))
+          .orderBy(desc(credentials.mintedAt))
+          .limit(limit),
+        db
+          .select({
+            id: quizSubmissions.id,
+            quizId: quizSubmissions.quizId,
+            courseId: quizzes.courseId,
+            courseTitle: courses.title,
+            rewardAmount: quizSubmissions.rewardAmount,
+            txHash: quizSubmissions.txHash,
+            timestamp: quizSubmissions.submittedAt,
+          })
+          .from(quizSubmissions)
+          .innerJoin(quizzes, eq(quizzes.id, quizSubmissions.quizId))
+          .innerJoin(courses, eq(courses.id, quizzes.courseId))
+          .where(
+            cursorDate
+              ? and(
+                  eq(quizSubmissions.userId, userId),
+                  eq(quizSubmissions.rewardClaimed, true),
+                  lt(quizSubmissions.submittedAt, cursorDate),
+                )
+              : and(
+                  eq(quizSubmissions.userId, userId),
+                  eq(quizSubmissions.rewardClaimed, true),
+                ),
+          )
+          .orderBy(desc(quizSubmissions.submittedAt))
+          .limit(limit),
+      ]);
+
+    const activities: UserActivity[] = [
+      ...enrollmentRows.map((row) => ({
+        type: "enrollment" as const,
+        title: `Enrolled in ${row.courseTitle}`,
+        timestamp: row.timestamp,
+        metadata: {
+          enrollmentId: row.id,
+          courseId: row.courseId,
+        },
+      })),
+      ...submissionRows.map((row) => ({
+        type: "quiz_submission" as const,
+        title: `Submitted quiz for ${row.courseTitle}`,
+        timestamp: row.timestamp,
+        metadata: {
+          submissionId: row.id,
+          quizId: row.quizId,
+          courseId: row.courseId,
+          score: row.score,
+        },
+      })),
+      ...credentialRows.map((row) => ({
+        type: "credential_mint" as const,
+        title: `Minted credential for ${row.courseTitle}`,
+        timestamp: row.timestamp,
+        metadata: {
+          credentialId: row.id,
+          courseId: row.courseId,
+          score: row.score,
+          mintTxHash: row.mintTxHash,
+        },
+      })),
+      ...rewardRows.map((row) => ({
+        type: "reward_claim" as const,
+        title: `Claimed quiz reward for ${row.courseTitle}`,
+        timestamp: row.timestamp,
+        metadata: {
+          submissionId: row.id,
+          quizId: row.quizId,
+          courseId: row.courseId,
+          rewardAmount: row.rewardAmount,
+          txHash: row.txHash,
+        },
+      })),
+    ].sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
+
+    const pageItems = activities.slice(0, query.limit);
+    const page: UserActivityPage = {
+      activities: pageItems,
+      nextCursor:
+        activities.length > query.limit && pageItems.length > 0
+          ? pageItems[pageItems.length - 1].timestamp.toISOString()
+          : null,
+    };
+
+    await cacheSet(cacheKeyString, page, 30);
+
+    return page;
+  }
+
+  async updateAvatar(userId: string, upload: AvatarUpload): Promise<UserProfile> {
+    const allowedMimeTypes = new Map([
+      ["image/jpeg", ".jpg"],
+      ["image/png", ".png"],
+      ["image/webp", ".webp"],
+    ]);
+    const extension = allowedMimeTypes.get(upload.mimetype);
+
+    if (!extension) {
+      throw new ValidationError({
+        avatar: ["Avatar must be a JPEG, PNG, or WebP image"],
+      });
+    }
+
+    if (upload.size > config.AVATAR_UPLOAD_MAX_BYTES) {
+      throw new ValidationError({
+        avatar: [
+          `Avatar must be ${config.AVATAR_UPLOAD_MAX_BYTES} bytes or smaller`,
+        ],
+      });
+    }
+
+    const existing = await db.query.users.findFirst({
+      where: eq(users.id, userId),
+    });
+
+    if (!existing) {
+      throw new NotFoundError("User");
+    }
+
+    const uploadDir = path.resolve(config.AVATAR_UPLOAD_DIR);
+    await mkdir(uploadDir, { recursive: true });
+
+    const filename = `${userId}-${crypto.randomUUID()}${extension}`;
+    const filePath = path.join(uploadDir, filename);
+    await writeFile(filePath, upload.buffer);
+
+    const avatarUrlPath = `/uploads/avatars/${filename}`;
+    const avatarUrl = config.PUBLIC_BASE_URL
+      ? new URL(avatarUrlPath, config.PUBLIC_BASE_URL).toString()
+      : avatarUrlPath;
+
+    const [updated] = await db
+      .update(users)
+      .set({ avatarUrl, updatedAt: new Date() })
+      .where(eq(users.id, userId))
+      .returning();
+
+    if (!updated) {
+      throw new NotFoundError("User");
+    }
+
+    await this.deleteLocalAvatar(existing.avatarUrl);
+    await cacheDel(cacheKey("user", "profile", userId));
+
     return {
       id: updated.id,
       stellarAddress: updated.stellarAddress,
       displayName: updated.displayName,
+      avatarUrl: updated.avatarUrl,
       background: updated.background,
       learningGoal: updated.learningGoal,
       pace: updated.pace ?? "medium",
@@ -59,7 +542,27 @@ export class UserService {
     };
   }
 
-  async getProgress(userId: string): Promise<UserProgress> {
+  /**
+   * Soft-deletes the authenticated user's account (#290). Sets deletedAt
+   * (which authGuard checks so a JWT issued before deletion stops working
+   * on the very next authenticated request — no blocklist entry needed)
+   * and clears the free-text profile fields the user directly controls.
+   *
+   * Deliberately does NOT touch enrollments or credentials — those are
+   * preserved for on-chain record consistency, per the issue's explicit
+   * requirement, so a deleted account's learning history and minted
+   * credentials remain intact and queryable.
+   *
+   * updatedAt is not set manually here — the update_users_updated_at
+   * trigger (migration 0009) maintains it on every UPDATE regardless of
+   * which columns changed.
+   */
+  async getLearningPath(userId: string): Promise<Array<{
+    courseId: string;
+    courseTitle: string;
+    difficulty: string;
+    rationale: string;
+  }>> {
     const user = await db.query.users.findFirst({
       where: eq(users.id, userId),
     });
@@ -68,44 +571,484 @@ export class UserService {
       throw new NotFoundError("User");
     }
 
-    const [enrolledResult] = await db
-      .select({ value: count() })
-      .from(enrollments)
-      .where(eq(enrollments.userId, userId));
-
-    const [completedResult] = await db
-      .select({ value: count() })
-      .from(enrollments)
-      .where(
-        sql`${enrollments.userId} = ${userId} AND ${enrollments.completedAt} IS NOT NULL`
-      );
-
-    const [quizScoreResult] = await db
-      .select({
-        total: sql<number>`COALESCE(SUM(${quizSubmissions.score}), 0)`,
-      })
-      .from(quizSubmissions)
-      .where(eq(quizSubmissions.userId, userId));
-
-    const [credResult] = await db
-      .select({ value: count() })
+    // Get completed courses (those with credentials)
+    const completed = await db
+      .select({ courseId: credentials.courseId })
       .from(credentials)
       .where(eq(credentials.userId, userId));
 
-    const [rewardsResult] = await db
-      .select({ value: count() })
-      .from(quizSubmissions)
+    const completedIds = new Set(completed.map((c) => c.courseId));
+
+    // Get currently enrolled courses
+    const enrolled = await db
+      .select({ courseId: enrollments.courseId })
+      .from(enrollments)
       .where(
-        sql`${quizSubmissions.userId} = ${userId} AND ${quizSubmissions.rewardClaimed} = true`
+        and(
+          eq(enrollments.userId, userId),
+          isNull(enrollments.completedAt),
+        ),
       );
 
-    return {
-      enrolledCourses: enrolledResult.value,
-      completedCourses: completedResult.value,
-      totalQuizScore: Number(quizScoreResult.total),
-      credentialsEarned: credResult.value,
-      rewardsClaimed: rewardsResult.value,
+    const enrolledIds = new Set(enrolled.map((e) => e.courseId));
+
+    // Get all active courses ordered by difficulty
+    const allCourses = await db
+      .select()
+      .from(courses)
+      .where(eq(courses.isActive, true))
+      .orderBy(courses.difficulty);
+
+    // Simple recommendation: next difficulty level after highest completed
+    const difficultyOrder = ["beginner", "intermediate", "advanced"];
+    let maxDifficultyIndex = -1;
+
+    for (const course of allCourses) {
+      if (completedIds.has(course.id)) {
+        const idx = difficultyOrder.indexOf(course.difficulty);
+        if (idx > maxDifficultyIndex) {
+          maxDifficultyIndex = idx;
+        }
+      }
+    }
+
+    const recommendations: Array<{
+      courseId: string;
+      courseTitle: string;
+      difficulty: string;
+      rationale: string;
+    }> = [];
+
+    // Recommend courses from next difficulty level
+    const nextDifficultyLevel =
+      maxDifficultyIndex < difficultyOrder.length - 1
+        ? difficultyOrder[maxDifficultyIndex + 1]
+        : null;
+
+    if (nextDifficultyLevel) {
+      for (const course of allCourses) {
+        if (
+          course.difficulty === nextDifficultyLevel &&
+          !completedIds.has(course.id) &&
+          !enrolledIds.has(course.id)
+        ) {
+          recommendations.push({
+            courseId: course.id,
+            courseTitle: course.title,
+            difficulty: course.difficulty,
+            rationale: `Next step in your learning journey: ${nextDifficultyLevel} level`,
+          });
+        }
+      }
+    }
+
+    return recommendations;
+  }
+
+  /**
+   * Personalized course recommendations (#375), cached per user for 1 hour.
+   *
+   * Signals: completed and enrolled courses (tag interests and level reached),
+   * quiz scores, the user's learning goal and background, their pace
+   * preference, and what learners who took the same courses also enrolled in
+   * (collaborative). Each recommendation carries a 0-1 confidence and the
+   * reasons behind it; see ./recommendations.ts for the scoring.
+   */
+  async getRecommendations(userId: string): Promise<ScoredCourse[]> {
+    const namespace = "user";
+    const cacheKeyString = cacheKey(namespace, "recommendations", userId);
+
+    const cached = await cacheGet<ScoredCourse[]>(namespace, cacheKeyString);
+    if (cached) return cached;
+
+    const user = await db.query.users.findFirst({ where: eq(users.id, userId) });
+    if (!user) {
+      throw new NotFoundError("User");
+    }
+
+    const myEnrollments = await db
+      .select({ courseId: enrollments.courseId, completedAt: enrollments.completedAt })
+      .from(enrollments)
+      .where(eq(enrollments.userId, userId));
+    const completedRows = await db
+      .select({ courseId: credentials.courseId })
+      .from(credentials)
+      .where(eq(credentials.userId, userId));
+
+    const myCourseIds = [
+      ...new Set([...myEnrollments.map((e) => e.courseId), ...completedRows.map((c) => c.courseId)]),
+    ];
+    const completedIds = new Set([
+      ...myEnrollments.filter((e) => e.completedAt !== null).map((e) => e.courseId),
+      ...completedRows.map((c) => c.courseId),
+    ]);
+
+    const myCourses =
+      myCourseIds.length > 0
+        ? await db
+            .select({ id: courses.id, tags: courses.tags, difficulty: courses.difficulty })
+            .from(courses)
+            .where(inArray(courses.id, myCourseIds))
+        : [];
+
+    const [scoreRow] = await db
+      .select({
+        avgScorePercent: sql<string | null>`AVG(${quizSubmissions.score}::numeric / NULLIF(jsonb_array_length(${quizzes.questions}), 0) * 100)`,
+      })
+      .from(quizSubmissions)
+      .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+      .where(and(eq(quizSubmissions.userId, userId), eq(quizSubmissions.superseded, false)));
+
+    let highestCompletedLevel = -1;
+    for (const course of myCourses) {
+      if (completedIds.has(course.id)) {
+        highestCompletedLevel = Math.max(
+          highestCompletedLevel,
+          DIFFICULTY_ORDER.indexOf(course.difficulty as (typeof DIFFICULTY_ORDER)[number]),
+        );
+      }
+    }
+
+    // Collaborative signal: courses the user's peers (other learners who took
+    // any of the same courses) enrolled in.
+    const peerEnrollmentCounts = new Map<string, number>();
+    if (myCourseIds.length > 0) {
+      const peers = await db
+        .selectDistinct({ userId: enrollments.userId })
+        .from(enrollments)
+        .where(and(inArray(enrollments.courseId, myCourseIds), ne(enrollments.userId, userId)))
+        .limit(500);
+      if (peers.length > 0) {
+        const rows = await db
+          .select({
+            courseId: enrollments.courseId,
+            peers: sql<number>`COUNT(DISTINCT ${enrollments.userId})`.mapWith(Number),
+          })
+          .from(enrollments)
+          .where(
+            and(
+              inArray(enrollments.userId, peers.map((p) => p.userId)),
+              notInArray(enrollments.courseId, myCourseIds),
+            ),
+          )
+          .groupBy(enrollments.courseId);
+        for (const row of rows) peerEnrollmentCounts.set(row.courseId, row.peers);
+      }
+    }
+
+    const candidateRows = await db
+      .select({
+        id: courses.id,
+        title: courses.title,
+        description: courses.description,
+        difficulty: courses.difficulty,
+        tags: courses.tags,
+      })
+      .from(courses)
+      .where(
+        and(
+          eq(courses.isActive, true),
+          myCourseIds.length > 0 ? notInArray(courses.id, myCourseIds) : undefined,
+        ),
+      );
+    const candidates: CandidateCourse[] = candidateRows.map((row) => ({
+      ...row,
+      tags: row.tags ?? [],
+      peerEnrollments: peerEnrollmentCounts.get(row.id) ?? 0,
+    }));
+
+    const recommendations = rankCourses(
+      {
+        learningGoal: user.learningGoal,
+        background: user.background,
+        pace: user.pace,
+        interestTags: myCourses.flatMap((c) => c.tags ?? []),
+        highestCompletedLevel,
+        averageScorePercent:
+          scoreRow?.avgScorePercent !== null && scoreRow?.avgScorePercent !== undefined
+            ? Number(scoreRow.avgScorePercent)
+            : null,
+      },
+      candidates,
+    );
+
+    await cacheSet(cacheKeyString, recommendations, 3600);
+
+    return recommendations;
+  }
+
+  async deleteAccount(userId: string): Promise<void> {
+    const [deleted] = await db
+      .update(users)
+      .set({
+        deletedAt: new Date(),
+        displayName: null,
+        background: null,
+        learningGoal: null,
+      })
+      .where(eq(users.id, userId))
+      .returning();
+
+    if (!deleted) {
+      throw new NotFoundError("User");
+    }
+
+    const invalidations = await Promise.allSettled([
+      cacheDel(cacheKey("user", "profile", userId)),
+      cacheDel(cacheKey("user", "progress", userId)),
+      cacheDel(cacheKey("user", "enrollments", userId)),
+      cacheInvalidatePattern(cacheKeyPattern("user", "activity", userId)),
+    ]);
+    const failed = invalidations.filter((r) => r.status === "rejected");
+    if (failed.length > 0) {
+      logger.warn(
+        { userId, failedCount: failed.length },
+        "Post-account-deletion cache invalidation had failures — affected views may serve stale data until their TTL expires",
+      );
+    }
+
+    await auditLog("user.account_deleted", { userId });
+    logger.info({ userId }, "Account deleted");
+  }
+
+  /**
+   * GDPR data export — closes #350. Aggregates every category of data the
+   * platform holds on the user into a single downloadable JSON document.
+   */
+  async exportUserData(userId: string): Promise<UserDataExport> {
+    const user = await db.query.users.findFirst({
+      where: eq(users.id, userId),
+    });
+
+    if (!user) {
+      throw new NotFoundError("User");
+    }
+
+    const [enrollmentRows, submissionRows, credentialRows] = await Promise.all([
+      db
+        .select({
+          courseId: enrollments.courseId,
+          courseTitle: courses.title,
+          enrolledAt: enrollments.enrolledAt,
+          completedAt: enrollments.completedAt,
+        })
+        .from(enrollments)
+        .innerJoin(courses, eq(enrollments.courseId, courses.id))
+        .where(eq(enrollments.userId, userId)),
+      db
+        .select({
+          id: quizSubmissions.id,
+          quizId: quizSubmissions.quizId,
+          score: quizSubmissions.score,
+          rewardClaimed: quizSubmissions.rewardClaimed,
+          rewardAmount: quizSubmissions.rewardAmount,
+          txHash: quizSubmissions.txHash,
+          submittedAt: quizSubmissions.submittedAt,
+        })
+        .from(quizSubmissions)
+        .where(eq(quizSubmissions.userId, userId)),
+      db
+        .select({
+          id: credentials.id,
+          courseId: credentials.courseId,
+          courseTitle: courses.title,
+          score: credentials.score,
+          nftAssetCode: credentials.nftAssetCode,
+          nftIssuer: credentials.nftIssuer,
+          mintTxHash: credentials.mintTxHash,
+          revoked: credentials.revoked,
+          mintedAt: credentials.mintedAt,
+        })
+        .from(credentials)
+        .innerJoin(courses, eq(credentials.courseId, courses.id))
+        .where(eq(credentials.userId, userId)),
+    ]);
+
+    const rewardClaims = submissionRows
+      .filter((s) => s.rewardClaimed)
+      .map((s) => ({
+        submissionId: s.id,
+        amount: s.rewardAmount,
+        txHash: s.txHash,
+        claimedAt: s.submittedAt,
+      }));
+
+    const exportData: UserDataExport = {
+      exportVersion: 1,
+      exportedAt: new Date().toISOString(),
+      profile: {
+        id: user.id,
+        stellarAddress: user.stellarAddress,
+        displayName: user.displayName,
+        avatarUrl: user.avatarUrl ?? null,
+        background: user.background,
+        learningGoal: user.learningGoal,
+        pace: user.pace ?? "medium",
+        language: user.language ?? "en",
+        credits: user.credits,
+        createdAt: user.createdAt,
+      },
+      enrollments: enrollmentRows,
+      quizSubmissions: submissionRows.map((s) => ({
+        id: s.id,
+        quizId: s.quizId,
+        score: s.score,
+        submittedAt: s.submittedAt,
+      })),
+      credentials: credentialRows,
+      rewardClaims,
     };
+
+    await auditLog("user.data_exported", { userId });
+
+    return exportData;
+  }
+
+  // ─── Learning Stats (#383) ─────────────────────────────────────────────
+
+  /**
+   * Comprehensive learning statistics for the authenticated user (#383):
+   * total courses completed, quizzes taken, average score (percentage),
+   * credits earned, credentials earned, learning streak (consecutive days
+   * with at least one submission), estimated total study time, and learning
+   * velocity (quizzes in the last 7 days). Cached for 5 minutes.
+   */
+  async getLearningStats(userId: string): Promise<LearningStats> {
+    const namespace = "user";
+    const ck = cacheKey(namespace, "learning-stats", userId);
+
+    const cached = await cacheGet<LearningStats>(namespace, ck);
+    if (cached) return cached;
+
+    const user = await db.query.users.findFirst({
+      where: eq(users.id, userId),
+    });
+    if (!user) {
+      throw new NotFoundError("User");
+    }
+
+    const [
+      [completedResult],
+      [quizAggResult],
+      [credentialResult],
+      [velocityResult],
+      submissionDateRows,
+    ] = await Promise.all([
+      db
+        .select({ value: count() })
+        .from(enrollments)
+        .where(
+          sql`${enrollments.userId} = ${userId} AND ${enrollments.completedAt} IS NOT NULL`,
+        ),
+      db
+        .select({
+          quizCount: count(),
+          avgScore: sql<number | null>`AVG(${quizSubmissions.score}::numeric / NULLIF(jsonb_array_length(${quizzes.questions}), 0) * 100)`,
+        })
+        .from(quizSubmissions)
+        .innerJoin(quizzes, eq(quizSubmissions.quizId, quizzes.id))
+        .where(
+          and(
+            eq(quizSubmissions.userId, userId),
+            eq(quizSubmissions.superseded, false),
+          ),
+        ),
+      db
+        .select({ value: count() })
+        .from(credentials)
+        .where(
+          and(eq(credentials.userId, userId), eq(credentials.revoked, false)),
+        ),
+      db
+        .select({ value: count() })
+        .from(quizSubmissions)
+        .where(
+          sql`${quizSubmissions.userId} = ${userId} AND ${quizSubmissions.submittedAt} >= now() - interval '7 days'`,
+        ),
+      db
+        .select({
+          date: sql<string>`date_trunc('day', ${quizSubmissions.submittedAt})::date`,
+        })
+        .from(quizSubmissions)
+        .where(eq(quizSubmissions.userId, userId))
+        .groupBy(sql`date_trunc('day', ${quizSubmissions.submittedAt})`)
+        .orderBy(sql`date_trunc('day', ${quizSubmissions.submittedAt}) DESC`),
+    ]);
+
+    // Compute learning streak: consecutive days (ending today or yesterday)
+    // with at least one submission.
+    let learningStreak = 0;
+    if (submissionDateRows.length > 0) {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const yesterday = new Date(today);
+      yesterday.setDate(yesterday.getDate() - 1);
+
+      const dateSet = new Set(
+        submissionDateRows.map((r) => r.date),
+      );
+
+      // Start from today; if no submission today, start from yesterday.
+      let cursor = today;
+      if (!dateSet.has(cursor.toISOString().split("T")[0])) {
+        cursor = yesterday;
+        if (!dateSet.has(cursor.toISOString().split("T")[0])) {
+          learningStreak = 0;
+        } else {
+          // Count backwards from yesterday
+          learningStreak = 0;
+          while (dateSet.has(cursor.toISOString().split("T")[0])) {
+            learningStreak++;
+            cursor.setDate(cursor.getDate() - 1);
+          }
+        }
+      } else {
+        learningStreak = 0;
+        while (dateSet.has(cursor.toISOString().split("T")[0])) {
+          learningStreak++;
+          cursor.setDate(cursor.getDate() - 1);
+        }
+      }
+    }
+
+    // Estimate total study time: ~5 minutes per quiz submission (heuristic).
+    const quizzesTaken = quizAggResult?.quizCount ?? 0;
+    const estimatedTotalStudyTimeMinutes = quizzesTaken * 5;
+
+    const stats: LearningStats = {
+      coursesCompleted: completedResult?.value ?? 0,
+      quizzesTaken,
+      averageScore:
+        quizAggResult?.avgScore != null
+          ? Math.round(Number(quizAggResult.avgScore))
+          : null,
+      creditsEarned: user.credits,
+      credentialsEarned: credentialResult?.value ?? 0,
+      learningStreak,
+      estimatedTotalStudyTimeMinutes,
+      learningVelocity: velocityResult?.value ?? 0,
+    };
+
+    await cacheSet(ck, stats, 300);
+    return stats;
+  }
+
+  private async deleteLocalAvatar(avatarUrl: string | null): Promise<void> {
+    if (!avatarUrl) return;
+
+    let pathname = avatarUrl;
+    try {
+      pathname = new URL(avatarUrl).pathname;
+    } catch {
+      // Relative local URL.
+    }
+
+    if (!pathname.startsWith("/uploads/avatars/")) return;
+
+    const filename = path.basename(pathname);
+    await rm(path.join(path.resolve(config.AVATAR_UPLOAD_DIR), filename), {
+      force: true,
+    });
   }
 }
 

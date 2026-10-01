@@ -68,7 +68,7 @@ The API will be available at `http://localhost:3000`.
 | `HOST` | Bind address | `0.0.0.0` |
 | `DATABASE_URL` | PostgreSQL connection string | *required* |
 | `REDIS_URL` | Redis connection string | `redis://localhost:6379` |
-| `JWT_SECRET` | JWT signing secret (32+ chars) | *required* |
+| `JWT_SECRET` | JWT signing secret (64+ chars / 256-bit, non-placeholder) | *required* |
 | `STELLAR_NETWORK` | `testnet` or `mainnet` | `testnet` |
 | `STELLAR_HORIZON_URL` | Horizon server URL | *required* |
 | `STELLAR_SOROBAN_RPC_URL` | Soroban RPC URL | *required* |
@@ -127,9 +127,39 @@ The API will be available at `http://localhost:3000`.
 
 ### Health
 
+The API exposes three health check endpoints with distinct responsibilities:
+
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/health` | Health check |
+| `GET` | `/health/live` | **Liveness** — always returns `200 { status: "ok" }`. Wire to Kubernetes `livenessProbe` or any "is the process alive?" check. A failing liveness probe triggers a container restart. |
+| `GET` | `/health/ready` | **Readiness** — returns `200` when PostgreSQL and Redis are reachable, `503` otherwise. Wire to Kubernetes `readinessProbe` and load balancer health gates. Stellar is deliberately excluded: a blockchain outage must not remove healthy API instances from rotation, since course browsing, quiz taking, and other non-Stellar features continue to work. |
+| `GET` | `/health` | **Full health** — checks all four dependencies (DB, Redis, Stellar Horizon, Soroban RPC). Returns `200 healthy` or `503 degraded`. Intended for monitoring dashboards and alerting only — **do not** wire this to probes that restart containers or pull instances from the load balancer. |
+
+**Example readiness response (healthy):**
+```json
+{
+  "status": "ready",
+  "checks": {
+    "database": "ok",
+    "redis": "ok"
+  }
+}
+```
+
+**Example full health response (Soroban degraded):**
+```json
+{
+  "status": "degraded",
+  "timestamp": "2026-09-30T12:00:00.000Z",
+  "uptime": 3600,
+  "checks": {
+    "database": "ok",
+    "redis": "ok",
+    "stellar_horizon": "ok",
+    "stellar_soroban": "error"
+  }
+}
+```
 
 ## Database Schema
 

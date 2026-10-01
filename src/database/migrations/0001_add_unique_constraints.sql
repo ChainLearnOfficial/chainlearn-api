@@ -1,0 +1,3 @@
+-- NOTE: Unique indexes are defined in schema.ts via uniqueIndex().
+-- This migration is intentionally left empty to avoid duplicate index creation.
+-- Do not add index definitions here; manage them in the Drizzle schema instead.

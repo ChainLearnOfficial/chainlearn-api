@@ -1,7 +1,12 @@
 import type { FastifyRequest, FastifyReply } from "fastify";
 import { userService } from "./user.service.js";
 import type { AuthenticatedRequest } from "../../middleware/auth.js";
-import type { UpdateProfileBody } from "./user.types.js";
+import { config } from "../../config/index.js";
+import { ValidationError } from "../../utils/errors.js";
+import type {
+  ActivityQuery,
+  UpdateProfileBody,
+} from "./user.types.js";
 
 export class UserController {
   /**
@@ -27,7 +32,7 @@ export class UserController {
     reply: FastifyReply
   ): Promise<void> {
     const { authUser } = request as AuthenticatedRequest;
-    const data = (request as any).validatedBody;
+    const data = request.body;
     const profile = await userService.updateProfile(authUser.id, data);
 
     reply.send({ success: true, data: profile });
@@ -45,6 +50,163 @@ export class UserController {
     const progress = await userService.getProgress(authUser.id);
 
     reply.send({ success: true, data: progress });
+  }
+
+  /**
+   * GET /api/v1/users/me/courses/:courseId/progress
+   * Module-level progress for one course (#412).
+   */
+  async getCourseProgress(
+    request: FastifyRequest<{ Params: { courseId: string } }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { authUser } = request as AuthenticatedRequest;
+    const progress = await userService.getCourseProgress(
+      authUser.id,
+      request.params.courseId,
+    );
+
+    reply.send({ success: true, data: progress });
+  }
+
+  /**
+   * GET /api/users/me/activity
+   * Return the authenticated user's recent activity timeline.
+   */
+  async getActivity(
+    request: FastifyRequest<{ Querystring: ActivityQuery }>,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { authUser } = request as AuthenticatedRequest;
+    const activity = await userService.getActivity(authUser.id, request.query);
+
+    reply.send({
+      success: true,
+      data: activity.activities,
+      pagination: {
+        nextCursor: activity.nextCursor,
+      },
+    });
+  }
+
+  /**
+   * GET /api/users/me/learning-path
+   * Get personalized learning path recommendations.
+   */
+  async getLearningPath(
+    request: FastifyRequest,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { authUser } = request as AuthenticatedRequest;
+    const recommendations = await userService.getLearningPath(authUser.id);
+
+    reply.send({
+      success: true,
+      data: recommendations,
+    });
+  }
+
+  /**
+   * GET /api/v1/users/me/recommendations
+   * Personalized course recommendations with confidence scores (#375).
+   */
+  async getRecommendations(
+    request: FastifyRequest,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { authUser } = request as AuthenticatedRequest;
+    const recommendations = await userService.getRecommendations(authUser.id);
+
+    reply.send({ success: true, data: recommendations });
+  }
+
+  /**
+   * GET /api/users/me/export
+   * GDPR data export — returns all of the user's data as a downloadable
+   * JSON file (closes #350).
+   */
+  async exportData(
+    request: FastifyRequest,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { authUser } = request as AuthenticatedRequest;
+    const data = await userService.exportUserData(authUser.id);
+
+    reply
+      .header(
+        "Content-Disposition",
+        `attachment; filename="chainlearn-export-${authUser.id}.json"`
+      )
+      .type("application/json")
+      .send(data);
+  }
+
+  /**
+   * DELETE /api/users/me
+   * Soft-delete the authenticated user's account.
+   */
+  async deleteMe(
+    request: FastifyRequest,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { authUser } = request as AuthenticatedRequest;
+    await userService.deleteAccount(authUser.id);
+
+    reply.status(204).send();
+  }
+
+  /**
+   * PUT /api/users/me/avatar
+   * Upload and replace the authenticated user's avatar image.
+   */
+  async updateAvatar(
+    request: FastifyRequest,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { authUser } = request as AuthenticatedRequest;
+
+    if (!request.isMultipart()) {
+      throw new ValidationError({
+        avatar: ["Request must be multipart/form-data"],
+      });
+    }
+
+    const file = await request.file({
+      limits: {
+        fileSize: config.AVATAR_UPLOAD_MAX_BYTES,
+        files: 1,
+      },
+    });
+
+    if (!file) {
+      throw new ValidationError({
+        avatar: ["Avatar image is required"],
+      });
+    }
+
+    const buffer = await file.toBuffer();
+    const profile = await userService.updateAvatar(authUser.id, {
+      buffer,
+      filename: file.filename,
+      mimetype: file.mimetype,
+      size: buffer.byteLength,
+    });
+
+    reply.send({ success: true, data: profile });
+  }
+
+  /**
+   * GET /api/v1/users/me/learning-stats
+   * Comprehensive learning statistics for the authenticated user (#383).
+   */
+  async getLearningStats(
+    request: FastifyRequest,
+    reply: FastifyReply
+  ): Promise<void> {
+    const { authUser } = request as AuthenticatedRequest;
+    const stats = await userService.getLearningStats(authUser.id);
+
+    reply.send({ success: true, data: stats });
   }
 }
 

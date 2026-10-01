@@ -117,7 +117,6 @@ export async function invokeContract(
 
         const result = await stellarClient.submitTransaction(preparedTx);
         return result.hash;
-      } catch (err: unknown) {
       } catch (err) {
         if (err instanceof StellarError && isBadSeqError(err)) {
           await sequenceCache.invalidate(keypair.publicKey());

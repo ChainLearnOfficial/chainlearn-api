@@ -82,11 +82,6 @@ async function handleBadSeqError(submissionId: string, stellarAddress: string): 
     // pending. Logged at warn (not error) since this is a best-effort
     // diagnostic lookup, not the failure itself — the bad_seq warning below
     // still fires either way.
-    logger.warn(
-      { err, submissionId },
-      "Could not fetch account sequence while handling bad_seq (debugging aid only)",
-    // Intentionally swallow error: sequence fetch is for debugging only
-    // If Horizon is unavailable, we still want to mark the transaction as pending
     logger.debug(
       { err, submissionId, stellarAddress },
       "Could not fetch account sequence for bad_seq diagnostics — Horizon unavailable",
@@ -761,6 +756,8 @@ export class RewardService {
           `Insufficient credits. User balance (${user.credits}) is less than requested deduction amount (${dto.amount}).`,
         );
       }
+    });
+  }
 }
 
 

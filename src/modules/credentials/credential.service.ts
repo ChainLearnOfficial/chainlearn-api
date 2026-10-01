@@ -616,7 +616,7 @@ export class CredentialService {
 
       // Footer / Date & Signatory
       const footerY = doc.y + 20;
-      doc.font('Helvetica').fontSize(12.').fillColor('#475569').text(`Completed on: ${completionDate}`, 80, footerY);
+      doc.font('Helvetica').fontSize(12).fillColor('#475569').text(`Completed on: ${completionDate}`, 80, footerY);
       doc.text('ChainLearn Official Academy', doc.page.width - 280, footerY, { align: 'right' });
 
       doc.end();

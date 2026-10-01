@@ -1,5 +1,6 @@
 import { redis } from "../config/redis.js";
 import { stellarClient } from "./client.js";
+import { auditLog } from "../audit/index.js";
 
 const KEY_PREFIX = "chainlearn:stellar:sequence:";
 // Bounds how long a cached sequence can be trusted before we re-sync with
@@ -72,6 +73,9 @@ export class SequenceCache {
 
   async invalidate(accountId: string): Promise<void> {
     await redis.del(this.key(accountId));
+    auditLog("cache.invalidated", {
+      url: `stellar:sequence:${accountId}`,
+    }).catch(() => {});
   }
 
   async resetTo(accountId: string, seq: bigint): Promise<void> {

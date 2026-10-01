@@ -1,6 +1,10 @@
 import type { FastifyRequest, FastifyReply } from "fastify";
 import { authService } from "./auth.service.js";
 import type { ChallengeBody, VerifyBody } from "./auth.types.js";
+import {
+  recordAuthFailure,
+  clearAuthFailures,
+} from "../../middleware/auth-brute-force.js";
 
 export class AuthController {
   /**
@@ -30,27 +34,33 @@ export class AuthController {
   ): Promise<void> {
     const { stellarAddress, signedChallenge } = (request as any).validatedBody;
 
-    const authResult = await authService.verifyChallenge(
-      stellarAddress,
-      signedChallenge
-    );
+    try {
+      const authResult = await authService.verifyChallenge(
+        stellarAddress,
+        signedChallenge
+      );
 
-    // Generate JWT
-    const token = request.server.jwt.sign(
-      {
-        sub: authResult.user.id,
-        stellarAddress: authResult.user.stellarAddress,
-      },
-      { expiresIn: "24h" }
-    );
+      await clearAuthFailures(request);
 
-    reply.send({
-      success: true,
-      data: {
-        token,
-        user: authResult.user,
-      },
-    });
+      const token = request.server.jwt.sign(
+        {
+          sub: authResult.user.id,
+          stellarAddress: authResult.user.stellarAddress,
+        },
+        { expiresIn: "24h" }
+      );
+
+      reply.send({
+        success: true,
+        data: {
+          token,
+          user: authResult.user,
+        },
+      });
+    } catch (err) {
+      await recordAuthFailure(request);
+      throw err;
+    }
   }
 }
 

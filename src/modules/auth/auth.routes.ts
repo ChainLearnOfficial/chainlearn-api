@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { authController } from "./auth.controller.js";
 import { validate } from "../../middleware/validation.js";
 import { challengeSchema, verifySchema } from "./auth.types.js";
+import { checkIpBlock } from "../../middleware/auth-brute-force.js";
 
 export async function authRoutes(app: FastifyInstance): Promise<void> {
   app.post(
@@ -26,7 +27,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     "/verify",
     {
-      preHandler: [validate({ body: verifySchema })],
+      preHandler: [checkIpBlock, validate({ body: verifySchema })],
       schema: {
         description: "Verify signed challenge and get JWT",
         tags: ["auth"],

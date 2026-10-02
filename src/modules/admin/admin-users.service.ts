@@ -9,6 +9,7 @@ import {
   auditLogs,
 } from "../../database/schema.js";
 import { NotFoundError, ValidationError } from "../../utils/errors.js";
+import { escapeLikePattern } from "../../utils/sanitize.js";
 import { auditLog } from "../../audit/index.js";
 import { logger } from "../../utils/logger.js";
 import {
@@ -37,8 +38,8 @@ export class AdminUsersService {
     const conditions = search
       ? [
           or(
-            ilike(users.stellarAddress, `%${search}%`),
-            ilike(users.displayName, `%${search}%`),
+            ilike(users.stellarAddress, `%${escapeLikePattern(search)}%`),
+            ilike(users.displayName, `%${escapeLikePattern(search)}%`),
           )!,
         ]
       : [];

@@ -33,6 +33,7 @@ import { PASSING_PERCENTAGE } from "../quizzes/quiz.types.js";
 import { auditLog } from "../../audit/index.js";
 import { dispatchWebhook } from "../../services/webhook-dispatcher.js";
 import { waitlistService } from "./waitlist.service.js";
+import { escapeLikePattern } from "../../utils/sanitize.js";
 import {
   cacheGet,
   cacheSet,
@@ -209,7 +210,7 @@ export class CourseService {
         conditions.push(eq(courses.difficulty, query.difficulty));
       }
       if (search) {
-        const escaped = search.replace(/[%_]/g, "\\$&");
+        const escaped = escapeLikePattern(search);
         conditions.push(
           or(
             ilike(courses.title, `%${escaped}%`),

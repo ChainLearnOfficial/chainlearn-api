@@ -20,3 +20,11 @@ export function sanitizeText(input: string): string {
 export function sanitizeQuizFeedback(input: string): string {
   return sanitizeHtml(input, STRICT_OPTIONS);
 }
+
+/**
+ * Escape special LIKE pattern characters (%, _, and \) with backslashes
+ * to prevent wildcard injection in SQL/ORM queries (#533).
+ */
+export function escapeLikePattern(pattern: string): string {
+  return pattern.replace(/[%_\\]/g, "\\$&");
+}

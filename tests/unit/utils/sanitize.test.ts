@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   sanitizeText,
   sanitizeQuizFeedback,
+  escapeLikePattern,
 } from "../../../src/utils/sanitize.js";
 
 describe("sanitizeText", () => {
@@ -34,5 +35,30 @@ describe("sanitizeQuizFeedback", () => {
     expect(out).not.toContain("<img");
     expect(out).not.toContain("onerror");
     expect(out).toContain("Correct!");
+  });
+});
+
+describe("escapeLikePattern (#533)", () => {
+  it("escapes percent wildcards", () => {
+    expect(escapeLikePattern("100%")).toBe("100\\%");
+    expect(escapeLikePattern("%admin%")).toBe("\\%admin\\%");
+  });
+
+  it("escapes underscore wildcards", () => {
+    expect(escapeLikePattern("user_name")).toBe("user\\_name");
+    expect(escapeLikePattern("___")).toBe("\\_\\_\\_");
+  });
+
+  it("escapes backslashes", () => {
+    expect(escapeLikePattern("path\\to")).toBe("path\\\\to");
+  });
+
+  it("handles mixed special characters", () => {
+    expect(escapeLikePattern("50%_discount\\deal")).toBe("50\\%\\_discount\\\\deal");
+  });
+
+  it("leaves standard alphanumeric strings unchanged", () => {
+    expect(escapeLikePattern("GBZX...123 Stellar")).toBe("GBZX...123 Stellar");
+    expect(escapeLikePattern("")).toBe("");
   });
 });

@@ -240,3 +240,8 @@ Tests are located in `tests/` with unit tests under `unit/` and end-to-end API t
 ## License
 
 MIT
+
+
+## Contributing
+
+Please check [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines and development workflow.

@@ -1,6 +1,8 @@
 import type { FastifyRateLimitOptions, RateLimitOptions } from "@fastify/rate-limit";
 import type { FastifyRequest } from "fastify";
 import { config } from "../config/index.js";
+import type { AuthenticatedRequest } from "./auth.js";
+import { auditLog } from "../audit/index.js";
 
 const errorResponseBuilder = (
   _request: FastifyRequest,
@@ -17,10 +19,19 @@ export function rateLimitOptions(): FastifyRateLimitOptions {
     timeWindow: config.RATE_LIMIT_WINDOW_MS,
     keyGenerator: (request: FastifyRequest) => {
       // Prefer authenticated user id, fall back to IP
-      const authReq = request as any;
+      const authReq = request as AuthenticatedRequest;
       return authReq.authUser?.id ?? request.ip;
     },
     errorResponseBuilder,
+    onExceeded: (request: FastifyRequest) => {
+      const authReq = request as AuthenticatedRequest;
+      auditLog("rate_limit.exceeded", {
+        ip: request.ip,
+        userId: authReq.authUser?.id,
+        url: request.url,
+        method: request.method,
+      }).catch(() => {});
+    },
   };
 }
 
@@ -31,12 +42,15 @@ export function rateLimitOptions(): FastifyRateLimitOptions {
 /**
  * Stricter limit for unauthenticated auth endpoints. Each challenge stores a
  * value in Redis, so an attacker hitting the global 100/min limit could
- * exhaust Redis memory. Key by IP since there is no user yet.
+ * exhaust Redis memory. Key by the real TCP connection address — never a
+ * proxy header — so an attacker cannot reset their bucket by spoofing
+ * X-Forwarded-For or X-Real-IP.
  */
 export const authRateLimit: RateLimitOptions = {
   max: 20,
   timeWindow: "5 minutes",
-  keyGenerator: (request: FastifyRequest) => request.ip,
+  keyGenerator: (request: FastifyRequest) =>
+    (request.socket?.remoteAddress ?? request.ip) + ":auth",
   errorResponseBuilder,
 };
 
@@ -46,6 +60,38 @@ export const authRateLimit: RateLimitOptions = {
  */
 export const claimRateLimit: RateLimitOptions = {
   max: 10,
+  timeWindow: "1 minute",
+  keyGenerator: (request: FastifyRequest) => {
+    const authReq = request as AuthenticatedRequest;
+    return authReq.authUser?.id ?? request.ip;
+  },
+  errorResponseBuilder,
+};
+
+/**
+ * Batch credential minting may trigger several sequential on-chain writes in
+ * one request, so keep it tighter than ordinary API traffic.
+ */
+export const batchMintRateLimit: RateLimitOptions = {
+  max: 5,
+  timeWindow: "1 minute",
+  keyGenerator: (request: FastifyRequest) => {
+    const authReq = request as AuthenticatedRequest;
+    return authReq.authUser?.id ?? request.ip;
+  },
+  errorResponseBuilder,
+};
+
+/**
+ * Batch quiz generation (#308) can fan out into up to MAX_BATCH_GENERATE_MODULES
+ * sequential AI service calls per request — each module's own per-module/hour
+ * counter (assertGenerationAllowed) already caps the underlying AI load, but
+ * this route-level limit additionally caps how often the batch endpoint
+ * itself can be hit, mirroring batchMintRateLimit's rationale for other
+ * multi-step endpoints.
+ */
+export const quizBatchGenerationRateLimit: RateLimitOptions = {
+  max: 5,
   timeWindow: "1 minute",
   keyGenerator: (request: FastifyRequest) => {
     const authReq = request as any;

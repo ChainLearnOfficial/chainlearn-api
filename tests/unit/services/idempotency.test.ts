@@ -27,9 +27,23 @@ import {
 
 const mockDb = vi.mocked(db);
 
-function makeChainable(result: unknown) {
-  const chain: Record<string, unknown> = {};
-  chain.then = (resolve: Function, reject: Function) =>
+// A hand-rolled stand-in for a Drizzle query-builder chain: every stage returns
+// the same object so calls can be chained, and awaiting the object resolves
+// `result` — mirroring how a real Drizzle query is both chainable and awaitable.
+//
+// Returned as `any` on purpose. Drizzle's builders (`PgInsertBuilder`,
+// `PgUpdateBuilder`, `PgDeleteBase`) each carry a pile of `undefined`-typed
+// "unavailable in this mode" members, so a purpose-built fake can never satisfy
+// them structurally — and a string index signature doesn't help, because the
+// index signature is on the *source* side, which the checker won't use to satisfy
+// the *target*'s declared members. This fake models only the subset of the
+// builder API the idempotency middleware touches, and is handed straight back
+// to `db.insert` / `db.update` / `db.delete` below.
+type ThenCallback = (value: unknown) => unknown;
+
+function makeChainable(result: unknown): any {
+  const chain: Record<string, any> = {};
+  chain.then = (resolve: ThenCallback, reject: (reason?: unknown) => unknown) =>
     Promise.resolve(result).then(resolve, reject);
   chain.where = vi.fn().mockReturnValue(chain);
   chain.set = vi.fn().mockReturnValue(chain);
@@ -145,7 +159,7 @@ describe("Idempotency Middleware", () => {
   });
 
   describe("storeIdempotentResponse", () => {
-    it("should update the idempotency key with response data", async () => {
+    it("should update the idempotency key with response data scoped to user and endpoint", async () => {
       const updateChain = makeChainable([]);
       const whereChain = makeChainable([]);
       updateChain.where = vi.fn().mockReturnValue(whereChain);
@@ -153,6 +167,8 @@ describe("Idempotency Middleware", () => {
 
       await storeIdempotentResponse(
         "test-key-1234567890",
+        "user-1",
+        "/rewards/claim",
         200,
         { success: true, data: { id: "1" } },
         "tx-hash-abc"
@@ -172,10 +188,16 @@ describe("Idempotency Middleware", () => {
       updateChain.where = vi.fn().mockReturnValue(whereChain);
       mockDb.update.mockReturnValue(updateChain);
 
-      await storeIdempotentResponse("test-key-1234567890", 400, {
-        success: false,
-        error: "Bad request",
-      });
+      await storeIdempotentResponse(
+        "test-key-1234567890",
+        "user-1",
+        "/rewards/claim",
+        400,
+        {
+          success: false,
+          error: "Bad request",
+        }
+      );
 
       expect(updateChain.set).toHaveBeenCalledWith({
         responseStatus: 400,

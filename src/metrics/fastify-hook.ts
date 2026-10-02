@@ -15,6 +15,11 @@ export function registerMetricsHook(app: FastifyInstance): void {
       status_code: String(reply.statusCode),
     };
 
+    if (route === "/health" || route === "/metrics") {
+      done();
+      return;
+    }
+    
     httpRequestsTotal.inc(labels);
 
     if (request._metricsStart != null) {

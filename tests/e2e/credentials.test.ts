@@ -21,11 +21,11 @@ describe("Credentials API", () => {
         "GALICE0000000000000000000000000000000000000000000000000000000",
     });
 
-  describe("GET /api/credentials", () => {
+  describe("GET /api/v1/credentials", () => {
     it("should reject unauthenticated requests", async () => {
       const response = await app.inject({
         method: "GET",
-        url: "/api/credentials",
+        url: "/api/v1/credentials",
       });
 
       expect(response.statusCode).toBe(401);
@@ -38,12 +38,12 @@ describe("Credentials API", () => {
 
       const response = await app.inject({
         method: "GET",
-        url: "/api/credentials",
+        url: "/api/v1/credentials",
         headers: { authorization: `Bearer ${token}` },
       });
 
-      // May return 200 (success), 401 (auth rejected), or 500 (DB unavailable)
-      expect([200, 401, 500]).toContain(response.statusCode);
+      // May return 200 (success) or 401 (auth rejected)
+      expect([200, 401]).toContain(response.statusCode);
       if (response.statusCode === 200) {
         const body = JSON.parse(response.payload);
         expect(body.success).toBe(true);
@@ -52,11 +52,11 @@ describe("Credentials API", () => {
     });
   });
 
-  describe("POST /api/credentials/mint", () => {
+  describe("POST /api/v1/credentials/mint", () => {
     it("should reject unauthenticated requests", async () => {
       const response = await app.inject({
         method: "POST",
-        url: "/api/credentials/mint",
+        url: "/api/v1/credentials/mint",
         payload: {
           courseId: "00000000-0000-0000-0000-000000000001",
           submissionId: "00000000-0000-0000-0000-000000000002",
@@ -73,7 +73,7 @@ describe("Credentials API", () => {
       // Attempt to mint — requires a valid passed submission
       const response = await app.inject({
         method: "POST",
-        url: "/api/credentials/mint",
+        url: "/api/v1/credentials/mint",
         headers: { authorization: `Bearer ${token}` },
         payload: {
           courseId: "00000000-0000-0000-0000-000000000001",
@@ -82,8 +82,8 @@ describe("Credentials API", () => {
         },
       });
 
-      // 201 (minted), 401 (auth rejected), 403 (not passed), 404 (not found), 500 (DB unavailable)
-      expect([201, 401, 403, 404, 500]).toContain(response.statusCode);
+      // 201 (minted), 401 (auth rejected), 403 (not passed), 404 (not found)
+      expect([201, 401, 403, 404]).toContain(response.statusCode);
       if (response.statusCode === 201) {
         const body = JSON.parse(response.payload);
         expect(body.success).toBe(true);
@@ -98,7 +98,7 @@ describe("Credentials API", () => {
 
       const response = await app.inject({
         method: "POST",
-        url: "/api/credentials/mint",
+        url: "/api/v1/credentials/mint",
         headers: { authorization: `Bearer ${token}` },
         payload: {
           courseId: "00000000-0000-0000-0000-000000000001",
@@ -107,8 +107,8 @@ describe("Credentials API", () => {
         },
       });
 
-      // 403 (not passed), 401 (auth rejected), 404 (not found), 500 (DB unavailable)
-      expect([401, 403, 404, 500]).toContain(response.statusCode);
+      // 403 (not passed), 401 (auth rejected), 404 (not found)
+      expect([401, 403, 404]).toContain(response.statusCode);
       if (response.statusCode === 403) {
         const body = JSON.parse(response.payload);
         expect(body.error).toBe("FORBIDDEN");
@@ -121,7 +121,7 @@ describe("Credentials API", () => {
       // First mint attempt
       const first = await app.inject({
         method: "POST",
-        url: "/api/credentials/mint",
+        url: "/api/v1/credentials/mint",
         headers: { authorization: `Bearer ${token}` },
         payload: {
           courseId: "00000000-0000-0000-0000-000000000001",
@@ -134,7 +134,7 @@ describe("Credentials API", () => {
         // Second mint for same course should be rejected
         const response = await app.inject({
           method: "POST",
-          url: "/api/credentials/mint",
+          url: "/api/v1/credentials/mint",
           headers: { authorization: `Bearer ${token}` },
           payload: {
             courseId: "00000000-0000-0000-0000-000000000001",
@@ -143,7 +143,7 @@ describe("Credentials API", () => {
           },
         });
 
-        expect([401, 409, 500]).toContain(response.statusCode);
+        expect([401, 409]).toContain(response.statusCode);
         if (response.statusCode === 409) {
           const body = JSON.parse(response.payload);
           expect(body.error).toBe("CONFLICT");
@@ -156,7 +156,7 @@ describe("Credentials API", () => {
 
       const response = await app.inject({
         method: "POST",
-        url: "/api/credentials/mint",
+        url: "/api/v1/credentials/mint",
         headers: { authorization: `Bearer ${token}` },
         payload: {
           courseId: "00000000-0000-0000-0000-000000000001",

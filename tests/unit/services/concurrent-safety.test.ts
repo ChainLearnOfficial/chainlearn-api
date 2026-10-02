@@ -59,6 +59,7 @@ vi.mock("../../../src/cache/index.js", () => ({
   cacheSet: vi.fn().mockResolvedValue(undefined),
   cacheDel: vi.fn().mockResolvedValue(undefined),
   cacheKey: vi.fn((...parts: string[]) => parts.join(":")),
+  cacheKeyPattern: vi.fn((...parts: string[]) => `${parts.join(":")}:*`),
   cacheInvalidatePattern: vi.fn().mockResolvedValue(undefined),
   cacheHits: { labels: vi.fn().mockReturnValue({ inc: vi.fn() }) },
   cacheMisses: { labels: vi.fn().mockReturnValue({ inc: vi.fn() }) },
@@ -69,12 +70,31 @@ import { rewardService } from "../../../src/modules/rewards/reward.service.js";
 import { credentialService } from "../../../src/modules/credentials/credential.service.js";
 import { courseService } from "../../../src/modules/courses/course.service.js";
 import { quizService } from "../../../src/modules/quizzes/quiz.service.js";
+import { cacheDel, cacheInvalidatePattern, cacheKey, cacheKeyPattern } from "../../../src/cache/index.js";
 
 const mockDb = vi.mocked(db);
 
+// Every hand-rolled query-chain fake below is `any`-typed and makes itself
+// awaitable by attaching a `then` that resolves with the canned row set.
+// `Promise.resolve(result)` infers `Promise<any[]>`, so `Promise.then` demands
+// `(value: any[]) => …` callbacks — a `Function`-typed parameter is not
+// assignable to that. Alias the loose callback type used by those fakes.
+type ThenCallback = (value: any[]) => any;
+
+// Drizzle's builder types carry a pile of `undefined`-typed "unavailable in
+// this mode" members, so a purpose-built fake can never satisfy them
+// structurally. These fakes intentionally model only the `.values().returning()`
+// subset the credential service touches, so hand them over loosely.
+function fakeInsertBuilder(rows: any[]): any {
+  return {
+    values: vi.fn().mockReturnThis(),
+    returning: vi.fn().mockResolvedValue(rows),
+  };
+}
+
 function makeThenable(result: any[]) {
   const obj: any = {};
-  obj.then = (resolve: Function, reject: Function) =>
+  obj.then = (resolve: ThenCallback, reject: (reason: any) => any) =>
     Promise.resolve(result).then(resolve, reject);
   obj.select = vi.fn().mockReturnValue(obj);
   obj.from = vi.fn().mockReturnValue(obj);
@@ -120,7 +140,7 @@ describe("Concurrent Request Safety", () => {
         const tx: any = {};
         const makeChain = (result: any[]) => {
           const c: any = {};
-          c.then = (resolve: Function, reject: Function) =>
+          c.then = (resolve: ThenCallback, reject: (reason: any) => any) =>
             Promise.resolve(result).then(resolve, reject);
           c.select = vi.fn().mockReturnValue(c);
           c.from = vi.fn().mockReturnValue(c);
@@ -155,7 +175,7 @@ describe("Concurrent Request Safety", () => {
         const tx: any = {};
         const makeChain = (result: any[]) => {
           const c: any = {};
-          c.then = (resolve: Function, reject: Function) =>
+          c.then = (resolve: ThenCallback, reject: (reason: any) => any) =>
             Promise.resolve(result).then(resolve, reject);
           c.select = vi.fn().mockReturnValue(c);
           c.from = vi.fn().mockReturnValue(c);
@@ -190,7 +210,7 @@ describe("Concurrent Request Safety", () => {
         const tx: any = {};
         const makeChain = (result: any[]) => {
           const c: any = {};
-          c.then = (resolve: Function, reject: Function) =>
+          c.then = (resolve: ThenCallback, reject: (reason: any) => any) =>
             Promise.resolve(result).then(resolve, reject);
           c.select = vi.fn().mockReturnValue(c);
           c.from = vi.fn().mockReturnValue(c);
@@ -213,24 +233,24 @@ describe("Concurrent Request Safety", () => {
 
   describe("Credential Minting", () => {
     it("should prevent duplicate mint via distributed lock", async () => {
+      const submissionData = [{ id: "sub-1", userId: "user-1", score: 5, quizId: "quiz-1" }];
+      const quizData = [{ id: "quiz-1", courseId: "course-1", questions: [{ id: "q1" }] }];
+      const existingCredData: any[] = [];
+      const userData = [
+        {
+          id: "user-1",
+          stellarAddress:
+            "GALICE0000000000000000000000000000000000000000000000000000000",
+        },
+      ];
+
+      const chainData = [submissionData, quizData, existingCredData, userData];
+      let callIndex = 0;
+
       mockDb.transaction.mockImplementation(async (fn: Function) => {
-        const submissionData = [{ id: "sub-1", userId: "user-1", score: 5, quizId: "quiz-1" }];
-        const quizData = [{ id: "quiz-1", courseId: "course-1" }];
-        const existingCredData: any[] = [];
-        const userData = [
-          {
-            id: "user-1",
-            stellarAddress:
-              "GALICE0000000000000000000000000000000000000000000000000000000",
-          },
-        ];
-
-        const chainData = [submissionData, quizData, existingCredData, userData];
-        let callIndex = 0;
-
         const makeChain = (result: any[]) => {
           const c: any = {};
-          c.then = (resolve: Function, reject: Function) =>
+          c.then = (resolve: ThenCallback, reject: (reason: any) => any) =>
             Promise.resolve(result).then(resolve, reject);
           c.select = vi.fn().mockReturnValue(c);
           c.from = vi.fn().mockReturnValue(c);
@@ -249,6 +269,10 @@ describe("Concurrent Request Safety", () => {
         return fn(rootChain);
       });
 
+      // Mock the direct insert call (outside transaction)
+      const insertChain = fakeInsertBuilder([{ id: "cred-1" }]);
+      mockDb.insert.mockReturnValue(insertChain);
+
       const result = await credentialService.mint(
         "user-1",
         "course-1",
@@ -262,14 +286,14 @@ describe("Concurrent Request Safety", () => {
       mockDb.transaction.mockImplementation(async (fn: Function) => {
         const chainData = [
           [{ id: "sub-1", userId: "user-1", score: 5, quizId: "quiz-1" }],
-          [{ id: "quiz-1", courseId: "course-1" }],
+          [{ id: "quiz-1", courseId: "course-1", questions: [{ id: "q1" }] }],
           [{ id: "cred-existing", userId: "user-1", courseId: "course-1" }],
         ];
         let callIndex = 0;
 
         const makeChain = (result: any[]) => {
           const c: any = {};
-          c.then = (resolve: Function, reject: Function) =>
+          c.then = (resolve: ThenCallback, reject: (reason: any) => any) =>
             Promise.resolve(result).then(resolve, reject);
           c.select = vi.fn().mockReturnValue(c);
           c.from = vi.fn().mockReturnValue(c);
@@ -299,12 +323,13 @@ describe("Concurrent Request Safety", () => {
         const chainData = [
           [{ id: "course-1", isActive: true }],
           [],
+          [{ value: 0 }],
         ];
         let callIndex = 0;
 
         const makeChain = (result: any[]) => {
           const c: any = {};
-          c.then = (resolve: Function, reject: Function) =>
+          c.then = (resolve: ThenCallback, reject: (reason: any) => any) =>
             Promise.resolve(result).then(resolve, reject);
           c.select = vi.fn().mockReturnValue(c);
           c.from = vi.fn().mockReturnValue(c);
@@ -337,7 +362,7 @@ describe("Concurrent Request Safety", () => {
 
         const makeChain = (result: any[]) => {
           const c: any = {};
-          c.then = (resolve: Function, reject: Function) =>
+          c.then = (resolve: ThenCallback, reject: (reason: any) => any) =>
             Promise.resolve(result).then(resolve, reject);
           c.select = vi.fn().mockReturnValue(c);
           c.from = vi.fn().mockReturnValue(c);
@@ -364,7 +389,7 @@ describe("Concurrent Request Safety", () => {
       mockDb.transaction.mockImplementation(async (fn: Function) => {
         const makeChain = (result: any[]) => {
           const c: any = {};
-          c.then = (resolve: Function, reject: Function) =>
+          c.then = (resolve: ThenCallback, reject: (reason: any) => any) =>
             Promise.resolve(result).then(resolve, reject);
           c.select = vi.fn().mockReturnValue(c);
           c.from = vi.fn().mockReturnValue(c);
@@ -410,7 +435,7 @@ describe("Concurrent Request Safety", () => {
 
         const makeChain = (result: any[]) => {
           const c: any = {};
-          c.then = (resolve: Function, reject: Function) =>
+          c.then = (resolve: ThenCallback, reject: (reason: any) => any) =>
             Promise.resolve(result).then(resolve, reject);
           c.select = vi.fn().mockReturnValue(c);
           c.from = vi.fn().mockReturnValue(c);
@@ -431,6 +456,13 @@ describe("Concurrent Request Safety", () => {
         rootChain.select = vi.fn().mockImplementation(() =>
           makeChain(chainData[callIndex++])
         );
+        rootChain.query = {
+          enrollments: {
+            findFirst: vi
+              .fn()
+              .mockResolvedValue({ userId: "user-1", courseId: "course-1" }),
+          },
+        };
         return fn(rootChain);
       });
 
@@ -439,19 +471,29 @@ describe("Concurrent Request Safety", () => {
       });
       expect(result.id).toBe("sub-new");
       expect(result.passed).toBe(true);
+
+      // Verify cache invalidation after quiz submission — the progress cache
+      // (totalQuizScore, rewardsClaimed) and activity timeline cache must be
+      // invalidated so stale data isn't served.
+      expect(cacheDel).toHaveBeenCalledWith(
+        cacheKey("user", "progress", "user-1"),
+      );
+      expect(cacheInvalidatePattern).toHaveBeenCalledWith(
+        cacheKeyPattern("user", "activity", "user-1"),
+      );
     });
 
     it("should throw ConflictError when quiz already submitted", async () => {
       mockDb.transaction.mockImplementation(async (fn: Function) => {
         const chainData = [
-          [{ id: "quiz-1", questions: [] }],
+          [{ id: "quiz-1", courseId: "course-1", questions: [] }],
           [{ id: "existing-sub", userId: "user-1", quizId: "quiz-1" }],
         ];
         let callIndex = 0;
 
         const makeChain = (result: any[]) => {
           const c: any = {};
-          c.then = (resolve: Function, reject: Function) =>
+          c.then = (resolve: ThenCallback, reject: (reason: any) => any) =>
             Promise.resolve(result).then(resolve, reject);
           c.select = vi.fn().mockReturnValue(c);
           c.from = vi.fn().mockReturnValue(c);
@@ -466,6 +508,13 @@ describe("Concurrent Request Safety", () => {
         rootChain.select = vi.fn().mockImplementation(() =>
           makeChain(chainData[callIndex++])
         );
+        rootChain.query = {
+          enrollments: {
+            findFirst: vi
+              .fn()
+              .mockResolvedValue({ userId: "user-1", courseId: "course-1" }),
+          },
+        };
         return fn(rootChain);
       });
 
@@ -480,7 +529,7 @@ describe("Concurrent Request Safety", () => {
       mockDb.transaction.mockImplementation(async (fn: Function) => {
         const makeChain = (result: any[]) => {
           const c: any = {};
-          c.then = (resolve: Function, reject: Function) =>
+          c.then = (resolve: ThenCallback, reject: (reason: any) => any) =>
             Promise.resolve(result).then(resolve, reject);
           c.select = vi.fn().mockReturnValue(c);
           c.from = vi.fn().mockReturnValue(c);

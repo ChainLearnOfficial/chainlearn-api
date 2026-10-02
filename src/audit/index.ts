@@ -1,18 +1,87 @@
 import { logger } from "../utils/logger.js";
+import { db } from "../config/database.js";
+import { auditLogs } from "../database/schema.js";
+import { getRequestId } from "../utils/request-context.js";
 
-type AuditEvent =
+// ─── Types ───────────────────────────────────────────────────────────────────
+
+export type AuditEvent =
   | "quiz.submitted"
+  | "quiz.retried"
   | "reward.claimed"
   | "reward.queued"
+  | "reward.pending_confirmation"
   | "credential.minted"
   | "auth.login"
-  | "auth.login_failed";
+  | "auth.login_failed"
+  | "course.enrolled"
+  | "course.shared"
+  | "course.referral_enrolled"
+  | "course.created"
+  | "course.updated"
+  | "course.draft_saved"
+  | "course.deleted"
+  | "course.published"
+  | "course.duplicated"
+  | "course.cloned"
+  | "course.reviewed"
+  | "course.reported"
+  | "course.imported"
+  | "course.archived"
+  | "course.enrollment_dropped"
+  | "course.waitlist.joined"
+  | "course.waitlist.left"
+  | "course.waitlist.notified"
+  | "user.account_deleted"
+  | "user.data_exported"
+  | "course.module.created"
+  | "course.module.updated"
+  | "course.module.deleted"
+  | "course.module.reordered"
+  | "course.quiz.created"
+  | "course.quiz.updated"
+  | "course.quiz.deleted"
+  | "course.quiz.question.added"
+  | "course.module.content.created"
+  | "course.module.content.updated"
+  | "course.module.content.deleted"
+  | "course.module.content.reordered"
+  | "badge.created"
+  | "badge.updated"
+  | "badge.deleted"
+  | "badge.awarded"
+  | "quiz.feedback.submitted"
+  | "credits.granted"
+  | "credits.deducted"
+  | "announcement.created"
+  | "announcement.updated"
+  | "announcement.deleted"
+  | "webhook.created"
+  | "webhook.updated"
+  | "webhook.deleted"
+  | "webhook.secret_rotated"
+  | "rate_limit.exceeded"
+  | "cache.invalidated";
 
-interface AuditFields {
+export interface AuditFields {
   userId?: string;
   submissionId?: string;
   credentialId?: string;
   courseId?: string;
+  moduleId?: string;
+  moduleIds?: string[];
+  quizId?: string;
+  questionCount?: number;
+  submissionsDeleted?: number;
+  claimedRewardsDeleted?: number;
+  contentId?: string;
+  contentIds?: string[];
+  badgeId?: string;
+  badgeType?: string;
+  badgeName?: string;
+  /** Why a report was filed, or why credits were granted or deducted. */
+  reportId?: string;
+  reason?: string;
   txHash?: string | null;
   amount?: number;
   score?: number;
@@ -21,9 +90,55 @@ interface AuditFields {
   queued?: boolean;
   ip?: string;
   userAgent?: string;
-  [key: string]: unknown;
+  requestId?: string;
+  contentHashMatch?: boolean;
+  onChainContentHash?: string | null;
+  storedContentHash?: string | null;
+  webhookId?: string;
+  position?: number;
+  previousPosition?: number;
+  url?: string;
+  events?: string[];
+  changes?: string[];
+  rating?: number;
+  sourceCourseId?: string;
+  moduleCount?: number;
+  quizCount?: number;
+  announcementId?: string;
+  priority?: string;
+  /** Operator-supplied promotion or external reference for a credit change. */
+  reference?: string;
+  actorId?: string;
+  creditsBefore?: number;
+  creditsAfter?: number;
 }
 
-export function auditLog(event: AuditEvent, fields: AuditFields): void {
-  logger.info({ audit: true, event, ...fields }, `audit: ${event}`);
+export async function auditLog(
+  event: AuditEvent,
+  fields: AuditFields,
+): Promise<void> {
+  const auditFields = { requestId: getRequestId(), ...fields };
+  logger.info({ audit: true, event, ...auditFields }, `audit: ${event}`);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await db.insert(auditLogs).values({ event, fields: auditFields });
+      return;
+    } catch (err) {
+      if (attempt < 2) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, 100 * (attempt + 1)),
+        );
+        continue;
+      }
+      logger.error({ err }, "Failed to persist audit log after 3 attempts");
+      process.stdout.write(
+        JSON.stringify({
+          audit: true,
+          event,
+          ...auditFields,
+          persistError: String(err),
+        }) + "\n",
+      );
+    }
+  }
 }

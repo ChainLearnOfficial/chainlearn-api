@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { updateProfileSchema } from "../../../src/modules/users/user.types.js";
-import { submitQuizSchema } from "../../../src/modules/quizzes/quiz.types.js";
+import { submitQuizSchema, MAX_QUIZ_OPTIONS } from "../../../src/modules/quizzes/quiz.types.js";
 import {
   createCourseSchema,
   listCoursesSchema,
@@ -54,9 +54,17 @@ describe("submitQuizSchema", () => {
     expect(submitQuizSchema.safeParse({ answers: [] }).success).toBe(false);
   });
 
-  it("rejects selectedIndex above the max bound", () => {
+  it("accepts selectedIndex within bounds (up to MAX_QUIZ_OPTIONS - 1)", () => {
+    expect(
+      submitQuizSchema.safeParse({
+        answers: [{ questionId: "q1", selectedIndex: MAX_QUIZ_OPTIONS - 1 }],
+      }).success
+    ).toBe(true);
+  });
+
+  it("rejects selectedIndex at or above the MAX_QUIZ_OPTIONS bound", () => {
     const result = submitQuizSchema.safeParse({
-      answers: [{ questionId: "q1", selectedIndex: 21 }],
+      answers: [{ questionId: "q1", selectedIndex: MAX_QUIZ_OPTIONS }],
     });
     expect(result.success).toBe(false);
   });

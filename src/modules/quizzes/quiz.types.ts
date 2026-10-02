@@ -24,6 +24,16 @@ export const MAX_RETRIES_PER_MODULE_PER_DAY = 3;
 // calls).
 export const MAX_QUIZ_GENERATIONS_PER_MODULE_PER_HOUR = 5;
 
+/** Smallest workable number of choices for a multiple-choice question. */
+export const MIN_QUIZ_OPTIONS = 2;
+
+/**
+ * Upper bound on choices per question (#388, #538).
+ * Aligns both authoredQuestionSchema and submitQuizSchema so a user cannot
+ * submit answer indices beyond the allowable options range.
+ */
+export const MAX_QUIZ_OPTIONS = 10;
+
 // ─── Request Schemas ────────────────────────────────────────────────────────
 
 export const generateQuizSchema = z.object({
@@ -53,8 +63,8 @@ export const submitQuizSchema = z.object({
     .array(
       z.object({
         questionId: z.string().min(1).max(100),
-        // Bound the index so out-of-range values can't be submitted.
-        selectedIndex: z.number().int().min(0).max(20),
+        // Bound the index so out-of-range values can't be submitted (#538).
+        selectedIndex: z.number().int().min(0).max(MAX_QUIZ_OPTIONS - 1),
       })
     )
     .min(1, "At least one answer is required")
@@ -82,13 +92,6 @@ export const quizFeedbackSummaryQuerySchema = z.object({
 });
 
 // ─── Admin: Manual Quiz Authoring (#388) ─────────────────────────────────────
-
-/** Smallest workable number of choices for a multiple-choice question. */
-export const MIN_QUIZ_OPTIONS = 2;
-/** Upper bound on choices per question. Capped well below
- *  submitQuizSchema's static max(20) so a hand-authored question can never
- *  exceed what a submitted answer index can address. */
-export const MAX_QUIZ_OPTIONS = 10;
 
 /**
  * One hand-authored question (#388). Matches the shape QuizService stores

@@ -1,51 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-const { mockUpdate, mockSelect } = vi.hoisted(() => ({
-  mockUpdate: vi.fn(),
-  mockSelect: vi.fn(),
-}));
-
-vi.mock("../../../src/config/database.js", () => ({
-  db: {
-    update: mockUpdate,
-    select: mockSelect,
-  },
-}));
-
-vi.mock("../../../src/utils/logger.js", () => ({
-  logger: {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-  },
-}));
-
-vi.mock("../../../src/config/redis.js", () => ({
-  redis: {
-    get: vi.fn(),
-    set: vi.fn(),
-    del: vi.fn(),
-  },
-}));
-
-describe("reconcile-pending-rewards", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  it("should have proper mock structure", () => {
-    expect(mockUpdate).toBeDefined();
-    expect(mockSelect).toBeDefined();
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 
-const mockUpdate = vi.fn();
-const mockSet = vi.fn();
-const mockWhere = vi.fn();
-const mockSelect = vi.fn();
-const mockFrom = vi.fn();
-const mockWhereSelect = vi.fn();
-const mockLimit = vi.fn();
-const mockTransaction = vi.fn();
+const { mockUpdate, mockSet, mockWhere, mockFrom, mockTransaction } = vi.hoisted(() => ({
+  mockUpdate: vi.fn(),
+  mockSet: vi.fn(),
+  mockWhere: vi.fn(),
+  mockFrom: vi.fn(),
+  mockTransaction: vi.fn(),
+}));
 
 vi.mock("../../../src/config/database.js", () => ({
   db: {
@@ -73,7 +36,7 @@ vi.mock("drizzle-orm", async () => {
   };
 });
 
-const mockGetTransaction = vi.fn();
+const { mockGetTransaction } = vi.hoisted(() => ({ mockGetTransaction: vi.fn() }));
 vi.mock("../../../src/stellar/client.js", () => ({
   stellarClient: {
     getTransaction: mockGetTransaction,
@@ -82,6 +45,14 @@ vi.mock("../../../src/stellar/client.js", () => ({
 
 vi.mock("../../../src/utils/logger.js", () => ({
   logger: { info: vi.fn(), error: vi.fn(), warn: vi.fn() },
+}));
+
+vi.mock("../../../src/config/redis.js", () => ({
+  redis: {
+    get: vi.fn(),
+    set: vi.fn(),
+    del: vi.fn(),
+  },
 }));
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -213,5 +184,74 @@ describe("reconcilePendingRewards (#207)", () => {
 
     expect(mockGetTransaction).not.toHaveBeenCalled();
     expect(mockTransaction).not.toHaveBeenCalled();
+  });
+
+  it("does not throw when the initial pending-submissions query itself rejects (#609/#610 error handling)", async () => {
+    vi.mocked(db.select).mockImplementation(() => {
+      throw new Error("connection pool exhausted");
+    });
+
+    await expect(reconcilePendingRewards()).resolves.not.toThrow();
+    expect(mockGetTransaction).not.toHaveBeenCalled();
+  });
+});
+
+describe("startReconciliationJob / stopReconciliationJob", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    const emptyChain = buildSelectChain([]);
+    vi.mocked(db.select).mockImplementation(() => emptyChain as any);
+  });
+
+  afterEach(async () => {
+    const { stopReconciliationJob } = await import("../../../src/jobs/reconcile-pending-rewards.js");
+    stopReconciliationJob();
+    vi.useRealTimers();
+  });
+
+  it("runs an immediate pass on start, then on a 5-minute interval", async () => {
+    const { startReconciliationJob } = await import("../../../src/jobs/reconcile-pending-rewards.js");
+
+    startReconciliationJob();
+    // Flush the immediate (un-awaited) reconcilePendingRewards() call.
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(vi.mocked(db.select)).toHaveBeenCalled();
+
+    const callsAfterStart = vi.mocked(db.select).mock.calls.length;
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+    expect(vi.mocked(db.select).mock.calls.length).toBeGreaterThan(callsAfterStart);
+  });
+
+  it("stops scheduling further runs once stopped", async () => {
+    const { startReconciliationJob, stopReconciliationJob } = await import(
+      "../../../src/jobs/reconcile-pending-rewards.js"
+    );
+
+    startReconciliationJob();
+    await vi.advanceTimersByTimeAsync(0);
+
+    stopReconciliationJob();
+    const callsAfterStop = vi.mocked(db.select).mock.calls.length;
+
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+    expect(vi.mocked(db.select).mock.calls.length).toBe(callsAfterStop);
+  });
+
+  it("is a no-op if already running", async () => {
+    const { startReconciliationJob } = await import("../../../src/jobs/reconcile-pending-rewards.js");
+
+    startReconciliationJob();
+    await vi.advanceTimersByTimeAsync(0);
+    const callsAfterFirstStart = vi.mocked(db.select).mock.calls.length;
+
+    startReconciliationJob();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // A second start() while already running must not trigger another
+    // immediate run.
+    expect(vi.mocked(db.select).mock.calls.length).toBe(callsAfterFirstStart);
   });
 });

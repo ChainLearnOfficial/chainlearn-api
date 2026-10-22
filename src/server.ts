@@ -19,7 +19,7 @@ import { registerErrorHandler } from "./middleware/error-handler.js";
 import { registerRequestTimeout } from "./middleware/timeout.js";
 import { rateLimitOptions } from "./middleware/rate-limit.js";
 import { listBlockedIps, clearIpBlock } from "./middleware/auth-brute-force.js";
-import { authGuard } from "./middleware/auth.js";
+import { authGuard, adminGuard } from "./middleware/auth.js";
 import { db } from "./config/database.js";
 import { redis } from "./config/redis.js";
 import { stellarClient } from "./stellar/client.js";
@@ -391,13 +391,18 @@ async function buildApp() {
   });
 
   // ─── Admin: Auth IP Blocks ─────────────────────────────────────────────
-  app.get("/admin/auth-blocks", async (_request, reply) => {
-    const blocks = await listBlockedIps();
-    reply.send({ blocks });
-  });
+  app.get(
+    "/admin/auth-blocks",
+    { preHandler: [authGuard, adminGuard] },
+    async (_request, reply) => {
+      const blocks = await listBlockedIps();
+      reply.send({ blocks });
+    },
+  );
 
   app.delete<{ Params: { ip: string } }>(
     "/admin/auth-blocks/:ip",
+    { preHandler: [authGuard, adminGuard] },
     async (request, reply) => {
       const cleared = await clearIpBlock(request.params.ip);
       reply.send({ cleared });

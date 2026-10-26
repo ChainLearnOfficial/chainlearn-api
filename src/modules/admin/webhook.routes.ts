@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifySchema } from "fastify";
 import { webhookController } from "./webhook.controller.js";
-import { adminGuard } from "../../middleware/auth.js";
+import { authGuard, adminGuard } from "../../middleware/auth.js";
 import { validate } from "../../middleware/validation.js";
 import {
   createWebhookSchema,
@@ -15,7 +15,13 @@ const idParamSchema = z.object({
 });
 
 export async function webhookRoutes(app: FastifyInstance): Promise<void> {
-  app.addHook("onRequest", adminGuard);
+  // adminGuard reads request.authUser, which only authGuard sets. Every
+  // other admin router (admin-users, dashboard) registers both; this one
+  // registered only adminGuard, so request.authUser was always undefined
+  // and every request here (admin or not) 500'd on `authUser.isAdmin`
+  // instead of cleanly rejecting with 401/403 (#615).
+  app.addHook("onRequest", authGuard);
+  app.addHook("preHandler", adminGuard);
 
   app.post<{ Body: import("./webhook.types.js").CreateWebhookBody }>(
     "/",

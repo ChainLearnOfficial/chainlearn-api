@@ -53,6 +53,30 @@ describe("generateQuizFromAI", () => {
     expect(result).toEqual(validBody.questions);
   });
 
+  it("sends the request as a POST to /generate-quiz with the snake_case body the AI service expects", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, {
+      quiz_id: "quiz-1",
+      questions: [{ prompt: "Q1", options: ["a", "b"], correct_index: 0 }],
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { generateQuizFromAI } = await loadClient();
+    await generateQuizFromAI(baseParams);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("http://ai.test/generate-quiz");
+    expect(init.method).toBe("POST");
+    expect(init.headers["Content-Type"]).toBe("application/json");
+    expect(JSON.parse(init.body)).toEqual({
+      user_id: baseParams.userId,
+      course_id: baseParams.courseId,
+      module_id: baseParams.moduleId,
+      difficulty: baseParams.difficulty,
+      num_questions: baseParams.numQuestions,
+    });
+  });
+
   it("propagates the current request ID to the AI service", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, {
       quiz_id: "quiz-1",

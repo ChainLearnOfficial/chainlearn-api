@@ -1,3 +1,6 @@
+// Unit test coverage for the AI client, requested in #608: request format,
+// request-ID propagation, malformed responses, retries/circuit breaker, and
+// timeout handling are all covered below.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("../../../src/config/index.js", () => ({

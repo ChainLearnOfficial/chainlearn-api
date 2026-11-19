@@ -7,3 +7,4 @@ coverage/
 !.env.test.example
 *.log
 .worktrees/
+__pycache__/

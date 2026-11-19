@@ -6,3 +6,4 @@ coverage/
 !.env.example
 !.env.test.example
 *.log
+.worktrees/

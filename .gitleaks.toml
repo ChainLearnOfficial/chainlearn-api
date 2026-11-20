@@ -1,6 +1,38 @@
+# gitleaks config — loaded automatically by `gitleaks detect --source .`
+#
+# NOTE (pinned gitleaks v8.30.1): the array-of-tables form `[[allowlist]]`
+# fails to load ("'AllowList' expected a map, got 'slice'") and the singular
+# `[allowlist]` table is a deprecated 9.x-removal shim. The supported
+# multi-entry form is `[[allowlists]]`.
+
 [extend]
 useDefault = true
 
-[[allowlist]]
+# --- Scanner's own inert test payloads -------------------------------------
+[[allowlists]]
 description = "Inert scanner test fixtures"
-paths = ['''tests/malware-scan/fixtures/.*''']
+paths = ['''^tests/malware-scan/fixtures/''']
+
+# --- Baseline: 20 pre-existing generic-api-key findings at c1d9d02 ---------
+# Scoped to the exact files that carry them (anchored paths) and to the
+# generic-api-key rule, so new leaks of any other rule — and any new leak
+# outside these paths — still fail the scan.
+[[allowlists]]
+description = "pre-existing dummy Stellar env values in legacy ci.yml, baselined at c1d9d02 — remove when ci.yml hardening lands"
+paths = ['''^\.github/workflows/ci\.yml$''']
+targetRules = ["generic-api-key"]
+
+[[allowlists]]
+description = "pre-existing JWT test-secret placeholder in src/config/index.ts, baselined at c1d9d02 — remove when the placeholder is rewritten"
+paths = ['''^src/config/index\.ts$''']
+targetRules = ["generic-api-key"]
+
+[[allowlists]]
+description = "pre-existing VALID_SECRET test fixture value, baselined at c1d9d02 — remove when the fixture is rewritten"
+paths = ['''^tests/unit/config/stellar\.test\.ts$''']
+targetRules = ["generic-api-key"]
+
+[[allowlists]]
+description = "pre-existing test-key-1234567890 idempotency fixture value, baselined at c1d9d02 — remove when the fixture is rewritten"
+paths = ['''^tests/unit/services/idempotency\.test\.ts$''']
+targetRules = ["generic-api-key"]

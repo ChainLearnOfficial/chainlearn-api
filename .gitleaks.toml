@@ -1,0 +1,6 @@
+[extend]
+useDefault = true
+
+[[allowlist]]
+description = "Inert scanner test fixtures"
+paths = ['''tests/malware-scan/fixtures/.*''']
